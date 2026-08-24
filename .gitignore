@@ -1,0 +1,7 @@
+# Gradle/Kotlin machine-local state — never useful to another checkout.
+.gradle/
+.kotlin/
+build/
+
+# A JDK pin belongs in ~/.gradle/gradle.properties (per machine), never in the repo.
+local.properties
