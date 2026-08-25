@@ -288,7 +288,7 @@ class MdnsService(
 
         // Pass 2: report anything that is now complete AND different from what we last
         // reported for that instance.
-        for ((key, p) in instances.entries.toList()) {
+        for ((key, p) in instances.entries.concurrentSnapshot()) {
             val svc = resolve(key, p) ?: continue
             if (announced[key] == svc) continue
             announced[key] = svc
@@ -334,7 +334,7 @@ class MdnsService(
      */
     internal fun expireStale(now: Long = clock()): List<String> {
         val dropped = ArrayList<String>()
-        for ((key, p) in instances.entries.toList()) {
+        for ((key, p) in instances.entries.concurrentSnapshot()) {
             if (p.lastSeenAt == 0L || now - p.lastSeenAt <= INSTANCE_TTL_MS) continue
             instances.remove(key)
             announced.remove(key)?.let { dropped.add(it.instanceName); onServiceLost(it.instanceName) }

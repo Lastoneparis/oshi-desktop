@@ -153,7 +153,7 @@ class MeshNode(
         timers?.shutdownNow(); timers = null
         try { serverSocket?.close() } catch (_: Exception) {}
         serverSocket = null
-        for (c in connections.values.toList()) closeQuietly(c)
+        for (c in connections.values.concurrentSnapshot()) closeQuietly(c)
         connections.clear(); peers.clear(); routingTable.clear(); sentIdentityTo.clear()
         seenMessageIds.clear()
     }
