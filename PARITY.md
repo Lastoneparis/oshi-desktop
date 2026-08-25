@@ -36,7 +36,7 @@ The whole messenger minus the pixels. This is where parity is actually won or lo
 | 0.13 | Local message store | Room / CoreData | ⬜ | |
 | 0.14 | Contacts | `ContactPresenceManager`, Android contact tables | ⬜ | |
 | 0.15 | Blob upload/download (media) | `V2BlobClient.kt` | ⬜ | streaming AEAD, manifest key order is load-bearing |
-| 0.16 | Mesh payload ↔ ratchet | `MeshNetworkManager` ↔ `MessageManager` | ⬜ | today the mesh moves OPAQUE payloads |
+| 0.16 | Mesh payload ↔ ratchet | `MeshNetworkManager` ↔ `MessageManager` | ⬜ **blocked, see below** | the mesh does NOT carry V2 — it carries the LEGACY ratchet, and its media is not encrypted at all |
 | 0.17 | Groups | `GroupManager`, `V2GroupSession.swift` | ⬜ | iOS drops Android's `GROUP_UPDATE` over mesh today (see PLAN_MESH.md §7) |
 | 0.18 | Delivery receipts, typing, reactions, edit/delete | `DeliveryReceiptManager`, … | ⬜ | four different date epochs live in these payloads |
 | 0.19 | Location sharing, check-ins, contact cards | `LocationSharingManager`, `CheckInManager` | ⬜ | |
@@ -47,6 +47,22 @@ The whole messenger minus the pixels. This is where parity is actually won or lo
 | 0.24 | Multi-device sync | `V2SyncManager.swift`, `V2Client+Sync.swift` | ⬜ | |
 | 0.25 | Scheduled messages | `ScheduledMessageManager.swift` | ⬜ | |
 | 0.26 | Bots | `BotManager.swift` | ⬜ | server-side API already exists |
+
+### Row 0.16 is not what it looks like — read this before implementing it
+
+The obvious reading of "wire the mesh to the ratchet" is: put a V2 envelope inside the mesh payload. That would produce something no phone can read. What the shipped clients actually put in `CrossPlatformMessage.payload` was checked line by line:
+
+- **Mesh TEXT carries the LEGACY Double Ratchet**, not V2. Android builds it with `encryptWithDoubleRatchet(...)` and sends the resulting `EncryptedEnvelope` JSON straight into `crossPlatformMesh.sendMessage` (`MessageRepository.kt:2079-2081`). V2 lives on the relay path only.
+- **Mesh MEDIA is not end-to-end encrypted on either platform.** Android's own comment says it (`MessageRepository.kt:2415-2426`): the payload is a plaintext JSON envelope with base64 bytes, "both sides currently rely on the underlying TCP/BLE transport for confidentiality on the LAN segment", with the encrypted relay path running in parallel as the upgrade. That is a real, shipped security property and this document is not the place to soften it.
+- **The legacy crypto is Android-coupled and cannot be shared source.** `DoubleRatchet.kt` (855 lines) and `CryptoManager.kt` (681) import `android.util.Base64`, `android.util.Log`, `android.content.Context` and `EncryptedSharedPreferences`, with 63 call sites in the ratchet alone. So making a desktop talk to a PHONE over the mesh means porting a SECOND ratchet — exactly the "third independent implementation" PLAN.md §1 argues against, and this time with no vectors published to check it against.
+
+So the three honest options, none of which should be picked quietly:
+
+1. **Port the legacy stack** (~1500 lines, a second ratchet, no published vectors). Buys phone↔desktop messaging with no internet.
+2. **Teach the phones to carry V2 over the mesh.** One protocol instead of two, and the desktop already has V2. Requires a change on iOS and Android, so it is a product decision rather than a desktop one.
+3. **Ship the desktop mesh as transport-and-discovery only** (what it is today) and route real messages over the relay, which needs internet. Correct, and it means "OSHI works with no internet" is not true of the desktop client — which must then not be claimed in any UI copy.
+
+Until one is chosen, the desktop mesh moves OPAQUE payloads and the CLI says so where someone would be tempted to type a real message into it.
 
 ## Tier 1 — the app
 
