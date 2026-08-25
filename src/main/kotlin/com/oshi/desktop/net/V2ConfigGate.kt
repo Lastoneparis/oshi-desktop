@@ -32,9 +32,22 @@ class V2ConfigGate(
     private val buildNumber: Int = DESKTOP_BUILD,
     private val ttlMillis: Long = 60_000L,
     private val clock: () -> Long = System::currentTimeMillis,
+    private val log: (String) -> Unit = {},
 ) {
     @Volatile private var cachedEnabled = false
     @Volatile private var cachedAt = 0L
+
+    /**
+     * Why the gate last answered what it did — in words, for a human.
+     *
+     * A gate that fails closed and says nothing is undiagnosable from the outside: "V2 is
+     * off" looks identical whether the server disabled it, this build is below the floor,
+     * this identity fell outside the rollout, or the request never left the machine. Each
+     * of those wants a different response from whoever is looking, and this is the only
+     * place that knows which one happened.
+     */
+    @Volatile var lastDecision: String = "not checked yet"
+        private set
     @Volatile private var localOverride = System.getenv("OSHI_V2_FORCE")?.equals("1") == true
 
     private val http: HttpClient = HttpClient.newBuilder()
@@ -64,19 +77,35 @@ class V2ConfigGate(
     }
 
     private fun fetch(userKey: String): Boolean = try {
-        val req = HttpRequest.newBuilder(URI.create("$baseUrl/v2/config"))
+        val url = "$baseUrl/v2/config"
+        val req = HttpRequest.newBuilder(URI.create(url))
             .timeout(Duration.ofSeconds(15)).GET().build()
         val resp = http.send(req, HttpResponse.BodyHandlers.ofString())
-        if (resp.statusCode() !in 200..299) false else {
+        if (resp.statusCode() !in 200..299) {
+            decide(false, "HTTP ${resp.statusCode()} from $url")
+        } else {
             val json = JSONObject(resp.body())
+            val enabled = json.optBoolean("v2_enabled", false)
+            val minBuild = json.optInt("min_build", Int.MAX_VALUE)
+            val rollout = json.optInt("rollout_percent", 0)
+            val bucket = bucket(userKey)
             when {
-                !json.optBoolean("v2_enabled", false) -> false
-                buildNumber < json.optInt("min_build", Int.MAX_VALUE) -> false
-                else -> bucket(userKey) < json.optInt("rollout_percent", 0)
+                !enabled -> decide(false, "the server has v2_enabled=false")
+                buildNumber < minBuild -> decide(false, "this build ($buildNumber) is below the server's min_build ($minBuild)")
+                bucket >= rollout -> decide(false, "this identity is in bucket $bucket, outside the ${rollout}% rollout")
+                else -> decide(true, "bucket $bucket is inside the ${rollout}% rollout")
             }
         }
-    } catch (_: Exception) {
-        false
+    } catch (e: Exception) {
+        // Never reached the server. Distinct from "the server said no", and the two want
+        // different reactions from whoever is reading.
+        decide(false, "could not reach $baseUrl/v2/config: ${e.javaClass.simpleName}: ${e.message}")
+    }
+
+    private fun decide(open: Boolean, why: String): Boolean {
+        lastDecision = (if (open) "OPEN — " else "CLOSED — ") + why
+        log("v2 gate: $lastDecision")
+        return open
     }
 
     companion object {
