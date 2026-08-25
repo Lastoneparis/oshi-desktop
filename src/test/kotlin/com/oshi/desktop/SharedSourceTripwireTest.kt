@@ -3,7 +3,8 @@ package com.oshi.desktop
 import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
-import org.junit.Assume.assumeTrue
+import org.junit.Assert.fail
+import org.junit.Before
 import org.junit.Test
 
 /**
@@ -17,11 +18,41 @@ import org.junit.Test
  */
 class SharedSourceTripwireTest {
 
-    private val androidRoot = File(
-        System.getProperty("oshi.android.root")
-            ?: "/Users/HUGOMORICEAU/Documents/Genesis/OSHI-Android"
-    )
+    /**
+     * The Android tree. `build.gradle.kts` always passes `oshi.android.root`; the fallback
+     * is for running these tests outside Gradle and is RELATIVE on purpose — the absolute
+     * `/Users/...` path that used to live here existed on exactly one machine, so on any
+     * CI runner it resolved to nothing and every test below assumed itself away.
+     */
+    private val androidRoot = File(System.getProperty("oshi.android.root") ?: "../OSHI-Android")
     private val v2Dir = File(androidRoot, "app/src/main/java/com/oshi/messenger/network/v2")
+
+    /**
+     * Absence of the Android tree is a FAILURE here, never a skip.
+     *
+     * This used to be four `assumeTrue`s, and on a Windows or Linux runner that had never
+     * seen the Android tree they turned the project's single most load-bearing guard into
+     * four green skips. They were also unnecessary: the desktop client cannot COMPILE
+     * without these sources — `KeyVault` calls `OSHICryptoV2.jsonEscape` — so any machine
+     * that got as far as running this test has the tree somewhere. What the skip actually
+     * hid was the other case: `oshi.android.root` pointing at a DIFFERENT place than the
+     * `srcDir` the build compiled from, which silently deletes the tripwire while the
+     * build stays green.
+     */
+    @Before
+    fun theAndroidTreeMustBeReadable() {
+        if (!v2Dir.isDirectory) {
+            fail(
+                "the shared crypto sources are not at ${v2Dir.absolutePath}.\n" +
+                    "  This is not a skippable condition: the desktop client compiles those files, so a " +
+                    "build that ran this test must have found them — which means 'oshi.android.root' is " +
+                    "pointing somewhere other than the srcDir build.gradle.kts compiled, and this tripwire " +
+                    "is guarding nothing.\n" +
+                    "  Pass -PoshiAndroidRoot=/path/to/OSHI-Android (or, for a mutation run, " +
+                    "-PoshiAndroidRootOverride=/path/to/a/mutated/copy)."
+            )
+        }
+    }
 
     /** The exact files build.gradle.kts pulls in. Keep the two lists in step. */
     private val sharedFiles = listOf(
@@ -35,7 +66,6 @@ class SharedSourceTripwireTest {
 
     @Test
     fun `the shared crypto sources exist where the build expects them`() {
-        assumeTrue("Android tree not present on this machine", v2Dir.isDirectory)
         for (name in sharedFiles) {
             assertTrue("missing shared source: $name", File(v2Dir, name).isFile)
         }
@@ -49,7 +79,6 @@ class SharedSourceTripwireTest {
      */
     @Test
     fun `no shared crypto source has an android or hilt dependency`() {
-        assumeTrue("Android tree not present on this machine", v2Dir.isDirectory)
         val banned = listOf(
             "import android.", "import androidx.", "import dagger.",
             "import javax.inject", "BuildConfig",
@@ -78,7 +107,6 @@ class SharedSourceTripwireTest {
     @Test
     fun `the FetchedBundle copy still matches the android declaration`() {
         val src = File(v2Dir, "V2KeysClient.kt")
-        assumeTrue("Android tree not present on this machine", src.isFile)
 
         // Strip line comments FIRST: the declaration's own comments contain ')' characters,
         // and cutting on the first one silently truncates the field list to one entry —
@@ -111,7 +139,6 @@ class SharedSourceTripwireTest {
     @Test
     fun `the kdf info strings are unchanged in the shared source`() {
         val src = File(v2Dir, "OSHICryptoV2.kt")
-        assumeTrue("Android tree not present on this machine", src.isFile)
         val text = src.readText()
         for (info in listOf("OSHI_X3DH", "OSHI_DR_ROOT", "OSHI_DR_MSG")) {
             assertTrue("KDF info string '$info' is missing — the protocol has changed",
