@@ -19,12 +19,19 @@ import java.util.UUID
  * Run:  ./gradlew run
  *       ./gradlew run --args="--probe"     (adds one read-only GET to the live server)
  *       ./gradlew run --args="--mesh"      (a live mesh node: mDNS discovery + TCP)
+ *       ./gradlew run --args="--client"    (the client: account, relay, stores, mesh)
  */
 fun main(args: Array<String>) {
     // The mesh node is a long-running program, not a demo that prints and exits, so it
     // takes over main() entirely rather than being step 6 of the walkthrough.
     if (args.contains("--mesh")) {
         com.oshi.desktop.mesh.runMeshCli(args)
+        return
+    }
+
+    // The whole client: a durable account, the V2 relay, the local stores, and the mesh.
+    if (args.contains("--client")) {
+        com.oshi.desktop.app.runClientCli(args)
         return
     }
 

@@ -83,6 +83,18 @@ application {
     mainClass.set("com.oshi.desktop.MainKt")
 }
 
+/**
+ * Give `run` the real console.
+ *
+ * Gradle's JavaExec hands the program an EMPTY stdin by default, so an interactive CLI
+ * reads null on its first line and exits immediately — which looks exactly like a program
+ * that started, printed its banner and crashed. Both `--client` and `--mesh` are REPLs;
+ * without this they can only ever be run non-interactively.
+ */
+tasks.named<JavaExec>("run") {
+    standardInput = System.`in`
+}
+
 tasks.test {
     // Lets the tripwire test be pointed at a mutated copy of the Android tree, so the
     // guard can be watched FAILING instead of merely being green.
