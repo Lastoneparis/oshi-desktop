@@ -33,9 +33,9 @@ The whole messenger minus the pixels. This is where parity is actually won or lo
 | 0.10 | `/v2/messages` send + pull + ack | `V2MessagesClient.kt` | 🟡 | a failed pull is null, never an empty one; one bad envelope costs one message, not the response |
 | 0.11 | `/v2/account` | `V2AccountClient.kt` | 🟡 | 207 is a receipt, not a failure |
 | 0.12 | Message router (send/receive orchestration) | `V2MessageRouter.{swift,kt}` | 🟡 | text path only (no media yet). Driven end to end between two independent clients through a behaving relay: X3DH, ratchet, retry budget, ack discipline, responder TOFU, one bundle fetch per conversation |
-| 0.13 | Local message store | Room / CoreData | ⬜ | |
-| 0.14 | Contacts | `ContactPresenceManager`, Android contact tables | ⬜ | |
-| 0.15 | Blob upload/download (media) | `V2BlobClient.kt` | ⬜ | streaming AEAD, manifest key order is load-bearing |
+| 0.13 | Local message store | Room / CoreData | 🟡 | append-only NDJSON per conversation, O(1) per message. Dedup by msgId ACROSS transports, ordering by the message's own timestamp, a torn last line drops one message and keeps the history. Plaintext on disk — stated and justified in the file, not an oversight |
+| 0.14 | Contacts | `ContactPresenceManager`, Android contact tables | 🟡 | blocking is a FLAG, never a delete; `visible()` hides blocked contacts, `all()` does not |
+| 0.15 | Blob upload/download (media) | `V2BlobClient.kt` | 🟡 | reserve → chunk → status → commit, resume into an existing blob, streaming decrypt straight to a file. Round-tripped through a real in-process blob server, including a non-UTF-8 chunk (the reason the download route needs bytes, not a String) |
 | 0.16 | Mesh payload ↔ ratchet | `MeshNetworkManager` ↔ `MessageManager` | ⬜ **blocked, see below** | the mesh does NOT carry V2 — it carries the LEGACY ratchet, and its media is not encrypted at all |
 | 0.17 | Groups | `GroupManager`, `V2GroupSession.swift` | ⬜ | iOS drops Android's `GROUP_UPDATE` over mesh today (see PLAN_MESH.md §7) |
 | 0.18 | Delivery receipts, typing, reactions, edit/delete | `DeliveryReceiptManager`, … | ⬜ | four different date epochs live in these payloads |

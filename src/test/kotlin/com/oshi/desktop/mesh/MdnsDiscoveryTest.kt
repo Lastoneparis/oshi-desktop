@@ -83,9 +83,21 @@ class MdnsDiscoveryTest {
         "cannot bind/join UDP ${MdnsService.MDNS_PORT}: ${e.javaClass.simpleName}: ${e.message}"
     }
 
-    /** A deterministic, realistically-shaped address: standard base64, padded. */
+    /**
+     * A realistically-shaped address — standard base64, padded — that is UNIQUE to this
+     * test run.
+     *
+     * It used to be a plain SHA-256 of a fixed seed, which is deterministic and therefore
+     * shared by every simultaneous run on the same network. Two runs then advertise the
+     * SAME instance name and the SAME public key, discover each other, and assert that the
+     * peer's port equals their own node's — which it is not. Reported by a second agent
+     * running this suite from its own worktree while this one ran here; on one machine at
+     * a time it looks like a stable test. Multicast is a shared bus, and a test on a shared
+     * bus has to name itself.
+     */
     private fun key(seed: String): String =
         Base64.getEncoder().encodeToString(
-            java.security.MessageDigest.getInstance("SHA-256").digest(seed.toByteArray())
+            java.security.MessageDigest.getInstance("SHA-256")
+                .digest("$seed|${ProcessHandle.current().pid()}|${System.nanoTime()}".toByteArray())
         )
 }

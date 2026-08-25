@@ -120,11 +120,30 @@ class V2Http(
         }
     }
 
-    /** Bytes, for blob downloads. Same signing rules. */
-    fun getBytes(path: String, query: String? = null, withUserHeader: Boolean = true): Pair<Int, ByteArray> {
-        val headers = signer.sign("GET", path, EMPTY, withUserHeader)
+    /**
+     * A GET whose response is BYTES, not text — blob chunks.
+     *
+     * Separate from [get] for one reason that is not stylistic: a chunk body is
+     * AES-GCM ciphertext, and decoding arbitrary bytes as UTF-8 and back is lossy — every
+     * byte sequence that is not valid UTF-8 comes back as a replacement character and the
+     * tag check then fails on data that arrived intact.
+     *
+     * [bodyToHash] is a parameter, not a constant, because the blob store's chunk GET is a
+     * VERIFY-FIRST route: it hashes the two-byte string `""`, while an ordinary GET hashes
+     * zero bytes. Hard-coding the ordinary convention here forced the first caller to build
+     * its own HTTP client to get a 401-free download — one route's signing rule leaking into
+     * a second HTTP stack is exactly how the two drift apart later.
+     */
+    fun getBytes(
+        path: String,
+        query: String? = null,
+        withUserHeader: Boolean = true,
+        bodyToHash: ByteArray = EMPTY,
+        timeout: Duration = readTimeout,
+    ): Pair<Int, ByteArray> {
+        val headers = signer.sign("GET", path, bodyToHash, withUserHeader)
         val url = baseUrl + path + if (query.isNullOrEmpty()) "" else "?$query"
-        val builder = HttpRequest.newBuilder(URI.create(url)).timeout(readTimeout).GET()
+        val builder = HttpRequest.newBuilder(URI.create(url)).timeout(timeout).GET()
         for ((k, v) in headers) builder.header(k, v)
         return try {
             val resp = http.send(builder.build(), HttpResponse.BodyHandlers.ofByteArray())
