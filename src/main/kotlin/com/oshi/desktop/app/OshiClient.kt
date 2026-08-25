@@ -2,6 +2,7 @@ package com.oshi.desktop.app
 
 import com.oshi.desktop.DesktopIdentity
 import com.oshi.desktop.DesktopV2Signer
+import com.oshi.desktop.block.BlockPolicy
 import com.oshi.desktop.mesh.MeshNode
 import com.oshi.desktop.net.RouterState
 import com.oshi.desktop.net.V2AccountClient
@@ -99,11 +100,23 @@ class OshiClient(
     init {
         router.onMessage = { inbound -> receive(inbound) }
         mesh.onMessage = { m ->
-            onMeshTraffic("${m.type} from ${m.senderName} (${m.platform}): ${m.payload.take(200)}")
+            // PARITY.md 0.21. On the mesh the sender key rides the envelope in the clear,
+            // so the block is applied BEFORE the payload is looked at — the position
+            // Android uses at `MessageRepository.kt:2665` ("drop before decryption,
+            // storage or notification"). Unlike the V2 path there is no ratchet of ours
+            // to keep in step here, so there is no reason to look at it at all.
+            if (BlockPolicy.isBlocked(contacts, m.senderPublicKey)) {
+                log("client: dropped mesh ${m.type} from a blocked contact ${m.senderPublicKey.take(12)}…")
+            } else {
+                onMeshTraffic("${m.type} from ${m.senderName} (${m.platform}): ${m.payload.take(200)}")
+            }
         }
         mesh.onPeersChanged = { peers ->
             // A mesh peer's public key IS an OSHI address, so seeing one is a genuine
             // "this contact exists nearby" signal — worth recording. It is NOT a message.
+            // A blocked peer is still RECORDED — blocking hides someone, it does not make
+            // the client forget they exist, and `ContactStore.seen` cannot resurrect a
+            // contact's visibility (it never touches the flag).
             val now = System.currentTimeMillis()
             peers.forEach { contacts.seen(it.publicKey, now, it.displayName) }
         }
@@ -165,7 +178,12 @@ class OshiClient(
      * that wants "did it leave" reads the return value, never the presence of the row.
      */
     fun send(peerAddress: String, text: String): SendOutcome {
-        if (contacts.isBlocked(peerAddress)) return SendOutcome.BLOCKED
+        // Through BlockPolicy, never through `contacts.isBlocked` directly: the store's
+        // lookup is exact, and a block set under one base64 spelling has to hold against
+        // every other spelling of the same key. See BlockPolicy's class note.
+        if (BlockPolicy.outgoingText(contacts, peerAddress) == BlockPolicy.Outbound.REFUSE_BLOCKED) {
+            return SendOutcome.BLOCKED
+        }
 
         val msgId = UUID.randomUUID().toString()
         val now = System.currentTimeMillis()
@@ -200,10 +218,15 @@ class OshiClient(
     // ------------------------------------------------------------------ receive
 
     private fun receive(inbound: V2Inbound) {
-        // A blocked sender's message is dropped HERE, after decryption and before storage:
-        // the relay envelope has already been acked by the router, so refusing earlier
-        // would only strand it on the server. Nothing is stored, so nothing surfaces.
-        if (contacts.isBlocked(inbound.from)) {
+        // A blocked sender's message is dropped HERE, after decryption and before storage.
+        // Two reasons, and the second is the one that is easy to miss: the relay envelope
+        // is acked by the poll loop regardless, so refusing earlier would only strand it
+        // on the server — AND the ratchet has to advance for a blocked sender too, or the
+        // receiving chain falls behind the peer's sending chain and every message after an
+        // UNBLOCK is undecryptable. Android's V2 gate sits in exactly this position
+        // (`MessageRepository.kt:3163`) for the same reason. Nothing is stored, so nothing
+        // surfaces.
+        if (BlockPolicy.inbound(contacts, inbound.from) == BlockPolicy.Inbound.DROP_BLOCKED) {
             log("client: dropped a message from a blocked contact ${inbound.from.take(12)}…")
             return
         }
@@ -231,7 +254,19 @@ class OshiClient(
 
     // ------------------------------------------------------------------ reading
 
-    fun conversations(): List<MessageStore.ConversationSummary> = messages.conversations()
+    /**
+     * The conversation list, with blocked peers withheld — PARITY.md 0.21.
+     *
+     * iOS does the same at `MessageManager.swift:8352`, and again at `:8405` for the
+     * pending (QR-scanned, no messages yet) entries, which is what stops re-scanning
+     * someone's code from resurrecting a thread you blocked. Nothing is deleted: the
+     * history is still in [MessageStore] and comes straight back on unblock.
+     */
+    fun conversations(): List<MessageStore.ConversationSummary> =
+        BlockPolicy.filterConversations(messages.conversations(), contacts) { it.conversationId }
+
+    /** Every conversation including blocked peers — what a "blocked" settings view reads. */
+    fun conversationsIncludingBlocked(): List<MessageStore.ConversationSummary> = messages.conversations()
 
     fun history(peerAddress: String): List<Message> = messages.messages(peerAddress)
 
