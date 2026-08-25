@@ -123,6 +123,10 @@ class MeshNode(
             MeshProtocol.ANNOUNCE_PERIOD_MS,
             TimeUnit.MILLISECONDS,
         )
+        timer.scheduleWithFixedDelay(
+            { try { pruneRoutes() } catch (e: Exception) { log("route cleanup: ${e.message}") } },
+            ROUTE_CLEANUP_PERIOD_MS, ROUTE_CLEANUP_PERIOD_MS, TimeUnit.MILLISECONDS,
+        )
 
         if (enableDiscovery) {
             val svc = MdnsService(
@@ -360,6 +364,32 @@ class MeshNode(
         }
     }
 
+    /**
+     * Drop routes nobody has refreshed lately.
+     *
+     * Both shipped clients run exactly this, every 60 seconds, with a 5-minute cutoff
+     * (CrossPlatformMesh.kt:1602, CrossPlatformMesh.swift:1092). Without it a route
+     * learned by gossip outlives the peer it points at: the destination goes silent —
+     * phone backgrounded, out of range, crashed — while the INTERMEDIATE node we learned
+     * it from stays connected, so [sendOrRelay] keeps handing messages to a live link
+     * that leads nowhere and keeps reporting them SENT. A caller that trusts that answer
+     * never falls back to the relay, and the message is simply gone.
+     *
+     * A live peer's route is refreshed by its own 30-second IDENTITY_ANNOUNCE and by
+     * every content message it sends, so five minutes of silence is ten missed announces.
+     * Directly connected peers are unaffected either way: [sendOrRelay] finds their
+     * socket before it ever consults the routing table.
+     *
+     * @return how many routes were dropped.
+     */
+    internal fun pruneRoutes(now: Long = System.currentTimeMillis()): Int {
+        val cutoff = now - ROUTE_TTL_MS
+        val stale = routingTable.entries.filter { it.value.lastSeen < cutoff }.map { it.key }
+        stale.forEach { routingTable.remove(it) }
+        if (stale.isNotEmpty()) log("mesh: dropped ${stale.size} stale route(s)")
+        return stale.size
+    }
+
     /** @return true if this id is new (and now recorded), false if it was already seen. */
     private fun markSeen(id: String): Boolean {
         synchronized(seenMessageIds) {
@@ -395,7 +425,17 @@ class MeshNode(
                 timestamp = System.currentTimeMillis().toDouble(),
                 hopCount = 0,
                 maxHops = MeshProtocol.MAX_HOPS,
-                seenBy = emptyList(),
+                // The ORIGINATOR is already in seenBy — `[myPublicKey]`, not empty.
+                // Both shipped clients do this (CrossPlatformMesh.swift:282,
+                // CrossPlatformMesh.kt:321) and their broadcast relay floods to every
+                // link NOT named in seenBy. Originating with an empty list means a phone
+                // relaying our message floods it straight back to us; we then treat the
+                // bounce as fresh inbound, write a routing entry pointing at OURSELVES,
+                // and re-flood it. Dedup-by-id and the hop ceiling stop it looping
+                // forever, so it is wasted traffic rather than lost messages — and it is
+                // invisible to any test where both ends are desktops, because they would
+                // share the same wrong convention.
+                seenBy = listOf(myPublicKey),
                 platform = MeshProtocol.PLATFORM,
             )
         )
@@ -534,6 +574,10 @@ class MeshNode(
 
     companion object {
         const val CONNECT_TIMEOUT_MS = 10_000
+
+        /** Route staleness cutoff and sweep period — both shipped clients use 5 min / 60 s. */
+        const val ROUTE_TTL_MS = 300_000L
+        const val ROUTE_CLEANUP_PERIOD_MS = 60_000L
 
         /** `OSHI-` + the first 8 characters of the base64 key — the format both platforms publish. */
         fun instanceLabel(publicKey: String): String =

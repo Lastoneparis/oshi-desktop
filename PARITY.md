@@ -25,14 +25,14 @@ The whole messenger minus the pixels. This is where parity is actually won or lo
 | 0.2 | v=4 relay envelope | `V2ClientModels.swift`, `V2MessagesClient.kt` | ✅ | `DesktopWire.kt`, deterministic emit |
 | 0.3 | Request signing | `V2Signer.kt`, `V2Client.swift:753` | ✅ | `DesktopV2Signer.kt` |
 | 0.4 | Mesh: mDNS discovery + TCP transport | `CrossPlatformMesh.{swift,kt}` | ✅ | verified live against a shipped Android client, both directions |
-| 0.5 | **Key storage that survives a restart** | `KeychainHelper.swift`, Android Keystore | ⬜ | **the gate for everything below.** Per-OS: DPAPI / libsecret / Keychain |
-| 0.6 | Prekey store (SPK + OPK privates) | `V2PrekeyStore.kt` | ⬜ | |
-| 0.7 | Session store (ratchet state, persisted) | `V2SessionStore.{swift,kt}` | ⬜ | persist BEFORE the send, or two sends reuse a key+nonce |
-| 0.8 | `/v2/config` rollout gate | `V2Config.kt` | ⬜ | fail closed; do not publish a bundle until receive is proven |
-| 0.9 | `/v2/keys` publish + fetch + count | `V2KeysClient.kt` | ⬜ | SPK signature verify + TOFU are part of this row |
-| 0.10 | `/v2/messages` send + pull + ack | `V2MessagesClient.kt` | ⬜ | never ack an envelope you could not decrypt |
-| 0.11 | `/v2/account` | `V2AccountClient.kt` | ⬜ | |
-| 0.12 | Message router (send/receive orchestration) | `V2MessageRouter.{swift,kt}` | ⬜ | 797 lines on Android — the largest single piece |
+| 0.5 | **Key storage that survives a restart** | `KeychainHelper.swift`, Android Keystore | ✅ macOS / 🟡 Win+Linux | `KeyVault` (AES-256-GCM) under one OS-held master key. Round-tripped on the REAL macOS Keychain; the DPAPI and libsecret backends are written and unrun. A wrong or missing master key FAILS — it never reads as an empty vault |
+| 0.6 | Prekey store (SPK + OPK privates) | `V2PrekeyStore.kt` | 🟡 | in the vault, not a plain file. Peek-then-burn; pool capped, freshly minted ids never evicted |
+| 0.7 | Session store (ratchet state, persisted) | `V2SessionStore.{swift,kt}` | 🟡 | same JSON shape as Android. A reloaded session decrypts what the live one encrypted (tested). An unreadable record raises rather than reading as "no session" |
+| 0.8 | `/v2/config` rollout gate | `V2ConfigGate` | 🟡 | fails closed on every error path (tested); bucket vectors computed independently and checked against a little-endian read |
+| 0.9 | `/v2/keys` publish + fetch + count | `V2KeysClient.kt` | 🟡 | SPK signature and TOFU both enforced and both watched failing under mutation |
+| 0.10 | `/v2/messages` send + pull + ack | `V2MessagesClient.kt` | 🟡 | a failed pull is null, never an empty one; one bad envelope costs one message, not the response |
+| 0.11 | `/v2/account` | `V2AccountClient.kt` | 🟡 | 207 is a receipt, not a failure |
+| 0.12 | Message router (send/receive orchestration) | `V2MessageRouter.{swift,kt}` | 🟡 | text path only (no media yet). Driven end to end between two independent clients through a behaving relay: X3DH, ratchet, retry budget, ack discipline, responder TOFU, one bundle fetch per conversation |
 | 0.13 | Local message store | Room / CoreData | ⬜ | |
 | 0.14 | Contacts | `ContactPresenceManager`, Android contact tables | ⬜ | |
 | 0.15 | Blob upload/download (media) | `V2BlobClient.kt` | ⬜ | streaming AEAD, manifest key order is load-bearing |
@@ -52,7 +52,7 @@ The whole messenger minus the pixels. This is where parity is actually won or lo
 
 | # | Capability | Status | Note |
 |---|---|---|---|
-| 1.1 | UI framework decision + shell | ⬜ | Compose Multiplatform is the natural fit; deferred until Tier 0 proves out (PLAN.md §1) |
+| 1.1 | UI framework decision + shell | ⬜ | Compose Multiplatform is the natural fit; deferred until Tier 0 proves out (PLAN.md §1). **[VIEWS.md](VIEWS.md) inventories all 102 screens** of the macOS app, with a portability verdict and a reason for each |
 | 1.2 | Chats list, chat view, compose | ⬜ | |
 | 1.3 | Contacts, peers, settings, onboarding | ⬜ | |
 | 1.4 | Media viewers, wallpapers, link previews | ⬜ | |

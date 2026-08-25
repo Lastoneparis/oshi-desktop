@@ -48,6 +48,8 @@ class MdnsService(
     private val onServiceFound: (DiscoveredService) -> Unit,
     private val onServiceLost: (String) -> Unit = {},
     private val log: (String) -> Unit = {},
+    /** Injectable so [expireStale] can be tested without waiting five minutes. */
+    private val clock: () -> Long = System::currentTimeMillis,
 ) {
 
     data class DiscoveredService(
@@ -100,6 +102,8 @@ class MdnsService(
         @Volatile var port: Int? = null,
         @Volatile var target: String? = null,
         @Volatile var txt: Map<String, String>? = null,
+        /** When we last heard ANY record for this instance — the input to [expireStale]. */
+        @Volatile var lastSeenAt: Long = 0L,
     )
 
     fun start() {
@@ -145,6 +149,11 @@ class MdnsService(
         // Browse with the RFC 6762 §5.2 backoff: 1 s, doubling, capped at 60 s. A fixed
         // fast interval is how a mesh app becomes the loudest thing on a conference Wi-Fi.
         scheduleQuery(timer, 0L, 1000L)
+
+        timer.scheduleWithFixedDelay(
+            { safely { expireStale() } },
+            INSTANCE_SWEEP_MS, INSTANCE_SWEEP_MS, TimeUnit.MILLISECONDS,
+        )
     }
 
     fun stop() {
@@ -209,6 +218,16 @@ class MdnsService(
         }, delay, TimeUnit.MILLISECONDS)
     }
 
+    /**
+     * Feed a decoded response straight into the browser, with no socket.
+     *
+     * Test seam, and a deliberately narrow one: it takes the SAME already-decoded message
+     * the receive loop would hand to [handleResponse], so a test exercises the real
+     * discovery logic — resolve, promote, de-duplicate — without needing multicast to work
+     * on the machine running it.
+     */
+    internal fun acceptForTest(msg: MdnsCodec.Message) = handleResponse(msg)
+
     private fun handleResponse(msg: MdnsCodec.Message) {
         val records = msg.allRecords
 
@@ -228,9 +247,9 @@ class MdnsService(
                         announced.remove(key)?.let { onServiceLost(it.instanceName) }
                         continue
                     }
+                    instances.getOrPut(key) { Partial() }.lastSeenAt = clock()
                     val known = instances[key]
                     if (known?.port == null || known.txt == null) {
-                        instances.putIfAbsent(key, Partial())
                         // Ask for the two records that turn a name into an address. Most
                         // responders already sent them as additionals — this is the
                         // fallback for the ones that did not.
@@ -251,6 +270,7 @@ class MdnsService(
                     val p = instances.getOrPut(key) { Partial() }
                     p.port = r.port
                     p.target = r.target.toString()
+                    p.lastSeenAt = clock()
                     if (hostAddresses[r.target.toString().lowercase()] == null) {
                         query(listOf(MdnsCodec.Question(r.target, MdnsCodec.TYPE_A, MdnsCodec.CLASS_IN)))
                     }
@@ -258,7 +278,9 @@ class MdnsService(
                 is MdnsCodec.Record.Txt -> {
                     if (!r.name.endsWith(serviceType) || isSelf(r.name)) continue
                     if (r.isGoodbye) continue
-                    instances.getOrPut(r.name.toString().lowercase()) { Partial() }.txt = r.asMap()
+                    instances.getOrPut(r.name.toString().lowercase()) { Partial() }.let {
+                        it.txt = r.asMap(); it.lastSeenAt = clock()
+                    }
                 }
                 else -> {}
             }
@@ -293,6 +315,32 @@ class MdnsService(
         // MeshNode.
         if (svc.publicKey.isEmpty()) return null
         return svc
+    }
+
+    /**
+     * Forget instances that have gone quiet.
+     *
+     * A peer that vanishes without sending a goodbye — laptop closed, cable pulled,
+     * process killed — leaves its PTR/SRV/TXT in this cache forever, and it keeps being
+     * offered as a discovered peer that nothing can connect to. mDNS's own answer is the
+     * record TTL; ours is simpler and stricter: we re-query on a backoff capped at 60 s,
+     * so anything alive is re-answered several times inside this window.
+     *
+     * Deliberately NOT tied to the advertised TTL (4500 s on the PTR): that is Bonjour's
+     * cache lifetime for a network where queriers refresh at 80% of it, and honouring it
+     * literally would mean showing a dead peer for over an hour.
+     *
+     * @return the instance names dropped.
+     */
+    internal fun expireStale(now: Long = clock()): List<String> {
+        val dropped = ArrayList<String>()
+        for ((key, p) in instances.entries.toList()) {
+            if (p.lastSeenAt == 0L || now - p.lastSeenAt <= INSTANCE_TTL_MS) continue
+            instances.remove(key)
+            announced.remove(key)?.let { dropped.add(it.instanceName); onServiceLost(it.instanceName) }
+        }
+        if (dropped.isNotEmpty()) log("mDNS: expired ${dropped.size} silent peer(s)")
+        return dropped
     }
 
     private fun isSelf(name: MdnsCodec.Name): Boolean =
@@ -362,6 +410,10 @@ class MdnsService(
         /** Bonjour's own convention: 75 min for the shared/PTR + TXT, 2 min for host records. */
         const val TTL_SHARED = 4500
         const val TTL_HOST = 120
+
+        /** How long a silent instance stays discovered, and how often we check. */
+        const val INSTANCE_TTL_MS = 300_000L
+        const val INSTANCE_SWEEP_MS = 30_000L
 
         /**
          * Interfaces worth joining on: up, multicast-capable, with an IPv4 address.

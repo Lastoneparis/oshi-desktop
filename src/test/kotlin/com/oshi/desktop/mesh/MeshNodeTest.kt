@@ -121,7 +121,9 @@ class MeshNodeTest {
         val m = atC.first()
         assertEquals("through the middle", m.payload)
         assertEquals("the relay must have bumped the hop count", 1, m.hopCount)
-        assertEquals("the relay must have recorded itself", listOf(KEY_B), m.seenBy)
+        // The originator is already there (both shipped clients originate with
+        // `seenBy = [myPublicKey]`), and the relay appends itself — in that order.
+        assertEquals("seenBy must read origin-then-relay", listOf(KEY_A, KEY_B), m.seenBy)
         assertEquals("the original sender must survive the relay", KEY_A, m.senderPublicKey)
     }
 
@@ -217,6 +219,64 @@ class MeshNodeTest {
         waitUntil("A kept a route whose next hop is gone") { a.routes().isEmpty() }
         assertTrue("A kept a peer entry for a dead link", a.peers().none { it.publicKey == KEY_B })
         assertFalse("a send into a dead link must fail", a.sendMessage(KEY_C, "nobody there"))
+    }
+
+    /**
+     * Both shipped clients put the ORIGINATOR in `seenBy` when they create a message
+     * (CrossPlatformMesh.swift:282, CrossPlatformMesh.kt:321), and their broadcast relay
+     * floods to every link NOT named there. Originating with an empty list means a phone
+     * relaying our message floods it straight back at us.
+     *
+     * Found by an audit against the shipped sources, not by a desktop test — and it could
+     * not have been: with both ends running this code, the wrong convention is symmetric
+     * and invisible. This test is therefore written against the RULE, not against
+     * behaviour observed between two desktops.
+     */
+    @Test
+    fun `an originated message already lists this node in seenBy`() {
+        val a = node("A", KEY_A)
+        val b = node("B", KEY_B)
+        val received = ConcurrentLinkedQueue<MeshMessage>()
+        val got = CountDownLatch(1)
+        b.onMessage = { received.add(it); got.countDown() }
+
+        a.connectToPeer("127.0.0.1", b.listenPort, KEY_B)
+        waitUntil("no connection") { a.isConnectedTo(KEY_B) && b.isConnectedTo(KEY_A) }
+        a.sendMessage(KEY_B, "who has seen this")
+        assertTrue(got.await(10, TimeUnit.SECONDS))
+
+        assertEquals("the originator must name itself, so a relaying peer does not bounce it back",
+            listOf(KEY_A), received.first().seenBy)
+    }
+
+    /**
+     * A route learned by gossip must not outlive the peer it points at. Both shipped
+     * clients sweep every 60 s with a 5-minute cutoff; without it, [sendOrRelay] keeps
+     * handing messages to a live intermediate link that leads to a node which is gone,
+     * and keeps reporting them sent.
+     */
+    @Test
+    fun `a route nobody has refreshed for five minutes is dropped`() {
+        val a = node("A", KEY_A)
+        val b = node("B", KEY_B)
+        val c = node("C", KEY_C)
+        a.connectToPeer("127.0.0.1", b.listenPort, KEY_B)
+        c.connectToPeer("127.0.0.1", b.listenPort, KEY_B)
+        waitUntil("chain not formed") { b.isConnectedTo(KEY_A) && b.isConnectedTo(KEY_C) }
+        waitUntil("A never learned a route to C") { a.routes().containsKey(KEY_C) }
+
+        val now = System.currentTimeMillis()
+        assertEquals("a fresh route must survive a sweep", 0, a.pruneRoutes(now))
+        assertTrue(a.routes().containsKey(KEY_C))
+
+        val dropped = a.pruneRoutes(now + MeshNode.ROUTE_TTL_MS + 1)
+        assertTrue("nothing was dropped after the cutoff", dropped > 0)
+        assertTrue("the stale route survived", !a.routes().containsKey(KEY_C))
+
+        // A DIRECT peer is unaffected in practice: sendOrRelay finds its socket before it
+        // ever consults the routing table.
+        assertTrue("a direct link must still be usable after its route expired",
+            a.sendMessage(KEY_B, "still reachable"))
     }
 
     // ------------------------------------------------------------------ helpers
