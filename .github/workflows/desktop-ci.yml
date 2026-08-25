@@ -1,0 +1,534 @@
+# ==============================================================================
+# OSHI desktop client — CI
+# ==============================================================================
+#
+# WHERE THIS FILE HAS TO LIVE — READ THIS FIRST.
+#
+# GitHub Actions only reads workflows from `.github/workflows/` at the ROOT OF THE
+# REPOSITORY. This file is checked in at `OSHI-Desktop/.github/workflows/`, which is
+# where the desktop client keeps its own files — and inside the current monorepo
+# (`Genesis/`, which also holds `OSHI/` and `OSHI-Android/`) that path is NOT the repo
+# root, so **as committed here this workflow is inert: GitHub will never run it.**
+# It was put here anyway because the brief for this pass forbids touching anything
+# outside `OSHI-Desktop/`, and a workflow that is one `git mv` from working is worth
+# more than one that does not exist.
+#
+# To actually run it, pick one:
+#   (a) monorepo — move/copy this file to `<repo root>/.github/workflows/desktop-ci.yml`.
+#       Everything below already handles the desktop client living in a subdirectory.
+#   (b) the desktop client gets its own repo — then `OSHI-Desktop/` IS the root, this
+#       path is already correct, and the "locate the project" step below resolves
+#       PROJECT_DIR to `.` on its own. The sibling trees then have to be fetched (see
+#       the shared-source step).
+#
+# NOTHING IN THIS FILE HAS BEEN EXECUTED. It cannot be: there is no GitHub Actions
+# runner on the machine it was written on, and the two platforms it exists to cover are
+# the two this project has no access to. Every claim about Windows and Linux behaviour
+# below is a claim about what the code SHOULD do, and stays that way until a run
+# appears in the Actions tab. Do not move PARITY.md row 0.5 to green on the strength of
+# this file existing — only on the strength of a green run of it.
+#
+# ------------------------------------------------------------------------------
+# WHAT THIS IS FOR
+#
+# PARITY.md row 0.5 ("key storage that survives a restart") is ✅ on macOS and 🟡 on
+# Windows and Linux for one reason: `WindowsDpapiStore` and `LinuxSecretToolStore` are
+# written and have never been RUN. They cannot be run on the machine this project is
+# developed on. This workflow is the cheapest way to run them — the JVM test suite on
+# `windows-latest` and `ubuntu-latest`, against the real DPAPI and a real gnome-keyring.
+#
+# THE FAILURE THIS FILE IS BUILT AGAINST is not a red build, it is a GREEN one that
+# measured nothing: "Executed 0 tests" + "BUILD SUCCESSFUL", or a secret-store test that
+# quietly assumed itself away because the runner had no keyring. Three separate things
+# guard against it, and they are deliberately redundant:
+#   1. `build.gradle.kts` counts the tests that RAN and fails below `-PminTests`.
+#   2. the "test census" step below re-derives that count from the JUnit XML — after
+#      deleting the results directory first, so a stale file cannot answer for a run
+#      that never happened. It fails on a zero count, on a count below the per-OS floor,
+#      on any failure or error, and on more skips than the platform can legitimately
+#      have.
+#   3. `SecretStoreTest` reads `OSHI_EXPECT_SECRET_STORE` and turns "no OS key store on
+#      this machine" from a skip into a failure, naming the backend that must be in use.
+#      A Linux job that never started its keyring fails; it does not pass quietly.
+
+name: desktop-ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: desktop-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  # ============================================================================
+  # The JVM test suite, on all three desktop operating systems.
+  # ============================================================================
+  test:
+    name: test / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false          # a Windows failure must not hide the Linux result
+      matrix:
+        include:
+          - os: macos-latest
+            # The backend that MUST be the one under test on this runner. Not just
+            # "some store": a Linux job that fell through to another backend would
+            # prove nothing about libsecret.
+            expect_store: Keychain
+            # Floors, not targets. 199 tests executed / 0 skipped is what this suite
+            # actually did on a developer Mac on 2026-08-25 (`./gradlew test`). The
+            # margin below that is for the skips a runner can legitimately have:
+            #   * 1 — MdnsDiscoveryTest, if the runner has no multicast-capable NIC
+            #   * 2 — the two POSIX-only process tests, on Windows only
+            # Anything else that skips is a regression and the census turns it red.
+            # These numbers ratchet: when the suite grows, RAISE them.
+            min_tests: 195
+            max_skipped: 4
+          - os: ubuntu-latest
+            expect_store: libsecret
+            min_tests: 195
+            max_skipped: 4
+          - os: windows-latest
+            expect_store: DPAPI
+            min_tests: 193
+            max_skipped: 6
+
+    steps:
+      - name: Check out the repository this workflow lives in
+        uses: actions/checkout@v4
+
+      # ----------------------------------------------------------------------
+      # Which layout are we in? Both are supported and neither is guessed at
+      # silently: if the desktop client cannot be found, the job stops here.
+      - name: Locate the desktop project
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f "OSHI-Desktop/settings.gradle.kts" ]; then
+            dir="OSHI-Desktop"                      # monorepo layout
+          elif [ -f "settings.gradle.kts" ] && grep -q 'rootProject.name = "OSHI-Desktop"' settings.gradle.kts; then
+            dir="."                                 # the desktop client is its own repo
+          else
+            echo "::error::Cannot find the OSHI desktop project. Expected either" \
+                 "OSHI-Desktop/settings.gradle.kts (monorepo) or a settings.gradle.kts" \
+                 "at the repo root naming rootProject 'OSHI-Desktop'."
+            exit 1
+          fi
+          echo "PROJECT_DIR=$dir" >> "$GITHUB_ENV"
+          echo "Desktop project at: $dir"
+
+      # ----------------------------------------------------------------------
+      # THE SIBLING TREES. This is the part a CI checkout does not get for free.
+      #
+      # `build.gradle.kts` compiles six Kotlin files STRAIGHT OUT OF `../OSHI-Android`
+      # — no copy step, by design (that is the project's whole "shared source, not a
+      # port" claim). The wire-parity tests additionally READ `../OSHI`.
+      #
+      # So what does a CI checkout have?
+      #   * monorepo: both trees, for free — they are siblings in the same repository.
+      #   * desktop-only repo: NEITHER. And the consequence is not a skipped test, it
+      #     is a compile failure: `KeyVault.kt` calls `OSHICryptoV2.jsonEscape`, so
+      #     without the Android tree `compileKotlin` fails with an unresolved
+      #     reference. That is the honest, loud behaviour and it is left alone.
+      #     Set the repository variable SHARED_SOURCE_REPO (e.g. `org/OSHI-private`)
+      #     and the secret SHARED_SOURCE_TOKEN (a PAT with read access) and this step
+      #     fetches just the subtrees the build and the tests read.
+      #
+      # The iOS tree is genuinely optional — two mesh parity tests skip without it —
+      # but the census's max_skipped will notice if it goes missing, which is the
+      # point: "optional" must not quietly become "absent forever".
+      - name: Fetch the shared OSHI-Android / OSHI sources (only if not already siblings)
+        shell: bash
+        run: |
+          set -euo pipefail
+          parent="$(cd "$PROJECT_DIR/.." && pwd)"
+          if [ -d "$parent/OSHI-Android/app/src/main/java/com/oshi/messenger/network/v2" ]; then
+            echo "SHARED_ALREADY_PRESENT=true" >> "$GITHUB_ENV"
+            echo "Shared sources are already siblings of the project — nothing to fetch."
+          else
+            echo "SHARED_ALREADY_PRESENT=false" >> "$GITHUB_ENV"
+            echo "Shared sources are NOT siblings; a separate checkout is required."
+          fi
+
+      - name: Check out the shared trees from their own repository
+        if: env.SHARED_ALREADY_PRESENT == 'false'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.SHARED_SOURCE_REPO }}
+          token: ${{ secrets.SHARED_SOURCE_TOKEN }}
+          path: _shared
+          # Only the files the build compiles and the tests read. The full monorepo is
+          # ~800 MB of git history for two apps; this is a few hundred kilobytes.
+          # IF A TEST EVER READS A NEW FILE FROM EITHER TREE, ADD IT HERE — otherwise
+          # that test skips on CI, and the census's max_skipped is what will catch it.
+          sparse-checkout: |
+            /OSHI/CrossPlatformMesh.swift
+            /OSHI-Android/app/src/main/java/com/oshi/messenger/network/v2/
+            /OSHI-Android/app/src/main/java/com/oshi/messenger/network/mesh/CrossPlatformMesh.kt
+          sparse-checkout-cone-mode: false
+
+      - name: Resolve and verify the shared source roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$SHARED_ALREADY_PRESENT" = "true" ]; then
+            parent="$(cd "$PROJECT_DIR/.." && pwd)"
+            android="$parent/OSHI-Android"
+            ios="$parent/OSHI"
+          else
+            android="$GITHUB_WORKSPACE/_shared/OSHI-Android"
+            ios="$GITHUB_WORKSPACE/_shared/OSHI"
+          fi
+          echo "OSHI_ANDROID_ROOT=$android" >> "$GITHUB_ENV"
+          echo "OSHI_IOS_ROOT=$ios" >> "$GITHUB_ENV"
+
+          # Every file the build compiles or a test reads, checked by name. A missing
+          # one here is a one-line error; discovered later it is either an unresolved
+          # reference 200 lines into a Kotlin log, or — worse — a silently skipped
+          # parity test.
+          v2="$android/app/src/main/java/com/oshi/messenger/network/v2"
+          missing=0
+          for f in OSHICryptoV2.kt OSHICryptoV2Streaming.kt OSHIRatchetV2.kt \
+                   V2Session.kt V2FileKeyMessage.kt V2RetryBudget.kt V2KeysClient.kt; do
+            if [ ! -f "$v2/$f" ]; then echo "::error::missing shared source: $v2/$f"; missing=1; fi
+          done
+          for f in "$android/app/src/main/java/com/oshi/messenger/network/mesh/CrossPlatformMesh.kt" \
+                   "$ios/CrossPlatformMesh.swift"; do
+            if [ ! -f "$f" ]; then echo "::error::missing parity source: $f"; missing=1; fi
+          done
+          if [ "$missing" != "0" ]; then
+            echo "::error::The desktop client compiles its crypto core out of the Android tree." \
+                 "Without it this build cannot legitimately be green. Set the repository variable" \
+                 "SHARED_SOURCE_REPO and the secret SHARED_SOURCE_TOKEN, or run this workflow from" \
+                 "the monorepo that holds all three trees."
+            exit 1
+          fi
+          echo "Android root: $android"
+          echo "iOS root    : $ios"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle.kts', '**/gradle-wrapper.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      # ----------------------------------------------------------------------
+      # LINUX: a real secret service, or a red job. Never a quiet skip.
+      #
+      # `LinuxSecretToolStore` shells out to `secret-tool`, which talks to whatever
+      # implements the freedesktop Secret Service API over the SESSION D-Bus. A GitHub
+      # runner has neither: no session bus, no keyring daemon, and `secret-tool` is not
+      # installed. So all three have to be brought up here, and then PROVEN to work by
+      # a round trip through `secret-tool` itself BEFORE Gradle is invoked — if the
+      # keyring is not really there, this step fails, rather than the test suite
+      # skipping three tests and the job going green.
+      #
+      # The session bus is started with `dbus-launch` (not `dbus-run-session`) on
+      # purpose: `dbus-run-session` wraps ONE command and its bus dies with it, so it
+      # cannot be shared by two separate workflow steps. The address is exported
+      # through $GITHUB_ENV instead, and the daemon outlives the step.
+      #
+      # The login keyring is created and unlocked with an EMPTY password, which is the
+      # standard CI incantation. It is fine here and nowhere else: this is a throwaway
+      # VM, and the keyring is destroyed with it.
+      - name: Linux — install and start a real secret service (gnome-keyring)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gnome-keyring libsecret-1-0 libsecret-tools dbus-x11
+
+          eval "$(dbus-launch --sh-syntax)"
+          echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
+
+          # --unlock reads the password from stdin; --daemonize forks and prints the
+          # environment the client libraries need.
+          eval "$(printf '' | gnome-keyring-daemon --unlock --components=secrets --daemonize | sed 's/^/export /')"
+          if [ -n "${GNOME_KEYRING_CONTROL:-}" ]; then
+            echo "GNOME_KEYRING_CONTROL=$GNOME_KEYRING_CONTROL" >> "$GITHUB_ENV"
+          fi
+
+      - name: Linux — prove the keyring actually stores and returns a secret
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          probe="oshi-ci-probe-$$"
+          printf 'ci-probe-value' | secret-tool store --label='oshi ci probe' service "$probe" account probe
+          got="$(secret-tool lookup service "$probe" account probe || true)"
+          secret-tool clear service "$probe" account probe || true
+          if [ "$got" != "ci-probe-value" ]; then
+            echo "::error::The Secret Service is not usable on this runner: secret-tool stored" \
+                 "'ci-probe-value' and read back '$got'. Refusing to continue — running the suite" \
+                 "now would skip every libsecret test and report a green job that measured nothing" \
+                 "about PARITY.md row 0.5 on Linux."
+            exit 1
+          fi
+          echo "libsecret round trip OK (this is the D-Bus service LinuxSecretToolStore talks to)."
+
+      # ----------------------------------------------------------------------
+      - name: Clear stale test results
+        shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: rm -rf build/test-results build/reports/tests
+
+      - name: Run the test suite
+        shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          # Turns "no OS secret store on this machine" from a SKIP into a FAILURE, and
+          # asserts WHICH backend is in use. See SecretStoreTest.requiredStore().
+          OSHI_EXPECT_SECRET_STORE: ${{ matrix.expect_store }}
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew || true
+          # --rerun: the in-Gradle test census lives in the test task's doLast, which an
+          # UP-TO-DATE task never reaches. On a fresh runner this is belt and braces; it
+          # costs nothing and removes a whole class of vacuous green.
+          # If the Windows leg ever fails to launch Gradle under Git Bash, swap this for
+          # `gradlew.bat` with `shell: cmd` — nothing else here depends on the shell.
+          ./gradlew test --rerun --no-daemon --console=plain --stacktrace \
+            -PminTests=${{ matrix.min_tests }} \
+            -PoshiAndroidRoot="$OSHI_ANDROID_ROOT" \
+            -PoshiIosRoot="$OSHI_IOS_ROOT"
+
+      # ----------------------------------------------------------------------
+      # THE CENSUS. Independent of Gradle on purpose: it reads the JUnit XML that the
+      # run just produced (the directory was deleted before the run, so nothing here
+      # can be answered by a previous build's file) and re-derives the numbers.
+      #
+      # A green job is only allowed to mean something if this step agrees.
+      - name: Test census — fail on a zero, short, failing or over-skipped run
+        if: always()
+        shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -euo pipefail
+          dir="build/test-results/test"
+          if [ ! -d "$dir" ] || [ -z "$(ls -A "$dir"/TEST-*.xml 2>/dev/null || true)" ]; then
+            echo "::error::No JUnit results in $dir. The test task produced NOTHING —" \
+                 "which is what 'Executed 0 tests / BUILD SUCCESSFUL' looks like from outside."
+            exit 1
+          fi
+
+          total=0; skipped=0; failures=0; errors=0
+          for f in "$dir"/TEST-*.xml; do
+            head_line="$(head -n 5 "$f" | tr '\n' ' ')"
+            t=$(printf '%s' "$head_line" | grep -o 'tests="[0-9]*"'    | head -1 | grep -o '[0-9]*' || echo 0)
+            s=$(printf '%s' "$head_line" | grep -o 'skipped="[0-9]*"'  | head -1 | grep -o '[0-9]*' || echo 0)
+            fa=$(printf '%s' "$head_line" | grep -o 'failures="[0-9]*"' | head -1 | grep -o '[0-9]*' || echo 0)
+            e=$(printf '%s' "$head_line" | grep -o 'errors="[0-9]*"'   | head -1 | grep -o '[0-9]*' || echo 0)
+            total=$((total + t)); skipped=$((skipped + s))
+            failures=$((failures + fa)); errors=$((errors + e))
+          done
+          executed=$((total - skipped))
+
+          echo "== test census (${{ matrix.os }}) =="
+          echo "  declared : $total"
+          echo "  executed : $executed   (floor ${{ matrix.min_tests }})"
+          echo "  skipped  : $skipped    (ceiling ${{ matrix.max_skipped }})"
+          echo "  failures : $failures"
+          echo "  errors   : $errors"
+          if [ "$skipped" -gt 0 ]; then
+            echo "  -- skipped tests (these measured NOTHING on this runner):"
+            grep -l '<skipped' "$dir"/TEST-*.xml 2>/dev/null | sed 's/^/     /' || true
+          fi
+
+          rc=0
+          if [ "$executed" -eq 0 ]; then
+            echo "::error::ZERO tests actually executed. A build that is green because it ran" \
+                 "nothing is worse than a red one."; rc=1
+          elif [ "$executed" -lt "${{ matrix.min_tests }}" ]; then
+            echo "::error::only $executed tests executed, floor is ${{ matrix.min_tests }}." \
+                 "Either tests were lost, or they are being skipped — check the skip list above." \
+                 "If the suite legitimately shrank, lower the floor DELIBERATELY in this workflow."; rc=1
+          fi
+          if [ "$skipped" -gt "${{ matrix.max_skipped }}" ]; then
+            echo "::error::$skipped tests skipped, ceiling is ${{ matrix.max_skipped }}." \
+                 "The usual cause is a missing sibling source tree (see the sparse-checkout list)" \
+                 "or an OS store that was not started."; rc=1
+          fi
+          if [ "$failures" -ne 0 ] || [ "$errors" -ne 0 ]; then
+            echo "::error::$failures failure(s), $errors error(s)."; rc=1
+          fi
+          exit $rc
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.os }}
+          path: |
+            ${{ env.PROJECT_DIR }}/build/reports/tests/
+            ${{ env.PROJECT_DIR }}/build/test-results/
+          if-no-files-found: error
+          retention-days: 14
+
+  # ============================================================================
+  # Native installers. PARITY.md row 1.6.
+  #
+  # jpackage does not cross-build: a .msi comes from Windows, .deb/.rpm from Linux,
+  # .dmg from a Mac. That is why this is a matrix and not one Linux job.
+  #
+  # NOTHING PRODUCED HERE IS SIGNED. See the signing section in build.gradle.kts for
+  # what each platform would actually require; no credential is invented anywhere in
+  # this repository, and an unsigned .msi will show SmartScreen's "Windows protected
+  # your PC" to every early downloader. These artifacts are for testing, not release.
+  # ============================================================================
+  package:
+    name: package / ${{ matrix.os }}
+    needs: test
+    runs-on: ${{ matrix.os }}
+    env:
+      # The project's own version is 0.0.1, and jpackage on macOS REFUSES a leading zero
+      # ("The first number in an app-version cannot be zero or negative" — observed, not
+      # guessed). build.gradle.kts fails rather than silently relabelling, so CI has to
+      # name a legal version. 1.0.0 is a PLACEHOLDER for smoke builds; a real release
+      # sets the repository variable OSHI_APP_VERSION and these artifacts are not
+      # releasable anyway, being unsigned.
+      APP_VERSION: ${{ vars.OSHI_APP_VERSION || '1.0.0' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            tasks: packageAppImage packageMsi
+          - os: ubuntu-latest
+            tasks: packageAppImage packageDeb packageRpm
+          - os: macos-latest
+            tasks: packageAppImage packageDmg
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate the desktop project
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f "OSHI-Desktop/settings.gradle.kts" ]; then dir="OSHI-Desktop"; else dir="."; fi
+          echo "PROJECT_DIR=$dir" >> "$GITHUB_ENV"
+
+      - name: Check whether the shared sources are already siblings
+        shell: bash
+        run: |
+          set -euo pipefail
+          parent="$(cd "$PROJECT_DIR/.." && pwd)"
+          if [ -d "$parent/OSHI-Android/app/src/main/java/com/oshi/messenger/network/v2" ]; then
+            echo "SHARED_ALREADY_PRESENT=true" >> "$GITHUB_ENV"
+            echo "OSHI_ANDROID_ROOT=$parent/OSHI-Android" >> "$GITHUB_ENV"
+          else
+            echo "SHARED_ALREADY_PRESENT=false" >> "$GITHUB_ENV"
+            echo "OSHI_ANDROID_ROOT=$GITHUB_WORKSPACE/_shared/OSHI-Android" >> "$GITHUB_ENV"
+          fi
+
+      - name: Check out the shared trees from their own repository
+        if: env.SHARED_ALREADY_PRESENT == 'false'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.SHARED_SOURCE_REPO }}
+          token: ${{ secrets.SHARED_SOURCE_TOKEN }}
+          path: _shared
+          sparse-checkout: |
+            /OSHI-Android/app/src/main/java/com/oshi/messenger/network/v2/
+          sparse-checkout-cone-mode: false
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # jpackage builds an .msi with WiX **v3** (candle.exe/light.exe). JDK 17's
+      # jpackage does not understand WiX v4+. The windows runner image is expected to
+      # ship WiX 3.x already; this step states plainly which it found and installs v3
+      # only if it has to, so a silent toolchain drift shows up in the log rather than
+      # as an opaque "Can not find WiX tools" 40 lines into jpackage's output.
+      - name: Windows — ensure WiX v3 is on PATH
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $candle = Get-ChildItem -Path 'C:\Program Files (x86)','C:\Program Files' -Filter candle.exe -Recurse -ErrorAction SilentlyContinue |
+                    Select-Object -First 1
+          if (-not $candle) {
+            Write-Host "WiX v3 not found on the image; installing wixtoolset 3.x via choco."
+            choco install wixtoolset --version=3.14.1 -y --no-progress
+            $candle = Get-ChildItem -Path 'C:\Program Files (x86)','C:\Program Files' -Filter candle.exe -Recurse -ErrorAction SilentlyContinue |
+                      Select-Object -First 1
+          }
+          if (-not $candle) { Write-Error "WiX v3 (candle.exe) still not found — jpackage cannot build an .msi."; exit 1 }
+          Write-Host "Using WiX at $($candle.DirectoryName)"
+          Add-Content -Path $env:GITHUB_PATH -Value $candle.DirectoryName
+
+      # .deb needs dpkg-deb + fakeroot; .rpm needs rpmbuild. Neither is a Gradle
+      # dependency — they are the host packaging tools jpackage drives.
+      - name: Linux — install the packaging tools jpackage drives
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fakeroot rpm binutils
+
+      - name: Build the installers
+        shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -euo pipefail
+          chmod +x ./gradlew || true
+          ./gradlew ${{ matrix.tasks }} --no-daemon --console=plain --stacktrace \
+            -PappVersion="$APP_VERSION" \
+            -PoshiAndroidRoot="$OSHI_ANDROID_ROOT"
+
+      # The installers prove an installer was WRITTEN. This proves the packaged app can
+      # START — which is the part that fails silently: jpackage puts only the main jar
+      # on the launcher's classpath and resolves the rest through the jar manifest's
+      # Class-Path, so a mistake there produces a perfectly valid .msi containing an app
+      # that dies on BouncyCastle with NoClassDefFoundError.
+      - name: Launch the packaged app image
+        shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -euo pipefail
+          case "$RUNNER_OS" in
+            Windows) exe="build/jpackage/out/OSHI/OSHI.exe" ;;
+            macOS)   exe="build/jpackage/out/OSHI.app/Contents/MacOS/OSHI" ;;
+            *)       exe="build/jpackage/out/OSHI/bin/OSHI" ;;
+          esac
+          if [ ! -x "$exe" ] && [ ! -f "$exe" ]; then
+            echo "::error::no launcher at $exe"; ls -R build/jpackage/out | head -50; exit 1
+          fi
+          out="$("$exe" 2>&1 || true)"
+          echo "$out"
+          # The no-args entry point runs the iOS known-answer vectors and a full
+          # X3DH + ratchet conversation in-process. If BouncyCastle is not on the
+          # packaged classpath, it cannot print this.
+          echo "$out" | grep -q "known-answer vectors" || {
+            echo "::error::the packaged app did not run its crypto self-test — check the" \
+                 "Class-Path manifest attribute in build.gradle.kts."; exit 1; }
+
+      - name: Upload installers
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.os }}
+          path: |
+            ${{ env.PROJECT_DIR }}/build/jpackage/out/*.msi
+            ${{ env.PROJECT_DIR }}/build/jpackage/out/*.deb
+            ${{ env.PROJECT_DIR }}/build/jpackage/out/*.rpm
+            ${{ env.PROJECT_DIR }}/build/jpackage/out/*.dmg
+          if-no-files-found: error
+          retention-days: 14
