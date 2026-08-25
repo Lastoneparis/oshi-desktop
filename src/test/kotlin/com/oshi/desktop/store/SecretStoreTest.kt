@@ -6,6 +6,7 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 
@@ -27,6 +28,55 @@ class SecretStoreTest {
     private val accounts = mutableListOf<String>()
     private var store: SecretStore? = null
 
+    /**
+     * Resolve the OS store — and, when the caller says there must be one, REFUSE to skip.
+     *
+     * On a developer's laptop "no OS secret store on this machine" is a legitimate skip.
+     * In CI it is the entire reason the job exists: PARITY.md row 0.5 is amber on Windows
+     * and Linux precisely because the DPAPI and libsecret backends had never been RUN, and
+     * a Windows job whose only secret-store test assumed itself away would move that row
+     * to green having measured nothing. `OSHI_EXPECT_SECRET_STORE` is how CI says "there
+     * is a key store here and it must be THIS one":
+     *
+     *     OSHI_EXPECT_SECRET_STORE=Keychain    (macOS runner)
+     *     OSHI_EXPECT_SECRET_STORE=DPAPI       (Windows runner)
+     *     OSHI_EXPECT_SECRET_STORE=libsecret   (Linux runner, gnome-keyring started first)
+     *
+     * It checks the BACKEND NAME, not merely non-null, because "some store was found" is
+     * not the claim being made — a Linux job that quietly fell through to a different
+     * backend would prove nothing about libsecret.
+     *
+     * WATCHED FAILING (2026-08-25, macOS):
+     *
+     *     OSHI_EXPECT_SECRET_STORE=libsecret ./gradlew test --tests '*SecretStoreTest'
+     *     SecretStoreTest > the real OS store round trips a master key FAILED
+     *       java.lang.AssertionError: OSHI_EXPECT_SECRET_STORE=libsecret, but the
+     *       detected backend is 'macOS Keychain'.
+     *
+     * — three tests that pass unconditionally without the guard, and that used to SKIP
+     * silently on any machine without a key store.
+     */
+    private fun requiredStore(): SecretStore? {
+        val expected = System.getenv("OSHI_EXPECT_SECRET_STORE")?.takeIf { it.isNotBlank() }
+        val s = SecretStore.detect(service)
+        if (expected == null) {
+            assumeTrue("no OS secret store on this machine", s != null)
+            return s
+        }
+        if (s == null) {
+            fail(
+                "OSHI_EXPECT_SECRET_STORE=$expected, but SecretStore.detect() found NO usable store on " +
+                    "${System.getProperty("os.name")}. This test must not be skipped here: skipping is how " +
+                    "an unrun backend gets reported as working. Either the key store daemon is not running " +
+                    "(Linux: gnome-keyring + a session D-Bus) or the backend's isUsable() probe is wrong."
+            )
+        }
+        if (!s!!.id.contains(expected, ignoreCase = true)) {
+            fail("OSHI_EXPECT_SECRET_STORE=$expected, but the detected backend is '${s.id}'.")
+        }
+        return s
+    }
+
     @After
     fun tearDown() {
         store?.let { s -> accounts.forEach { runCatching { s.delete(it) } } }
@@ -34,8 +84,7 @@ class SecretStoreTest {
 
     @Test
     fun `the real OS store round trips a master key`() {
-        val s = SecretStore.detect(service)
-        assumeTrue("no OS secret store on this machine", s != null)
+        val s = requiredStore()
         store = s
         val account = "master-key-test"
         accounts.add(account)
@@ -54,8 +103,7 @@ class SecretStoreTest {
 
     @Test
     fun `a missing entry is null, not an exception`() {
-        val s = SecretStore.detect(service)
-        assumeTrue("no OS secret store on this machine", s != null)
+        val s = requiredStore()
         store = s
         assertNull(s!!.get("never-written-${System.nanoTime()}"))
     }
@@ -66,8 +114,7 @@ class SecretStoreTest {
      */
     @Test
     fun `a vault backed by the real OS store survives a reopen`() {
-        val s = SecretStore.detect(service)
-        assumeTrue("no OS secret store on this machine", s != null)
+        val s = requiredStore()
         store = s
         accounts.add(KeyVault.MASTER_ACCOUNT)
 
