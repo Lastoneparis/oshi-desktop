@@ -185,9 +185,37 @@ class ControlPayloadRouter(private val store: MessageStore) {
      * Parse [plaintext] — never guess from its prefix alone. See [ControlEvent].
      *
      * Pure and free of any store access, so the classification can be tested against wire
-     * bytes with no fixture at all.
+     * bytes with no fixture at all. Delegates to [Companion.classify]; see there for why
+     * the pure half is reachable without a store.
      */
-    fun classify(plaintext: String): ControlEvent {
+    fun classify(plaintext: String): ControlEvent = Companion.classify(plaintext)
+
+    /**
+     * PARITY.md row 0.19's only change to this file.
+     *
+     * Row 0.19 (location, check-ins) is made of the same thing this class routes: emoji
+     * sentinels on the `content` string. [ControlEvent.Foreign] was put here for exactly
+     * that eventuality and says so by name — *"a `📍LOCATION📍` is a real event that
+     * PARITY.md row 0.19 owns"*. So row 0.19 does NOT get a second classifier; it consumes
+     * this one's [ControlEvent.Foreign] and decodes the bodies behind those two prefixes.
+     * See [com.oshi.desktop.place.PlaceRouter].
+     *
+     * The only thing standing in the way was that [classify] — which is pure — was reachable
+     * only through an instance holding a [MessageStore], and row 0.19's payloads have
+     * nothing to store: they are `Kind.RENDERED`, so their destination is a bubble, not a
+     * mutation. Hoisting the pure half here is the whole extension. The instance method is
+     * kept and delegates, so nothing that already calls it changes.
+     *
+     * What is deliberately NOT done: adding `Location`/`CheckIn` cases to [ControlEvent].
+     * That would put `com.oshi.desktop.place`'s types in this file's `when` and make row
+     * 0.18's classifier fail to compile whenever row 0.19's codecs change — the two rows
+     * would stop being separable, which is the property that has let each of them be
+     * tested against shipped bytes on its own.
+     */
+    companion object {
+
+        /** @see ControlPayloadRouter.classify */
+        fun classify(plaintext: String): ControlEvent {
         // Order matters only in that each branch checks its own sentinel; the payload
         // decoders re-verify the prefix themselves, so a reordering cannot cross-route.
         DeliveryReceipt.decode(plaintext)?.let { return ControlEvent.Delivered(it) }
@@ -215,8 +243,9 @@ class ControlPayloadRouter(private val store: MessageStore) {
                 ?: ControlEvent.Unparseable(prefix ?: ControlPrefix.ACTION)
         }
 
-        val kind = ControlPrefix.kindOf(plaintext)
-        return if (prefix != null && kind != null) ControlEvent.Foreign(prefix, kind) else ControlEvent.Prose
+            val kind = ControlPrefix.kindOf(plaintext)
+            return if (prefix != null && kind != null) ControlEvent.Foreign(prefix, kind) else ControlEvent.Prose
+        }
     }
 
     /**

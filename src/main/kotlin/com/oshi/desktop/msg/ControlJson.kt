@@ -85,6 +85,26 @@ internal class ControlJson {
         if (value != null) str(key, value)
     }
 
+    /**
+     * A NESTED object, whose [json] was itself produced by a [ControlJson] and is therefore
+     * already ordered, already escaped and already number-formatted.
+     *
+     * Added for PARITY.md row 0.19: `🛡️CHECK_IN🛡️` carries `emergencyData`, the first
+     * payload in this project with a sub-object, and row 0.18 had no use for one. It takes
+     * a String rather than a `ControlJson` on purpose — the nested value is built and
+     * validated by the type that owns it
+     * ([com.oshi.desktop.place.EmergencyData.toJson]), so this writer's contract stays
+     * "place these bytes here" and cannot silently re-order someone else's keys.
+     *
+     * It is NOT an escape hatch for arbitrary text. Everything that reaches it must have
+     * come out of a `ControlJson.build()`; a caller that pastes user input here would
+     * bypass the shared escaper, which is the one thing this class exists to prevent.
+     */
+    fun raw(key: String, json: String): ControlJson = apply {
+        sep()
+        sb.append('"').append(OSHICryptoV2.jsonEscape(key)).append("\":").append(json)
+    }
+
     fun build(): String = sb.toString() + "}"
 }
 
