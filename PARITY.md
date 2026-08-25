@@ -25,7 +25,7 @@ The whole messenger minus the pixels. This is where parity is actually won or lo
 | 0.2 | v=4 relay envelope | `V2ClientModels.swift`, `V2MessagesClient.kt` | ✅ | `DesktopWire.kt`, deterministic emit |
 | 0.3 | Request signing | `V2Signer.kt`, `V2Client.swift:753` | ✅ | `DesktopV2Signer.kt` |
 | 0.4 | Mesh: mDNS discovery + TCP transport | `CrossPlatformMesh.{swift,kt}` | ✅ | verified live against a shipped Android client, both directions |
-| 0.5 | **Key storage that survives a restart** | `KeychainHelper.swift`, Android Keystore | ✅ macOS / 🟡 Win+Linux | `KeyVault` (AES-256-GCM) under one OS-held master key. Round-tripped on the REAL macOS Keychain; the DPAPI and libsecret backends are written and unrun. A wrong or missing master key FAILS — it never reads as an empty vault |
+| 0.5 | **Key storage that survives a restart** | `KeychainHelper.swift`, Android Keystore | ✅ macOS / 🟡 Win+Linux | `KeyVault` (AES-256-GCM) under one OS-held master key. Round-tripped on the REAL macOS Keychain; the DPAPI and libsecret backends are written and STILL UNRUN. CI to run them exists but has never been executed — `OSHI_EXPECT_SECRET_STORE` now turns "no key store on this machine" from a skip into a failure, so a runner cannot report this row green having measured nothing. **Move this to ✅ only on a green Actions run, never on the workflow existing**. A wrong or missing master key FAILS — it never reads as an empty vault |
 | 0.6 | Prekey store (SPK + OPK privates) | `V2PrekeyStore.kt` | 🟡 | in the vault, not a plain file. Peek-then-burn; pool capped, freshly minted ids never evicted |
 | 0.7 | Session store (ratchet state, persisted) | `V2SessionStore.{swift,kt}` | 🟡 | same JSON shape as Android. A reloaded session decrypts what the live one encrypted (tested). An unreadable record raises rather than reading as "no session" |
 | 0.8 | `/v2/config` rollout gate | `V2ConfigGate` | 🟡 | fails closed on every error path (tested); bucket vectors computed independently and checked against a little-endian read |
@@ -38,15 +38,43 @@ The whole messenger minus the pixels. This is where parity is actually won or lo
 | 0.15 | Blob upload/download (media) | `V2BlobClient.kt` | 🟡 | reserve → chunk → status → commit, resume into an existing blob, streaming decrypt straight to a file. Round-tripped through a real in-process blob server, including a non-UTF-8 chunk (the reason the download route needs bytes, not a String) |
 | 0.16 | Mesh payload ↔ ratchet | `MeshNetworkManager` ↔ `MessageManager` | ⬜ **blocked, see below** | the mesh does NOT carry V2 — it carries the LEGACY ratchet, and its media is not encrypted at all |
 | 0.17 | Groups | `GroupManager`, `V2GroupSession.swift` | ⬜ | iOS drops Android's `GROUP_UPDATE` over mesh today (see PLAN_MESH.md §7) |
-| 0.18 | Delivery receipts, typing, reactions, edit/delete | `DeliveryReceiptManager`, … | ⬜ | four different date epochs live in these payloads |
+| 0.18 | Delivery receipts, typing, reactions, edit/delete | `DeliveryReceiptManager`, … | 🟡 | all four epochs identified and converted in ONE place (`WireClock`): Apple-reference seconds inside the payload, Unix MILLIS on the envelope carrying it, Unix seconds on the legacy wrapper, ISO-8601 once persisted. The first two sit one nesting level apart in the same transmission, and three shipped Android emitters got it backwards. No epoch is inferred from a field's name — every one of them is called `timestamp` |
 | 0.19 | Location sharing, check-ins, contact cards | `LocationSharingManager`, `CheckInManager` | ⬜ | |
-| 0.20 | Safety numbers | `SafetyNumber.swift` | ⬜ | three mutually incompatible implementations shipped once already |
-| 0.21 | Blocked contacts | `BlockedContactsManager` | ⬜ | |
-| 0.22 | QR pairing / identity exchange | `QRCodeDisplayView`, `QRScannerView` | ⬜ | base64url lives here legitimately |
+| 0.20 | Safety numbers | `SafetyNumber.swift` | 🟡 | three mutually incompatible implementations shipped once already, so this one is checked against the bytes rather than against any of the three |
+| 0.21 | Blocked contacts | `BlockedContactsManager` | 🟡 | ENFORCEMENT, not a second flag. Dropped before the payload is read on the mesh; after decryption on V2, because the ratchet must advance for a blocked sender or every message after an UNBLOCK is undecryptable. Blocked peers are withheld from the conversation list, never deleted. **Four iOS defects found while reading this — see below** |
+| 0.22 | QR pairing / identity exchange | `QRCodeDisplayView`, `QRScannerView` | 🟡 | the payload is the bare identity key in STANDARD base64 — no JSON, no version, no scheme. Emit standard, accept either: every base64url site in the shipped trees is a URL path segment, never a QR. Scanned link hosts ARE checked here, unlike iOS |
 | 0.23 | Legacy IPFS path | `IPFSEphemeralManager`, `PinataConfig` | ⬜ | needed only for peers that never got V2 |
 | 0.24 | Multi-device sync | `V2SyncManager.swift`, `V2Client+Sync.swift` | ⬜ | |
 | 0.25 | Scheduled messages | `ScheduledMessageManager.swift` | ⬜ | |
 | 0.26 | Bots | `BotManager.swift` | ⬜ | server-side API already exists |
+
+### Row 0.21 — four defects in the SHIPPED iOS client, found while reading it
+
+Read across both trees to decide what desktop blocking should do. These are iOS bugs, not
+desktop ones, and they are recorded here because this is where the reading happened. Android
+gets all four right.
+
+1. **A blocked contact still receives delivery receipts.** `receiveMessage` drops the message,
+   and the very next line sends `📬DELIVERY_RECEIPT📬` back over a send path that has no block
+   gate (`MessageManager+V2.swift:1017`; the legacy path fires it even earlier, `:3602/3729/3766`).
+   The blocked person sees double ticks — so blocking is *observable to the person you blocked*.
+2. **Group messages from a blocked member are delivered.** `v2DeliverGroup` and
+   `handleIncomingGroupMessage` never consult `BlockedContactsManager`; only the push banner is
+   suppressed.
+3. **A blocked contact's push still banners when the app is killed.** The Notification Service
+   Extension has no block awareness and structurally cannot get it: the block list is a JSON file
+   in `Documents/`, outside the App Group the extension can read.
+4. **`unblockContact` compares raw strings while `isBlocked` compares normalised ones**
+   (`BlockedContactsManager.swift:131` vs `:90-103`). Block under one base64 spelling, unblock with
+   the other, and the contact stays blocked forever. Latent only because the current UI happens to
+   pass the same string.
+
+Android's own gap is narrower and worth fixing alongside: `syncContactsToLinkedDevices` builds its
+payload from a query that already excludes blocked rows, so the `isBlocked` field it sends can only
+ever be `false`. **Blocking never propagates to a linked device; only unblocking does.**
+
+Neither platform has a server-side block API, so the relay keeps queueing a blocked sender's
+envelopes, which the client pulls, decrypts, drops and acks.
 
 ### Row 0.16 is not what it looks like — read this before implementing it
 
@@ -73,7 +101,7 @@ Until one is chosen, the desktop mesh moves OPAQUE payloads and the CLI says so 
 | 1.3 | Contacts, peers, settings, onboarding | ⬜ | |
 | 1.4 | Media viewers, wallpapers, link previews | ⬜ | |
 | 1.5 | Localisation | ⬜ | 34 locales exist; `InfoPlist.xcstrings` has no desktop equivalent |
-| 1.6 | Packaging: `.msi`/`.deb`/`.rpm`, signing, updates | ⬜ | three pipelines, none exercised |
+| 1.6 | Packaging: `.msi`/`.deb`/`.rpm`, signing, updates | 🟡 | jpackage out of the JDK (zero new dependencies); it does not cross-build, so each installer needs its own runner. **Nothing is signed and no installer has been built on Windows or Linux.** CI workflow written and NEVER EXECUTED — see `.github/workflows/desktop-ci.yml`, which says so in its own header |
 
 ## Tier 2 — hard, or not ours
 
