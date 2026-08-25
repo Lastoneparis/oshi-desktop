@@ -216,6 +216,67 @@ object WireClock {
         return BigDecimal.valueOf(value).stripTrailingZeros().toPlainString()
     }
 
+    // ===================================================== EPOCH 4 — ISO-8601 STRINGS
+    //
+    // Added for PARITY.md row 0.17 (groups), and added HERE rather than in the group
+    // package on purpose: this object is the file the ledger names as the one place an
+    // epoch is converted, and row 0.17 is the first row whose payload puts epoch 4 ON
+    // THE WIRE rather than only on disk.
+    //
+    // The group definition — iOS `MessageGroup`, the body of a `📢GROUP_UPDATE📢` — is
+    // the ONE payload in this project encoded with `JSONEncoder.dateEncodingStrategy =
+    // .iso8601` (`OSHI/GroupMessaging.swift:2247`, matched by the decoder at `:934`).
+    // Everything else in the same feature stays on epoch 1: the `GroupMessage` that
+    // rides a v2 group envelope is encoded by a BARE `JSONEncoder()`
+    // (`OSHI/GroupMessaging.swift:2761`), so its `timestamp` is Apple-epoch seconds.
+    // Two payloads, one feature, two date encodings, and the group definition is the
+    // odd one out — see [com.oshi.desktop.group.GroupUpdateWire].
+    //
+    // Why this is not a "second epoch converter": ISO-8601 does not shift an epoch, it
+    // spells an instant. [toIso8601] and [fromIso8601] round-trip Unix millis — the same
+    // unit [toAppleSeconds] consumes and [toUnixMillis] produces — so there is still
+    // exactly one place that knows 978 307 200, and it is above.
+
+    /**
+     * Unix millis → the exact string Swift's `.iso8601` strategy writes:
+     * `ISO8601DateFormatter` with `.withInternetDateTime`, UTC, **no fractional seconds**
+     * — `yyyy-MM-dd'T'HH:mm:ss'Z'`.
+     *
+     * Android reproduces this byte for byte in `GroupManager.iso8601`
+     * (`GroupManager.kt:107-112`) and asserts the literal `"2026-08-13T12:00:00Z"` in
+     * `GroupWireFormatTest.kt:128`. Any other spelling — an offset of `+00:00`, a
+     * `.000` fraction, a lower-case `t` — is still a legal ISO-8601 instant and still
+     * decodes on both phones, but it stops a byte diff against an Android payload from
+     * meaning anything, which is the same argument [jsonNumber] is here for.
+     *
+     * Formatted by hand out of the UTC civil fields rather than through
+     * `DateTimeFormatter.ISO_INSTANT`, because that formatter omits the seconds field
+     * when it is zero on some inputs and appends fractional digits when they are
+     * present — neither of which Swift ever writes.
+     */
+    fun toIso8601(unixMillis: Long): String {
+        val t = java.time.Instant.ofEpochMilli(unixMillis).atOffset(java.time.ZoneOffset.UTC)
+        return String.format(
+            java.util.Locale.US,
+            "%04d-%02d-%02dT%02d:%02d:%02dZ",
+            t.year, t.monthValue, t.dayOfMonth, t.hour, t.minute, t.second,
+        )
+    }
+
+    /**
+     * An ISO-8601 instant off the wire → Unix millis, or **null** when it is not one.
+     *
+     * Accepts what Swift's `ISO8601DateFormatter` accepts and what Android's
+     * `parseIso8601` (`GroupManager.kt:114-126`) accepts: a `Z` or a numeric offset,
+     * with or without fractional seconds. Null rather than throwing, for the same
+     * reason [toUnixMillis] returns null — the caller decides whether one unreadable
+     * date is worth the whole payload, and for a group definition that decision is
+     * NOT the same for every field (see [com.oshi.desktop.group.GroupUpdateWire]).
+     */
+    fun fromIso8601(value: String): Long? =
+        runCatching { java.time.OffsetDateTime.parse(value).toInstant().toEpochMilli() }
+            .getOrNull()
+
     /** 2000-01-01T00:00:00Z — the low end of [com.oshi.desktop.store.Message]'s window. */
     private const val MIN_PLAUSIBLE_UNIX_MS = 946_684_800_000L
 
