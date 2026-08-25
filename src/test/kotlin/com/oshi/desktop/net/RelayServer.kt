@@ -75,10 +75,81 @@ class RelayServer : AutoCloseable {
         mailboxes.getOrPut(toUserKey) { mutableListOf() }.add(Stored(seq, envelope))
     }
 
+    // ---------------------------------------------------------------- blobs
+
+    private class Blob(val chunkCount: Int) {
+        val chunks = ConcurrentHashMap<Int, ByteArray>()
+        @Volatile var committed = false
+    }
+
+    private val blobs = ConcurrentHashMap<String, Blob>()
+
+    /** How many blobs this server holds — the media path, observable. */
+    fun blobCount(): Int = blobs.size
+
+    /**
+     * The blob routes, handled BEFORE [route] because one of them answers with raw
+     * ciphertext rather than JSON and [handle]'s UTF-8 response path would mangle it.
+     * Returns null when the request is not a blob request.
+     */
+    private fun blobRoute(method: String, path: String, body: ByteArray): Triple<Int, ByteArray, String>? {
+        val json = { code: Int, s: String -> Triple(code, s.toByteArray(Charsets.UTF_8), "application/json") }
+        if (method == "POST" && path == "/v2/blobs") {
+            val o = JSONObject(String(body, Charsets.UTF_8))
+            val id = "blob-" + java.util.UUID.randomUUID()
+            val count = o.getInt("chunkCount")
+            blobs[id] = Blob(count)
+            return json(
+                200,
+                JSONObject().put("blobId", id).put("chunkSize", 2 * 1024 * 1024)
+                    .put("missing", JSONArray().also { a -> (0 until count).forEach(a::put) })
+                    .toString(),
+            )
+        }
+        val segs = path.trim('/').split('/')
+        if (segs.size < 3 || segs[0] != "v2" || segs[1] != "blobs") return null
+        val blob = blobs[segs[2]] ?: return json(404, """{"error":"no such blob"}""")
+
+        return when {
+            method == "PUT" && segs.size == 5 && segs[3] == "chunk" -> {
+                blob.chunks[segs[4].toInt()] = body
+                json(200, "{}")
+            }
+            method == "GET" && segs.size == 5 && segs[3] == "chunk" -> {
+                val data = blob.chunks[segs[4].toInt()] ?: return json(404, """{"error":"missing chunk"}""")
+                Triple(200, data, "application/octet-stream")
+            }
+            method == "GET" && segs.size == 4 && segs[3] == "status" -> json(
+                200,
+                JSONObject().put("blobId", segs[2]).put("committed", blob.committed)
+                    .put("missing", JSONArray().also { a ->
+                        (0 until blob.chunkCount).filterNot { blob.chunks.containsKey(it) }.forEach(a::put)
+                    })
+                    .put("expiresAt", 0.0).toString(),
+            )
+            method == "POST" && segs.size == 4 && segs[3] == "commit" -> {
+                // 409 on a gap, like the real server: a committed-but-incomplete blob is
+                // the failure `uploadBlob`'s status top-up exists to prevent.
+                if (blob.chunks.size < blob.chunkCount) json(409, """{"error":"chunks missing"}""")
+                else { blob.committed = true; json(200, "{}") }
+            }
+            method == "DELETE" && segs.size == 3 -> { blobs.remove(segs[2]); json(200, "{}") }
+            else -> null
+        }
+    }
+
     private fun handle(ex: HttpExchange) {
         val body = ex.requestBody.readBytes()
         val path = ex.requestURI.rawPath
         val query = ex.requestURI.rawQuery
+
+        blobRoute(ex.requestMethod, path, body)?.let { (code, bytes, type) ->
+            ex.responseHeaders.add("Content-Type", type)
+            ex.sendResponseHeaders(code, bytes.size.toLong())
+            ex.responseBody.use { it.write(bytes) }
+            return
+        }
+
         val (code, response) = try {
             route(ex.requestMethod, path, query, body)
         } catch (e: Exception) {

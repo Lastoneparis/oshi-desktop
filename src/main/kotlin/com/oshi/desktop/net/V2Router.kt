@@ -2,6 +2,7 @@ package com.oshi.desktop.net
 
 import com.oshi.desktop.DesktopEnvelope
 import com.oshi.desktop.DesktopIdentity
+import com.oshi.desktop.group.GroupFanout
 import com.oshi.desktop.store.PrekeyStore
 import com.oshi.desktop.store.SessionStore
 import com.oshi.messenger.network.v2.OSHICryptoV2
@@ -136,10 +137,23 @@ class V2Router(
      * @param msgId the APP's stable message id, so one logical message keeps ONE id
      *        across every transport (mesh / relay) and the receiver's cross-transport
      *        dedup works.
+     * @param groupId set for ONE LEG of a group fan-out (PARITY.md row 0.17): the
+     *        envelope then carries `type:"group"` and the group id, which is the only
+     *        thing that routes it — the group plaintext is bare base64 of a JSON
+     *        `GroupMessage` with no sentinel prefix, so a dropped `groupId` lands it as
+     *        base64 garbage in the 1:1 thread. The two fields are built by
+     *        [com.oshi.desktop.group.GroupFanout.envelopeFields], never here, so that
+     *        row's guard is ON the send path rather than beside it.
      * @return false means NOT SENT — the caller falls back to another transport.
      */
-    fun sendText(peerUserKey: String, plaintext: ByteArray, msgId: String? = null): Boolean {
+    fun sendText(
+        peerUserKey: String,
+        plaintext: ByteArray,
+        msgId: String? = null,
+        groupId: String? = null,
+    ): Boolean {
         if (!config.isEnabledCached()) return false
+        val routing = groupId?.let { GroupFanout.envelopeFields(it) }
         return try {
             // The bundle fetch is network I/O and stays OUTSIDE the ratchet lock, so a
             // slow fetch cannot block an in-flight receive on another peer.
@@ -172,6 +186,8 @@ class V2Router(
                     msgId = msgId ?: UUID.randomUUID().toString(),
                     from = myUserKey,
                     to = peerUserKey,
+                    type = routing?.get("type") ?: "1to1",
+                    groupId = routing?.get("groupId"),
                     x3dh = x3dh,
                     header = OSHICryptoV2.encodeHeader(header),
                     ciphertext = ct,
