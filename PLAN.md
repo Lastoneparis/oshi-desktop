@@ -95,10 +95,10 @@ cd /Users/HUGOMORICEAU/Documents/Genesis/OSHI-Desktop
 ./oshi.sh run --args="--probe"      # ...plus ONE read-only GET to the live server
 ./oshi.sh run --args="--mesh"       # a live mesh node — see PLAN_MESH.md
 
-# On Windows, oshi.cmd takes the same arguments.
+# On Windows, platform/windows/oshi.cmd takes the same arguments.
 ```
 
-`./oshi.sh` (and `oshi.cmd` on Windows) exists because this Mac has **no `java` on PATH** — only Homebrew JDKs under `/opt/homebrew/opt`. It locates a JDK, exports `JAVA_HOME`, and forwards to Gradle. On Linux and Windows `JAVA_HOME` is normally already set and `./gradlew` works directly.
+`./oshi.sh` (and `platform/windows/oshi.cmd` on Windows) exists because this Mac has **no `java` on PATH** — only Homebrew JDKs under `/opt/homebrew/opt`. It locates a JDK, exports `JAVA_HOME`, and forwards to Gradle. On Linux and Windows `JAVA_HOME` is normally already set and `./gradlew` works directly.
 
 Everything resolves from the local Gradle cache. Dependencies are pinned to exactly what OSHI-Android uses — **BouncyCastle `bcprov-jdk18on:1.76`** and **`org.json:json:20231013`** — because a different crypto provider version is a parity risk, not housekeeping.
 

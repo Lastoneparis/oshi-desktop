@@ -10,7 +10,7 @@
 #   ./oshi.sh run --args="--probe"   ...plus one read-only GET to the live server
 #   ./oshi.sh run --args="--mesh"    a live mesh node: mDNS discovery + TCP (PLAN_MESH.md)
 #
-# oshi.cmd is the Windows counterpart and takes the same arguments.
+# platform/windows/oshi.cmd is the Windows counterpart; platform/linux/oshi.sh is the Linux one.
 #
 # On Linux/Windows, JAVA_HOME is normally already set and ./gradlew works directly.
 set -e

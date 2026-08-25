@@ -46,8 +46,14 @@ Both live in the private `OSHI-private` monorepo. Override the locations with
 
 ## Build and run
 
-Needs a JDK 17+. `oshi.sh` (macOS/Linux) and `oshi.cmd` (Windows) find a JDK and forward to
-Gradle; on Linux and Windows `./gradlew` usually works directly.
+Needs a JDK 17+. On Linux and Windows `./gradlew` usually works directly. Where it does not,
+each platform has a launcher that finds a JDK and forwards to Gradle:
+
+| | |
+|---|---|
+| `./oshi.sh` | macOS (searches Homebrew JDK paths) |
+| `platform/linux/oshi.sh` | Linux (searches `/usr/lib/jvm`, names the package to install) |
+| `platform/windows/oshi.cmd` | Windows |
 
 ```
 ./oshi.sh test                        the parity suite
@@ -93,3 +99,10 @@ liberally and on purpose.
 | [PLAN.md](PLAN.md) | why the port is shaped this way; the options that were rejected |
 | [PLAN_MESH.md](PLAN_MESH.md) | the LAN mesh, and what the phones actually put on the wire |
 | [VIEWS.md](VIEWS.md) | all 102 macOS screens, with a portability verdict for each |
+| [platform/windows/](platform/windows/) | everything Windows-only: DPAPI, the `.msi`, Authenticode |
+| [platform/linux/](platform/linux/) | everything Linux-only: libsecret, `.deb`/`.rpm`, repo signing |
+
+**`platform/` holds no Kotlin.** The client is one shared codebase under `src/`, compiled the
+same way everywhere; what actually differs between Windows and Linux is only where secrets are
+kept, how the app is packaged, and how it is launched. Copying source into a platform folder
+would be the beginning of two clients that drift.

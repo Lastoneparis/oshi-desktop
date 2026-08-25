@@ -429,6 +429,57 @@ fun registerJpackage(
     }
 }
 
+
+/**
+ * The platform's jpackage `--resource-dir`, but ONLY if it holds an actual override.
+ *
+ * `platform/windows/packaging` and `platform/linux/packaging` exist in the repository with a
+ * README explaining what may go in them, and nothing else. Passing an override directory that
+ * contains no override is not neutral: jpackage 17 logs about the directory it was handed, and
+ * a reader then cannot tell "we deliberately override nothing" from "our override silently did
+ * not apply". So the flag is passed only when there is something to apply.
+ *
+ * The README is excluded by name for the same reason it is allowed to sit there at all:
+ * jpackage matches overrides by EXACT filename and ignores everything else, so the README is
+ * inert to jpackage — but it must not be what makes this function say "there are overrides".
+ */
+fun resourceDirArgs(platformDir: String): List<String> {
+    val dir = layout.projectDirectory.dir("platform/$platformDir/packaging").asFile
+    val overrides = dir.listFiles()?.filterNot { it.name == "README.md" || it.isHidden }.orEmpty()
+    return if (overrides.isEmpty()) emptyList()
+    else listOf("--resource-dir", dir.absolutePath)
+}
+
+/**
+ * What each platform's `packaging/` directory would contribute to jpackage — on ANY host.
+ *
+ * `resourceDirArgs` is evaluated at CONFIGURATION time and its effect only shows up inside a
+ * jpackage command line that, for `.msi` and `.deb`/`.rpm`, can never be built on a developer's
+ * Mac. That makes it exactly the kind of wiring that is easy to get wrong and impossible to
+ * notice: an override that is silently not passed looks identical to an override that is
+ * passed and ignored. This task makes the answer observable everywhere.
+ *
+ *     ./gradlew packagingOverrides
+ */
+tasks.register("packagingOverrides") {
+    group = "distribution"
+    description = "Prints the jpackage --resource-dir each platform would contribute, and why."
+    val windows = resourceDirArgs("windows")
+    val linux = resourceDirArgs("linux")
+    doLast {
+        listOf("windows" to windows, "linux" to linux).forEach { (name, args) ->
+            val dir = layout.projectDirectory.dir("platform/$name/packaging").asFile
+            if (args.isEmpty()) {
+                logger.lifecycle("$name: no overrides in ${dir.path} — jpackage uses its own templates")
+            } else {
+                val files = dir.listFiles()?.filterNot { it.name == "README.md" || it.isHidden }
+                    .orEmpty().sortedBy { it.name }.joinToString(", ") { it.name }
+                logger.lifecycle("$name: --resource-dir ${dir.path}  [$files]")
+            }
+        }
+    }
+}
+
 /**
  * Windows .msi.
  *
@@ -448,7 +499,7 @@ val packageMsi = registerJpackage(
         "--win-dir-chooser",
         "--win-per-user-install",          // no UAC prompt, and no need for an admin runner
         "--win-upgrade-uuid", windowsUpgradeUuid,
-    ),
+    ) + resourceDirArgs("windows"),
 )
 
 val packageDeb = registerJpackage(
@@ -459,7 +510,7 @@ val packageDeb = registerJpackage(
         "--linux-menu-group", "Network",
         "--linux-shortcut",
         "--linux-deb-maintainer", debMaintainer,
-    ),
+    ) + resourceDirArgs("linux"),
 )
 
 val packageRpm = registerJpackage(
@@ -470,7 +521,7 @@ val packageRpm = registerJpackage(
         "--linux-menu-group", "Network",
         "--linux-shortcut",
         "--linux-rpm-license-type", "Proprietary",
-    ),
+    ) + resourceDirArgs("linux"),
 )
 
 /**

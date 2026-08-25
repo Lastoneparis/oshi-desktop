@@ -17,8 +17,8 @@ A desktop machine on the same network as a phone is a **first-class OSHI mesh pe
 
 ```bash
 # macOS / Linux                      # Windows
-./oshi.sh test                       oshi.cmd test
-./oshi.sh run --args="--mesh"        oshi.cmd run --args="--mesh"
+./oshi.sh test                       platform\windows\oshi.cmd test
+./oshi.sh run --args="--mesh"        platform\windows\oshi.cmd run --args="--mesh"
 ```
 
 `--mesh` starts a node and prints what it sees. `--connect host:port` adds a peer by address (for a network where multicast is blocked), `--no-discovery` runs the TCP half alone, `--seconds N` runs non-interactively.
@@ -168,7 +168,7 @@ The build could not run on Windows or Linux at all. Three blockers, all fixed:
 |---|---|
 | `gradle.properties` pinned `org.gradle.java.home=/opt/homebrew/opt/openjdk@17/...` — a path on exactly one machine; Gradle failed before starting anywhere else | removed; the JDK comes from `JAVA_HOME` (put a machine-specific pin in `~/.gradle/gradle.properties` instead) |
 | `oshiAndroidRoot=/Users/HUGOMORICEAU/...` absolute | defaults to a sibling directory, overridable with `-PoshiAndroidRoot=` |
-| **no `gradlew.bat`** — the wrapper had no Windows entry point | regenerated with `gradle wrapper`; `oshi.cmd` added alongside `oshi.sh` |
+| **no `gradlew.bat`** — the wrapper had no Windows entry point | regenerated with `gradle wrapper`; `platform/windows/oshi.cmd` added alongside `oshi.sh` |
 
 ---
 
