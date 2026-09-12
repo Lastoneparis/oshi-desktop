@@ -81,11 +81,20 @@ jobs:
         run: |
           python3 - <<'PY'
           import glob, xml.etree.ElementTree as ET
-          t=f=s=0
+          t = f = s = 0
+          names = []
           for x in glob.glob("build/test-results/test/*.xml"):
               r = ET.parse(x).getroot()
-              t += int(r.get("tests",0)); s += int(r.get("skipped",0))
-              f += int(r.get("failures",0)) + int(r.get("errors",0))
-          print("tests %d  ran %d  skipped %d  failed %d" % (t, t-s, s, f))
-          print("skipped tests need the private iOS/Android trees; they compare wire formats.")
+              t += int(r.get("tests", 0)); s += int(r.get("skipped", 0))
+              f += int(r.get("failures", 0)) + int(r.get("errors", 0))
+              for c in r.iter("testcase"):
+                  if c.find("skipped") is not None:
+                      names.append("%s.%s" % (c.get("classname", "?").split(".")[-1], c.get("name")))
+          print("tests %d  ran %d  skipped %d  failed %d" % (t, t - s, s, f))
+          # NAME them rather than explain them. An earlier version of this step said the
+          # skips "need the private iOS/Android trees", and that was only partly true: the
+          # count differs per platform (26 Ubuntu, 25 Windows, 22 macOS) because some tests
+          # are OS-conditional too. A guessed cause in a log is worse than a list.
+          for n in sorted(names):
+              print("  skipped: %s" % n)
           PY
