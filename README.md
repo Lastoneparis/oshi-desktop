@@ -169,3 +169,7 @@ liberally and on purpose.
 same way everywhere; what actually differs between Windows and Linux is only where secrets are
 kept, how the app is packaged, and how it is launched. Copying source into a platform folder
 would be the beginning of two clients that drift.
+
+## Licence
+
+MIT, the same as the rest of OSHI — see [LICENSE](LICENSE).
