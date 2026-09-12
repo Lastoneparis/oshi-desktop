@@ -24,36 +24,49 @@ jobs:
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: '17' }
 
-      # The TRIPWIRE, enforced rather than documented. The shared crypto core is portable
-      # only as long as nothing in it reaches for the Android SDK; an `import android.*`
-      # there means the desktop and the phone have stopped compiling the same source.
-      - name: The shared core must not import the Android SDK
-        shell: bash
-        run: |
-          set -euo pipefail
-          hits=$(grep -rn '^import android' shared/ | wc -l | tr -d ' ')
-          grep -rn '^import android' shared/ || true
-          [ "$hits" = "0" ] || { echo "::error::the shared core imports the Android SDK"; exit 1; }
-          # `grep -c` and not `grep -q`: a needle that matches nothing and a grep that was
-          # never reached look identical, and this file has to tell them apart.
-          echo "checked $(find shared -name '*.kt' | wc -l | tr -d ' ') shared files"
-
-      - name: The vendored set is exactly the seven compiled files, plus named references
+      # THE SEVEN COMPILED FILES AND THE TWO REFERENCES ARE DIFFERENT THINGS, and this
+      # step failed on its first run for getting that wrong. `V2KeysClient.kt` and
+      # `LocalLLMManager.kt` are Android classes read by parity tests and never compiled;
+      # they import `android.*` correctly, and scanning all of `shared/` flagged them.
+      - name: The vendored set is exactly what it should be
         shell: bash
         run: |
           set -euo pipefail
           v=shared/OSHI-Android/app/src/main/java/com/oshi/messenger
-          for f in network/v2/OSHICryptoV2.kt network/v2/OSHICryptoV2Streaming.kt \
-                   network/v2/OSHIRatchetV2.kt network/v2/V2Session.kt \
-                   network/v2/V2FileKeyMessage.kt network/v2/V2RetryBudget.kt \
-                   service/LlamaCpp.kt; do
-            [ -f "$v/$f" ] || { echo "::error::missing compiled shared source: $f"; exit 1; }
-          done
-          # Read by tests, never compiled — the include filter in build.gradle.kts omits them.
-          for f in network/v2/V2KeysClient.kt service/LocalLLMManager.kt; do
-            [ -f "$v/$f" ] || { echo "::error::missing parity reference: $f"; exit 1; }
+          COMPILED="network/v2/OSHICryptoV2.kt network/v2/OSHICryptoV2Streaming.kt
+                    network/v2/OSHIRatchetV2.kt network/v2/V2Session.kt
+                    network/v2/V2FileKeyMessage.kt network/v2/V2RetryBudget.kt
+                    service/LlamaCpp.kt"
+          REFERENCED="network/v2/V2KeysClient.kt service/LocalLLMManager.kt"
+          for f in $COMPILED $REFERENCED; do
+            [ -f "$v/$f" ] || { echo "::error::missing vendored source: $f"; exit 1; }
           done
           echo "all nine present"
+
+          # The TRIPWIRE, enforced rather than documented: the shared crypto core is
+          # portable only as long as nothing in it reaches for the Android SDK. An
+          # `import android.*` in a COMPILED file means the desktop and the phone have
+          # stopped compiling the same source.
+          #
+          # `grep -c` into a variable with `|| true`, never `grep | wc -l`: grep exits 1
+          # when it matches nothing, and under `pipefail` that aborts the step — so the
+          # CLEAN case would fail and a dirty one would pass. That is how this step broke.
+          bad=0
+          for f in $COMPILED; do
+            n="$(grep -c '^import android' "$v/$f" || true)"
+            if [ "$n" != "0" ]; then echo "::error::$f imports the Android SDK ($n)"; bad=1; fi
+          done
+          [ "$bad" -eq 0 ] || exit 1
+          echo "the seven compiled files import no Android SDK"
+
+          # A scan that can pass by not running is not a scan. The two REFERENCE files do
+          # import android.*, which makes them a free positive control: if the pattern
+          # finds nothing in them, the pattern is broken, not the tree.
+          for f in $REFERENCED; do
+            n="$(grep -c '^import android' "$v/$f" || true)"
+            [ "$n" != "0" ] || { echo "::error::control failed — the scan found no android import in $f"; exit 1; }
+          done
+          echo "positive control: the two reference files do import it, as expected"
 
       - name: Test
         shell: bash
