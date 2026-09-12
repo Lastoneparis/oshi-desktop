@@ -171,6 +171,7 @@ class MessageStore(private val baseDir: File = DesktopPaths.file("messages")) {
     @Synchronized
     fun deleteConversation(conversationId: String) {
         cache.remove(conversationId)
+        idByPath.remove(fileFor(conversationId).absolutePath)
         fileFor(conversationId).delete()
     }
 
@@ -234,12 +235,33 @@ class MessageStore(private val baseDir: File = DesktopPaths.file("messages")) {
     private fun fileFor(conversationId: String): File = File(baseDir, fileNameFor(conversationId))
 
     /** Cheap discovery for [conversations]: read only as far as the first valid line. */
+    /**
+     * Path → conversation id, cached for the life of the store.
+     *
+     * Sound because the mapping is IMMUTABLE, not merely stable: the file name IS
+     * `hash(conversationId)` ([fileNameFor]), so one name can only ever belong to one
+     * conversation. A file deleted and recreated for the same conversation hashes to the
+     * same name and carries the same id; a different conversation cannot land on that
+     * name without a SHA-256 collision.
+     *
+     * Worth caching because [conversations] is called on every inbound message and every
+     * selection change in the window, and without this each call opened and read EVERY
+     * conversation file to recover the id the filename deliberately hides. That is a
+     * directory scan plus N file opens, and `ChatShellModel.build()` performs it while
+     * holding its lock.
+     */
+    private val idByPath = HashMap<String, String>()
+
     private fun peekConversationId(file: File): String? {
+        idByPath[file.absolutePath]?.let { return it }
         file.bufferedReader(Charsets.UTF_8).use { r ->
             var line = r.readLine()
             while (line != null) {
                 if (line.isNotBlank()) {
-                    runCatching { JSONObject(line).getString(MessageStoreConst.F_CONVERSATION) }.getOrNull()?.let { return it }
+                    runCatching { JSONObject(line).getString(MessageStoreConst.F_CONVERSATION) }.getOrNull()?.let {
+                        idByPath[file.absolutePath] = it
+                        return it
+                    }
                 }
                 line = r.readLine()
             }
@@ -525,7 +547,41 @@ enum class MediaType(val wire: String) {
     CONTACT("contact"), LOCATION("location"), UNKNOWN("unknown");
 
     companion object {
-        fun fromWire(raw: String): MediaType = entries.firstOrNull { it.wire == raw } ?: UNKNOWN
+        /**
+         * `"photo"` is not a typo and not this client's invention: Android accepts it as
+         * an alias for `image` on the inbound path (`MessageRepository.mediaTypeFromV2:4125`)
+         * while every emitter in both trees writes `image`. Accepting what a peer might
+         * send costs nothing; refusing it would turn one shipped alias into an UNKNOWN
+         * attachment with no renderer.
+         */
+        fun fromWire(raw: String): MediaType =
+            if (raw == "photo") IMAGE else entries.firstOrNull { it.wire == raw } ?: UNKNOWN
+
+        /**
+         * The type a MIME string implies, for the two places the wire does not say.
+         *
+         * **This is not a convenience default — it is the classification both phones
+         * already perform, and getting it wrong is visible to the user.** Android reads
+         * the `mediaType` field FIRST and only falls back to the MIME
+         * (`MessageRepository.mediaTypeFromV2:4123-4139`); iOS does the same through
+         * `MediaManager.MediaType(rawValue:)` with `v2Mime` behind it. So a sender that
+         * labels a JPEG `document` gets a document row on the receiver no matter how
+         * correct its MIME is — the MIME is never consulted once the field is present.
+         * That is exactly how this client shipped every photo, video and voice note it
+         * ever sent, and the receiving phone drew a file attachment for each one.
+         *
+         * The order matters: `vcard` is checked before the `else`, because a contact card
+         * is `text/vcard` and must not fall through to DOCUMENT — [MediaType.CONTACT] is
+         * what makes the receiver decode it as a contact instead of an opaque blob.
+         */
+        fun forMime(mime: String?): MediaType = when {
+            mime == null -> DOCUMENT
+            mime.startsWith("image/") -> IMAGE
+            mime.startsWith("video/") -> VIDEO
+            mime.startsWith("audio/") -> AUDIO
+            mime.contains("vcard") -> CONTACT
+            else -> DOCUMENT
+        }
     }
 }
 

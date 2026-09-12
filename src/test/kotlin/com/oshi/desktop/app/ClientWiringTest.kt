@@ -7,6 +7,7 @@ import com.oshi.desktop.place.CheckInPayload
 import com.oshi.desktop.place.CheckInType
 import com.oshi.desktop.place.LocationPayload
 import com.oshi.desktop.store.DeliveryStatus
+import com.oshi.desktop.store.MediaType
 import java.io.File
 import java.nio.file.Files
 import org.junit.After
@@ -283,6 +284,57 @@ class ClientWiringTest {
     }
 
     /**
+     * The bug this guards was found by sending a JPEG to a real Android phone and reading
+     * its log: `📥 Received DOCUMENT via V2 blob (13464B)`. The bytes were perfect and the
+     * MIME was `image/jpeg`; the `mediaType` field said `document`, and a receiver reads
+     * that field FIRST, so the phone drew a file row instead of a photo.
+     */
+    @Test
+    fun `a photo announces itself as a photo, not as a document`() {
+        val a = fx.client("a")
+        val b = fx.client("b")
+        val dir = Files.createTempDirectory("oshi-media-type").toFile()
+        try {
+            for ((name, expected) in listOf(
+                "shot.jpg" to MediaType.IMAGE,
+                "clip.mp4" to MediaType.VIDEO,
+                "note.m4a" to MediaType.AUDIO,
+                "contract.pdf" to MediaType.DOCUMENT,
+            )) {
+                val f = File(dir, name).apply { writeBytes(ByteArray(64) { it.toByte() }) }
+                assertEquals(OshiClient.SendOutcome.SENT, a.sendFile(b.address, f))
+                assertEquals(1, b.router.poll())
+                assertEquals(
+                    "$name went out labelled as something a receiver will not render as $expected",
+                    expected, b.messages.messages(a.address).last().mediaType,
+                )
+            }
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    /**
+     * The receive half of the same rule, and the asymmetry it fixes: both phones fall back
+     * to the MIME when the `mediaType` field is absent, and this client did not — it
+     * defaulted the missing field to DOCUMENT, so a peer that omitted it got an
+     * attachment here and a photo everywhere else.
+     */
+    @Test
+    fun `an inbound file with no mediaType field is classified from its MIME`() {
+        assertEquals(MediaType.IMAGE, MediaType.forMime("image/png"))
+        assertEquals(MediaType.VIDEO, MediaType.forMime("video/mp4"))
+        assertEquals(MediaType.AUDIO, MediaType.forMime("audio/mp4"))
+        assertEquals(
+            "a contact card that falls through to DOCUMENT is never decoded as a contact",
+            MediaType.CONTACT, MediaType.forMime("text/vcard"),
+        )
+        assertEquals(MediaType.DOCUMENT, MediaType.forMime("application/pdf"))
+        assertEquals(MediaType.DOCUMENT, MediaType.forMime(null))
+        assertEquals("Android accepts this alias on the wire", MediaType.IMAGE, MediaType.fromWire("photo"))
+    }
+
+    /**
      * Row 0.19's third payload. It has no sentinel — it is attachment bytes with
      * `mediaType: contact` — so it could not be reachable until the media path was.
      */
@@ -468,7 +520,15 @@ class ClientWiringTest {
         fx.seedIncoming(me, peer, "msg-b", "hello")
         me.block(peer)
 
-        assertTrue("a blocked peer's thread is still in /chats", fx.repl(me, "/chats").any { it.contains("none yet") })
+        // The empty state is LOCALISED (PARITY.md 1.5), so this compares against the
+        // catalog rather than against the English words it used to hardcode. A test that
+        // asserted "none yet" would pass or fail on the machine's default locale, which
+        // is the exact vacuous-assertion trap the i18n audit exists to prevent — and on a
+        // French-defaulted JVM the old assertion fails while the code is perfectly right.
+        assertTrue(
+            "a blocked peer's thread is still shown in /chats",
+            fx.repl(me, "/chats").any { it.contains(com.oshi.desktop.i18n.Strings.get("messages.empty")) },
+        )
         assertTrue(
             "conversationsIncludingBlocked has no reader",
             fx.repl(me, "/blocked").any { it.contains("[blocked]") },
@@ -492,6 +552,149 @@ class ClientWiringTest {
 
         assertFalse("the other spelling stayed blocked", me.contacts.get(unpadded)!!.blocked)
         assertFalse(me.contacts.get(padded)!!.blocked)
+    }
+
+    // ============================================================ row 0.27 — LoRa
+
+    /**
+     * The whole receive chain over a REAL socket: `/lora attach` → `LoRaLink` → stream
+     * framing → `FromRadio` → `MeshPacket` → `LoRaInbound` → the store.
+     *
+     * Against `FakeMeshtasticNode`, never a radio (PARITY.md row 0.27).
+     */
+    @Test
+    fun `interop text from a node lands in its own quarantined conversation`() {
+        val me = fx.client("me")
+        com.oshi.desktop.lora.FakeMeshtasticNode().use { node ->
+            val heard = java.util.concurrent.CountDownLatch(1)
+            me.onLoRa = { if (it.contains("interop text")) heard.countDown() }
+
+            fx.repl(me, "/lora attach ${node.host} ${node.port}")
+            assertTrue("the link never handshaked", node.handshake.await(10, java.util.concurrent.TimeUnit.SECONDS))
+
+            node.push(interopTextFrom(nodeNum = 0x1234u, text = "hello from a stock radio"))
+
+            assertTrue("the interop text never reached the client", heard.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            val convos = me.conversationsIncludingBlocked().map { it.conversationId }
+            assertTrue(
+                "interop text must be quarantined under its own key, never a peer thread: $convos",
+                convos.any { it.startsWith("lora!") },
+            )
+            me.loraDetach()
+        }
+    }
+
+    /**
+     * The one that matters for what a UI may claim: an OSHI envelope over LoRa is sealed
+     * with the LEGACY ratchet this client does not implement, so it must be REPORTED and
+     * never stored as a message. A row here would be indistinguishable from one the
+     * ratchet vouched for.
+     */
+    @Test
+    fun `an OSHI envelope over LoRa is reported unreadable and never stored`() {
+        val me = fx.client("me")
+        com.oshi.desktop.lora.FakeMeshtasticNode().use { node ->
+            val reported = java.util.concurrent.CountDownLatch(1)
+            me.onLoRa = { if (it.contains("UNREADABLE")) reported.countDown() }
+
+            fx.repl(me, "/lora attach ${node.host} ${node.port}")
+            assertTrue(node.handshake.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            val before = me.conversationsIncludingBlocked().size
+
+            // A complete "OM" envelope addressed to this client, built the way
+            // LoRaInboundTest builds one, and chunked into real frames.
+            val env = com.oshi.desktop.lora.LoRaSecureMessage(
+                id = "11111111-2222-3333-4444-555555555555",
+                senderAddress = "them",
+                recipientAddress = me.address,
+                encryptedContent = com.oshi.desktop.lora.LoRaEncryptedContent("Y2lwaGVy", "", "them", LORA_T0),
+                unixMillis = LORA_T0,
+                isRead = false,
+                deliveryStatus = com.oshi.desktop.lora.LoRaSecureMessage.STATUS_SENT,
+                senderPublicKey = "them",
+                recipientPublicKey = me.address,
+            )
+            com.oshi.desktop.lora.LoRaFrame.frames(0xCAFEBABEu, env.toWireJson())!!
+                .forEach { node.push(fromRadioWith(oshiPacket(0x99u, it))) }
+
+            assertTrue("an unreadable envelope was not reported", reported.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            assertEquals(
+                "an envelope this client cannot open was stored as if it were a message",
+                before, me.conversationsIncludingBlocked().size,
+            )
+            me.loraDetach()
+        }
+    }
+
+    /**
+     * A plausible Unix-millis stamp. NOT zero: [com.oshi.desktop.msg.WireClock] refuses an
+     * epoch outside [2000, 2100] rather than converting it, which is the guard that catches
+     * an un-converted timestamp — and it caught this test passing 0 on the first run.
+     */
+    private val LORA_T0 = 1_787_000_000_000L
+
+    private fun interopTextFrom(nodeNum: UInt, text: String): ByteArray {
+        val data = com.oshi.desktop.lora.ProtoWriter()
+            .varint(1, com.oshi.desktop.lora.LoRaProto.PORT_TEXT)
+            .bytes(2, text.toByteArray(Charsets.UTF_8)).data
+        return fromRadioWith(
+            com.oshi.desktop.lora.ProtoWriter().fixed32(1, nodeNum).bytes(4, data).data
+        )
+    }
+
+    private fun oshiPacket(nodeNum: UInt, payload: ByteArray): ByteArray {
+        val data = com.oshi.desktop.lora.ProtoWriter()
+            .varint(1, com.oshi.desktop.lora.LoRaProto.PORT_OSHI)
+            .bytes(2, payload).data
+        return com.oshi.desktop.lora.ProtoWriter().fixed32(1, nodeNum).bytes(4, data).data
+    }
+
+    /** `FromRadio.packet` is field 2 — the variant this client reads. */
+    private fun fromRadioWith(meshPacket: ByteArray): ByteArray =
+        com.oshi.desktop.lora.ProtoWriter().bytes(2, meshPacket).data
+
+    // ============================================================ row 0.11 — account deletion
+
+    @Test
+    fun `deleteaccount without the word confirm reaches nothing`() {
+        val me = fx.client("me")
+        val addressBefore = me.address
+
+        val out = fx.repl(me, "/deleteaccount")
+
+        assertTrue("the usage line is what an unconfirmed call must produce", out.first().contains("confirm"))
+        assertEquals("an unconfirmed /deleteaccount wiped the identity", addressBefore, me.address)
+        assertNotNull("the vault lost the account on a command that never confirmed", com.oshi.desktop.store.IdentityStore.load(me.vault))
+    }
+
+    @Test
+    fun `deleteaccount confirm erases the server and then this machine`() {
+        val me = fx.client("me")
+        val address = me.address
+        assertTrue("the fixture publishes a bundle, so the relay must hold one", fx.relay.hasBundle(address))
+
+        val out = fx.repl(me, "/deleteaccount confirm")
+
+        assertTrue("the receipt never reached the REPL: $out", out.any { it.contains("account erased") })
+        assertFalse("the server still holds the bundle — the DELETE never left", fx.relay.hasBundle(address))
+        assertNull("the local half did not run", com.oshi.desktop.store.IdentityStore.load(me.vault))
+    }
+
+    @Test
+    fun `a server that refuses leaves the account usable, because the key IS the credential`() {
+        val me = fx.client("me")
+        val address = me.address
+        fx.relay.failAccountDelete = true
+
+        val out = fx.repl(me, "/deleteaccount confirm")
+
+        assertTrue("a refusal must be reported as one: $out", out.any { it.contains("delete failed") })
+        assertNotNull(
+            "the vault was wiped after the server refused — the signing key that authorises " +
+                "the erase is gone, so the server copy can never be deleted by anyone",
+            com.oshi.desktop.store.IdentityStore.load(me.vault),
+        )
+        assertTrue("the server copy is still there and now unreachable", fx.relay.hasBundle(address))
     }
 
     @Test

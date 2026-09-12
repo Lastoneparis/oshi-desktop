@@ -20,8 +20,21 @@ import java.util.UUID
  *       ./gradlew run --args="--probe"     (adds one read-only GET to the live server)
  *       ./gradlew run --args="--mesh"      (a live mesh node: mDNS discovery + TCP)
  *       ./gradlew run --args="--client"    (the client: account, relay, stores, mesh)
+ *       ./gradlew run --args="--ui"        (the window — PARITY.md row 1.1, first slice)
  */
 fun main(args: Array<String>) {
+    // BEFORE the --mesh branch, deliberately: `--ui --mesh` means "the window, with the
+    // mesh node running underneath it", not "the mesh CLI". A flag that silently means a
+    // different program depending on what else is on the line is a flag nobody can reason
+    // about, so the more specific mode wins and the general one is the fallback.
+    //
+    // The window is an ADDITIONAL entry point. `--client` is unchanged and is still the
+    // surface that reaches every capability; see UiLauncher's note.
+    if (args.contains("--ui")) {
+        com.oshi.desktop.ui.runUiCli(args)
+        return
+    }
+
     // The mesh node is a long-running program, not a demo that prints and exits, so it
     // takes over main() entirely rather than being step 6 of the walkthrough.
     if (args.contains("--mesh")) {

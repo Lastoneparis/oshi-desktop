@@ -3,6 +3,9 @@ package com.oshi.desktop.app
 import com.oshi.desktop.DesktopIdentity
 import com.oshi.desktop.DesktopV2Signer
 import com.oshi.desktop.block.BlockPolicy
+import com.oshi.desktop.call.CallLane
+import com.oshi.desktop.call.CallSignalClient
+import com.oshi.desktop.call.CallStateMachine
 import com.oshi.desktop.crypto.SafetyNumber
 import com.oshi.desktop.group.GroupDefinition
 import com.oshi.desktop.group.GroupFanout
@@ -21,10 +24,14 @@ import com.oshi.desktop.msg.MessageActionPayload
 import com.oshi.desktop.msg.ReactionPayload
 import com.oshi.desktop.msg.ReadReceipt
 import com.oshi.desktop.msg.TypingPayload
+import com.oshi.desktop.net.AccountDeletionReceipt
 import com.oshi.desktop.net.RouterState
 import com.oshi.desktop.net.V2AccountClient
 import com.oshi.desktop.net.V2BlobClient
 import com.oshi.desktop.net.V2ConfigGate
+import com.oshi.desktop.bot.BotApi
+import com.oshi.desktop.bot.BotEnvelope
+import com.oshi.desktop.bot.BotQueueClient
 import com.oshi.desktop.net.V2Http
 import com.oshi.desktop.net.V2Inbound
 import com.oshi.desktop.net.V2KeysClient
@@ -119,7 +126,13 @@ class OshiClient(
     private val home: File = DesktopPaths.dataDir,
     secretStore: SecretStore? = SecretStore.detect(),
     passphrase: CharArray? = null,
-    private val serverUrl: String = V2Http.defaultBaseUrl(),
+    /**
+     * Public because a surface has to be able to SAY which server it is talking to.
+     * PARITY.md row 1.1's window prints it in its account pane, and "which relay am I on"
+     * is not a question a user should have to answer by reading a launch flag they may not
+     * have typed — the default comes from [V2Http.defaultBaseUrl].
+     */
+    val serverUrl: String = V2Http.defaultBaseUrl(),
     val displayName: String = defaultDisplayName(),
     private val log: (String) -> Unit = {},
 ) : AutoCloseable {
@@ -197,6 +210,159 @@ class OshiClient(
         )
     }
 
+    // ------------------------------------------------------------------ bots (row 0.26)
+
+    /**
+     * The bot lane — **and it is not encrypted**.
+     *
+     * Every other transport this client speaks puts ciphertext on the wire. This one does
+     * not, and the difference is not a detail a caller may discover later:
+     *
+     *  - a bot message is `bot:<messageId>:<base64 JSON>` in the hash slot of the LEGACY
+     *    pending queue. Base64 is an encoding, not a cipher; the relay holds and forwards
+     *    the plaintext, and the server's own source says so in as many words.
+     *  - registering a bot group uploads the group NAME and EVERY MEMBER PUBLIC KEY in
+     *    cleartext, which hands the relay the membership graph the V2 group design spends
+     *    N pairwise ciphertexts withholding (`V2GroupSession`: the relay has zero knowledge
+     *    of membership).
+     *
+     * It is wired because the product asked for it. What that obliges of every caller is
+     * the one thing this class can enforce from here: [BOT_CHANNEL_IS_PLAINTEXT] exists so
+     * no UI can present a bot composer without having been handed the fact, and
+     * [sendBotMessage] returns it in [BotSendOutcome] rather than leaving it to a comment
+     * nobody reads at the call site.
+     */
+    val botQueue: BotQueueClient by lazy {
+        BotQueueClient(ownerPublicKey = address, deviceId = syncCursor.deviceId(), baseUrl = serverUrl)
+    }
+
+    val botApi: BotApi by lazy { BotApi(baseUrl = serverUrl) }
+
+    // ------------------------------------------------------------------ calls (row 2.1)
+
+    /**
+     * The call SIGNALLING lane — **and there is no media under it.**
+     *
+     * This client can ring a peer, be rung, answer, decline and hang up. It cannot carry one
+     * sample of audio in either direction: there is no capture, no playback, no media socket
+     * and no ICE. [CallLane.NO_AUDIO_WILL_FLOW] is the single owner of that sentence and
+     * every surface that starts a call prints it — the same discipline row 0.26's
+     * [BOT_CHANNEL_IS_PLAINTEXT] enforces on the plaintext bot lane, for the same reason: a
+     * caller must be handed the fact rather than left to find it in a doc comment.
+     *
+     * It rides a SEPARATE server from every other row here — the call server on port 8083,
+     * reached through nginx at `/api/call/`, never `/v2/…` (see [CallSignalClient]) — and
+     * that server has no authentication at all. The body is sealed; the metadata is not.
+     *
+     * LAZY for the same reason [sync] is: constructing it mints a device id and derives
+     * nothing a client that never places a call should pay for.
+     */
+    private val callsLazy: Lazy<CallLane> = lazy {
+        CallLane(
+            myAddress = address,
+            myPrivateKey = identity.identity.priv,
+            transport = CallSignalClient(baseUrl = serverUrl, signer = DesktopV2Signer(identity)),
+            deviceId = syncCursor.deviceId(),
+            // The SAME ContactStore every other ingress uses, so a blocked peer cannot ring
+            // this client — enforcement, not a second flag (PARITY.md 0.21).
+            machine = CallStateMachine(address, contacts, syncCursor.deviceId()),
+            // AUDIO. Opens a UDP socket, the microphone and the speaker on a connected
+            // call, signals ICE candidates, and ENDS the call if no device can be opened
+            // rather than connecting it in silence — a silent connected call makes two
+            // people wait, which is the most expensive failure a messenger has.
+            //
+            // Still gated by `--calls`: with `callPollIntervalMs` at 0 nothing polls, so
+            // nothing ever rings and nothing ever connects. There is also no call button
+            // anywhere in the window, and that stays true until a call has been made
+            // between two real people on two real machines. Audio has been shown crossing
+            // LOOPBACK in a test; that is not the same claim.
+            mediaOpener = com.oshi.desktop.call.CallMedia.real(),
+            log = log,
+        ).also { lane -> lane.onEvent = { event -> onCall(event) } }
+    }
+
+    val calls: CallLane by callsLazy
+
+    /** What a bot send actually did, plus the warning it is obliged to carry. */
+    data class BotSendOutcome(
+        val delivered: Int,
+        val totalMembers: Int,
+        val messageId: String,
+        val groupName: String,
+        /** Always true. A field rather than a doc line so a UI cannot fail to receive it. */
+        val plaintextChannel: Boolean = true,
+    )
+
+    /**
+     * Post to a bot group. **The content leaves this machine in cleartext.**
+     *
+     * Deliberately NOT named `send`: [send] is the end-to-end encrypted path and the two
+     * must not read as siblings at a call site.
+     */
+    fun sendBotMessage(token: String, groupId: String, content: String): Result<BotSendOutcome> =
+        botApi.send(token, groupId, content).map {
+            log("client: bot post to ${it.groupName} — ${it.delivered}/${it.totalMembers} delivered, IN CLEARTEXT")
+            BotSendOutcome(it.delivered, it.totalMembers, it.messageId, it.groupName)
+        }
+
+    /**
+     * Drain the bot queue, storing each post and acking it.
+     *
+     * Classification happens BEFORE any fetch, exactly as both phones do it, so a bot
+     * envelope never reaches a gateway that would try to resolve it as a content id.
+     *
+     * @return how many bot messages were stored.
+     */
+    fun pollBots(): Int {
+        val entries = botQueue.pending().getOrElse {
+            log("client: bot queue unreachable: ${it.javaClass.simpleName}: ${it.message}")
+            return 0
+        }
+        var stored = 0
+        for (entry in entries) {
+            if (entry !is BotQueueClient.QueueEntry.Bot) continue
+            val msg = runCatching { BotEnvelope.parse(entry.raw) }.getOrElse {
+                log("client: malformed bot envelope, skipped: ${it.message}")
+                continue
+            }
+            // A bot post is not a ratcheted message and must never be filed as if a peer
+            // had authenticated it: it goes under its own conversation key.
+            val convo = "bot!" + msg.groupId
+            // The store owns dedup (row 0.13, by msgId ACROSS transports). Asking it
+            // first and then appending would be a second, weaker copy of that rule and a
+            // window between the two; the outcome IS the answer.
+            // TWO ids ride in a bot envelope and they can disagree. Dedup and ack BOTH
+            // use the envelope id, because that is the key the server filed the queue
+            // entry under: storing under one and acking the other would leave the entry
+            // on the server and re-read the same post on every poll for ever.
+            if (msg.idsDisagree) {
+                log("client: bot envelope id ${msg.envelopeMessageId} != payload id ${msg.payloadMessageId}")
+            }
+            val outcome = messages.append(
+                Message(
+                    id = msg.envelopeMessageId,
+                    conversationId = convo,
+                    senderAddress = convo,
+                    recipientAddress = address,
+                    fromMe = false,
+                    content = msg.content,
+                    sentAtMs = msg.unixMillis ?: System.currentTimeMillis(),
+                    // The bot queue's `timestamp` is an ISO-8601 STRING (epoch 4), not
+                    // millis — so the source is ISO8601, which already exists. A post that
+                    // carries no parseable timestamp gets ours, and SAYS it is ours.
+                    sentAtSource = if (msg.unixMillis != null) TimestampSource.ISO8601
+                                   else TimestampSource.LOCAL_CLOCK,
+                )
+            )
+            if (outcome == MessageStore.AppendOutcome.INSERTED) stored++
+            // Ack a duplicate too: the queue entry is still on the server, and leaving it
+            // there means re-reading the same post on every poll for ever.
+            botQueue.ackBot(msg.envelopeMessageId)
+        }
+        if (stored > 0) log("client: stored $stored bot message(s) — this lane is NOT encrypted")
+        return stored
+    }
+
     // ------------------------------------------------------------------ callbacks
 
     /** Called after an inbound message has been stored. */
@@ -211,8 +377,27 @@ class OshiClient(
     /** A row-0.19 location share or check-in arrived. */
     var onPlace: (String, PlaceEvent) -> Unit = { _, _ -> }
 
+    /**
+     * A row-0.27 LoRa event: the link's own state, or a packet that arrived over it.
+     *
+     * Separate from [onMessage] on purpose. An OSHI envelope over LoRa is sealed with the
+     * LEGACY ratchet this client does not implement (the same blocker row 0.16 records for
+     * the mesh), and stock Meshtastic text is unauthenticated by construction — neither is
+     * a message the ratchet vouched for, so neither may be printed as one.
+     */
+    var onLoRa: (String) -> Unit = {}
+
     /** A row-0.17 group update was ingested, applied or refused. */
     var onGroupEvent: (GroupIngest.Result) -> Unit = {}
+
+    /**
+     * A row-2.1 call event: a ring, an answer, an end, a refusal, a transport problem.
+     *
+     * Separate from [onMessage] because a call is not a conversation row, and because
+     * [CallLane.CallEvent.Connected] carries `noAudio = true` — a surface that rendered it
+     * beside messages would be one `if` away from drawing a working call.
+     */
+    var onCall: (CallLane.CallEvent) -> Unit = {}
 
     /** Every scheduled-message sweep that did something. See [ScheduledMessageRunner.DueRun]. */
     var onScheduledRun: (ScheduledMessageRunner.DueRun) -> Unit = {}
@@ -226,6 +411,7 @@ class OshiClient(
 
     private val running = AtomicBoolean(false)
     private var timers: ScheduledExecutorService? = null
+    private var callTimers: ScheduledExecutorService? = null
 
     init {
         router.onMessage = { inbound -> receive(inbound) }
@@ -259,9 +445,67 @@ class OshiClient(
      *        on desktop (PARITY.md 2.3), so this interval IS the delivery latency — and,
      *        because the scheduled-message sweep rides the same tick, it is also the
      *        maximum lateness of a scheduled message while the process IS running.
+     * @param callPollIntervalMs how often to ask the CALL server (a different host route and
+     *        a different server) whether someone is ringing. Zero disables the lane entirely,
+     *        and the cost of leaving it on is stated rather than hidden: a call signal is
+     *        only readable while it sits in a 60-second server queue, so a client that does
+     *        not poll does not miss a call politely — it never learns there was one. It runs
+     *        on its OWN thread so a slow relay pull cannot delay a ring by three seconds.
      */
-    fun start(pollIntervalMs: Long = 3_000, withMesh: Boolean = true) {
+    /**
+     * @param callPollIntervalMs **0 = off, and off is the default.** Polling reaches a
+     *        SECOND server — `GET /api/call/signals/<yourkey>` — which by row 2.1's own
+     *        reading has no authentication at all and whose journald logs both parties'
+     *        key prefixes and raw UDP IPs. Defaulting it on announced this identity to
+     *        that server every second for every user, including everyone who never places
+     *        a call, and nothing in the UI or the README said so. A capability that talks
+     *        to an unauthenticated third party is opt-in.
+     *
+     *        The cost of off is real and is the reason the parameter exists at all: an
+     *        offer is only readable while it sits in a 60-second server queue, so a client
+     *        that does not poll does not decline politely — it never learns there was a
+     *        call. Callers that switch it on must also bind [onCall], or the ring is
+     *        invisible and the 45-second watchdog answers on the user's behalf.
+     */
+    fun start(
+        pollIntervalMs: Long = 3_000,
+        withMesh: Boolean = true,
+        callPollIntervalMs: Long = 0,
+    ) {
         if (!running.compareAndSet(false, true)) return
+
+        if (callPollIntervalMs > 0) {
+            val callTimer = Executors.newSingleThreadScheduledExecutor { r ->
+                Thread(r, "oshi-call-poll").apply { isDaemon = true }
+            }
+            callTimers = callTimer
+            callTimer.scheduleWithFixedDelay({
+                // A SHUTDOWN IS NOT A SERVER OUTAGE, and it used to be reported as one.
+                //
+                // `stop()` calls `shutdownNow()`, which INTERRUPTS without waiting. The
+                // interrupt lands inside `HttpClient.send`, `CallSignalClient` maps that
+                // to -1 ("never reached the server"), `poll()` returns null, and
+                // `pollOnce()` emits `TransportProblem("the call server did not answer a
+                // poll")`. Every clean shutdown accused the call server of being down.
+                //
+                // That is the failure mode this codebase cares about most — an error path
+                // that lies about whose fault it was — and it was invisible only because
+                // nothing subscribed to `onCall` until this release. Checking `running`
+                // before the poll and again before reporting keeps the diagnosis honest:
+                // a real outage still reports, a shutdown says nothing.
+                if (!running.get()) return@scheduleWithFixedDelay
+                try {
+                    calls.pollOnce()
+                    // The watchdogs live in CallStateMachine.tick and are evaluated nowhere
+                    // else, so this is what turns 45 s of no answer into a callEnd.
+                    calls.tick()
+                } catch (e: Exception) {
+                    if (running.get()) {
+                        log("client: call poll failed: ${e.javaClass.simpleName}: ${e.message}")
+                    }
+                }
+            }, 0, callPollIntervalMs, TimeUnit.MILLISECONDS)
+        }
 
         val timer = Executors.newSingleThreadScheduledExecutor { r ->
             Thread(r, "oshi-poll").apply { isDaemon = true }
@@ -272,7 +516,7 @@ class OshiClient(
         // this address, so it happens on the poll thread AFTER the gate has been read —
         // never eagerly at construction, and never while the gate is closed.
         timer.scheduleWithFixedDelay({
-            try {
+            PollGuard.run(log) {
                 router.refreshConfig()
                 if (config.isEnabledCached() && !published) {
                     published = router.publishBundleIfNeeded()
@@ -280,8 +524,6 @@ class OshiClient(
                 }
                 router.poll()
                 tick()
-            } catch (e: Exception) {
-                log("client: poll failed: ${e.javaClass.simpleName}: ${e.message}")
             }
         }, 0, pollIntervalMs, TimeUnit.MILLISECONDS)
 
@@ -323,7 +565,38 @@ class OshiClient(
     fun stop() {
         if (!running.compareAndSet(true, false)) return
         timers?.shutdownNow(); timers = null
+
+        // WAIT FOR THE POLL THREAD BEFORE TOUCHING THE LANE. `shutdownNow()` interrupts
+        // and returns immediately, so without this the poll thread can be inside
+        // `pollOnce()` — applying a signal to `CallStateMachine`, whose fields are plain
+        // `var`s with no lock — while the line below calls `hangUp()` on the same object.
+        // Observable outcomes were two `callEnd` packets for one call, and a call-log entry
+        // whose direction was read after the other thread had already transitioned.
+        //
+        // Two seconds is generous: the only blocking work in that thread is one HTTP
+        // request whose read timeout is 8 s, and it has just been interrupted. If it does
+        // not finish, we proceed anyway — a shutdown that hangs is worse than a race, and
+        // the daemon thread cannot keep the JVM alive.
+        callTimers?.let { timer ->
+            timer.shutdownNow()
+            runCatching { timer.awaitTermination(2, TimeUnit.SECONDS) }
+        }
+        callTimers = null
+        // Tell the peer BEFORE the poller dies. Quitting mid-call without a `callEnd` leaves
+        // them ringing, or connected to a client that no longer exists, until their own
+        // 45/55-second watchdog fires — and this client has no push to be woken by, so there
+        // is no later moment when it could send one. `isInitialized()` keeps this from
+        // constructing the lane for an account that never placed a call.
+        if (callsLazy.isInitialized()) {
+            val lane = callsLazy.value
+            if (lane.state != com.oshi.desktop.call.CallState.IDLE &&
+                lane.state != com.oshi.desktop.call.CallState.ENDED
+            ) {
+                runCatching { lane.hangUp() }
+            }
+        }
         mesh.stop()
+        loraDetach()
         routerState.flush()
     }
 
@@ -532,15 +805,26 @@ class OshiClient(
      * tops up a blob whose earlier chunks were sealed with the old one. Restarting the
      * upload is correct and slow; a wrong resume is corrupt media.
      */
-    fun sendFile(peerAddress: String, file: File, mediaType: MediaType = MediaType.DOCUMENT): SendOutcome =
-        sendMedia(
+    /**
+     * @param mediaType override the type this file is announced as. **Leave it null.**
+     *        The type is otherwise derived from the probed MIME by [MediaType.forMime],
+     *        which is what the receiving phone would have derived itself if the field
+     *        were absent — and the field is never absent, so a wrong one here is final.
+     *        This defaulted to [MediaType.DOCUMENT] and `/sendfile` never overrode it, so
+     *        every photo, clip and voice note this client sent arrived on a phone as a
+     *        file attachment: no thumbnail, no player, "Download" instead of an image.
+     */
+    fun sendFile(peerAddress: String, file: File, mediaType: MediaType? = null): SendOutcome {
+        val mime = probeMime(file)
+        return sendMedia(
             peerAddress = peerAddress,
             bytes = file.readBytes(),
             filename = file.name,
-            mime = probeMime(file),
-            mediaType = mediaType,
+            mime = mime,
+            mediaType = mediaType ?: MediaType.forMime(mime),
             localRef = file.absolutePath,
         )
+    }
 
     /**
      * Share one contact with another — PARITY.md row 0.19's third payload.
@@ -925,6 +1209,90 @@ class OshiClient(
             else ContactSyncRecord.applyLegacyAliasMap(contacts, body, System.currentTimeMillis())
         }
 
+    // ------------------------------------------------------------ row 0.27, LoRa
+
+    private val loraInbound = com.oshi.desktop.lora.LoRaInbound()
+    @Volatile private var lora: com.oshi.desktop.lora.LoRaLink? = null
+
+    val loraAttached: Boolean get() = lora?.isConnected == true
+
+    /**
+     * Attach to a Meshtastic node over TCP — PARITY.md row 0.27.
+     *
+     * **What this buys, stated before anyone types it into a UI:**
+     *  - stock Meshtastic TEXT becomes readable, quarantined under `lora!<nodehex>` and
+     *    flagged unverified on every decision ([com.oshi.desktop.lora.LoRaInbound]);
+     *  - an OSHI↔OSHI envelope is REPORTED and NOT OPENED. It is sealed with the legacy
+     *    Double Ratchet, which this client does not implement — the identical blocker
+     *    row 0.16 records for the mesh. Attaching a radio does not change that.
+     *
+     * So this is a receive lane that mostly tells you what it cannot read. That is worth
+     * having — it is the difference between a silent radio and a visible one — and it is
+     * not messaging over LoRa.
+     *
+     * The link is a real socket to a real node; nothing here has been exercised against a
+     * radio, only against `FakeMeshtasticNode`.
+     */
+    fun loraAttach(host: String, port: Int = com.oshi.desktop.lora.LoRaAttach.TCP_PORT) {
+        loraDetach()
+        val link = com.oshi.desktop.lora.LoRaLink(
+            host = host,
+            port = port,
+            onFromRadio = { fromRadio -> onFromRadio(fromRadio) },
+            log = { log("lora: $it"); onLoRa(it) },
+        )
+        lora = link
+        link.start()
+    }
+
+    fun loraDetach() {
+        lora?.stop()
+        lora = null
+    }
+
+    /**
+     * One `FromRadio` off the link.
+     *
+     * A `FromRadio` wraps a `MeshPacket` in field 2; anything else in the stream (config,
+     * node info, the `config_complete_id` that ends the handshake burst) is not a packet
+     * and is dropped rather than guessed at — a partial protobuf reader that invented
+     * meanings for fields it does not implement would be worse than one that ignores them.
+     */
+    private fun onFromRadio(fromRadio: ByteArray) {
+        val packetField = com.oshi.desktop.lora.LoRaProto.field(fromRadio, 2, wire = 2) ?: return
+        when (val d = loraInbound.route(packetField.payload, address, System.currentTimeMillis())) {
+            is com.oshi.desktop.lora.LoRaInbound.Decision.InteropText -> {
+                // Stock Meshtastic text: nothing ratcheted it and no peer authenticated it,
+                // so it is filed under its own conversation key and never beside a real
+                // message — the same rule row 0.26 applies to a bot post.
+                val stored = Message(
+                    id = UUID.randomUUID().toString(),
+                    conversationId = d.conversationKey,
+                    senderAddress = d.conversationKey,
+                    recipientAddress = address,
+                    fromMe = false,
+                    content = d.text,
+                    sentAtMs = System.currentTimeMillis(),
+                    sentAtSource = TimestampSource.LOCAL_CLOCK,
+                    deliveryStatus = DeliveryStatus.DELIVERED,
+                    transport = "lora",
+                )
+                messages.append(stored)
+                onLoRa("interop text from node ${d.nodeNum} (UNVERIFIED — not authenticated): ${d.text.take(200)}")
+            }
+            is com.oshi.desktop.lora.LoRaInbound.Decision.Envelope -> {
+                // Reported, not opened, and not stored. See loraAttach's doc.
+                onLoRa(
+                    "OSHI envelope from node ${d.nodeNum} — UNREADABLE by this client " +
+                        "(legacy Double Ratchet, PARITY.md rows 0.16 / 0.27)"
+                )
+            }
+            is com.oshi.desktop.lora.LoRaInbound.Decision.Routing ->
+                onLoRa("routing ack from node ${d.nodeNum}")
+            com.oshi.desktop.lora.LoRaInbound.Decision.Ignored -> {}
+        }
+    }
+
     // ------------------------------------------------------ row 0.25, scheduled
 
     /**
@@ -1055,10 +1423,25 @@ class OshiClient(
 
             is ControlEvent.Foreign -> {
                 // 6. Row 0.19 — location and check-in — consumes exactly this case.
-                val place = places.route(text, inbound.ts)
+                //
+                // THE CLOCK IS OURS, NEVER THE SENDER'S. `inbound.ts` is the envelope's
+                // `ts`: read with `optLong("ts", 0)`, sitting OUTSIDE the AEAD (every
+                // `OSHIRatchetV2.decrypt` call passes EMPTY associated data), so it is
+                // chosen by the sender and rewritable by the relay. Passing it here made
+                // every expiry decision in this row — the EXPIRY_NEVER_EXTENDS ratchet
+                // that PARITY 0.19 credits for refusing two shipped bugs — a comparison
+                // against a number the attacker wrote. A 2-minute share sent with
+                // `"ts": 1600000000000` renders LIVE for five years and is PERSISTED that
+                // way, while `/live` (which uses the real clock) correctly says EXPIRED:
+                // two surfaces disagreeing, and the wrong one is the bubble the user reads.
+                //
+                // PlaceRouter takes an explicit clock so expiry can be tested at its
+                // boundary, not so a caller can supply the peer's idea of the time.
+                val nowMs = System.currentTimeMillis()
+                val place = places.route(text, nowMs)
                 if (place !is PlaceEvent.NotMine) {
                     onPlace(inbound.from, place)
-                    val rendered = places.renderToText(text, inbound.ts)
+                    val rendered = places.renderToText(text, nowMs)
                     if (rendered != null) storeInbound(inbound, rendered, ControlPrefix.suppressesPush(text))
                     else log("client: unparseable ${event.prefix} from ${inbound.from.take(12)}…")
                     return
@@ -1183,9 +1566,29 @@ class OshiClient(
         // A contact card is media bytes with `mediaType: contact`, never a sentinel — so
         // this is the only place it can be recognised, and recognising it is what turns an
         // opaque attachment into a contact the user can message.
-        val card = if (written != null && key.mediaType == MediaType.CONTACT.wire) {
-            com.oshi.desktop.place.ContactCardPayload.decode(out.readText(Charsets.UTF_8))
-        } else null
+        // THE SENDER CHOOSES `mediaType`, SO THE SENDER CHOSE THIS BRANCH. `readText` on a
+        // file whose size the sender also chose is an OutOfMemoryError one message away,
+        // and the poll thread above used to die of it forever. A contact card is a short
+        // JSON object — iOS and Android both emit well under a kilobyte — so anything past
+        // this ceiling is not a card, whatever the field claims, and is left as an ordinary
+        // attachment rather than read into memory.
+        val card = if (
+            written != null &&
+            key.mediaType == MediaType.CONTACT.wire &&
+            out.length() in 1..MAX_CONTACT_CARD_BYTES
+        ) {
+            runCatching {
+                com.oshi.desktop.place.ContactCardPayload.decode(out.readText(Charsets.UTF_8))
+            }.getOrNull()
+        } else {
+            if (written != null && key.mediaType == MediaType.CONTACT.wire) {
+                log(
+                    "client: an attachment claimed mediaType=contact at ${out.length()} bytes — " +
+                        "over the ${MAX_CONTACT_CARD_BYTES}-byte ceiling, so it was NOT parsed as one"
+                )
+            }
+            null
+        }
         if (card != null) {
             contacts.seen(card.publicKey, inbound.ts, displayNameHint = card.alias)
             log("client: contact card for ${card.displayName} added")
@@ -1198,7 +1601,13 @@ class OshiClient(
             recipientAddress = address,
             fromMe = false,
             content = card?.let { "Contact: ${it.displayName} (${it.publicKey})" } ?: key.filename,
-            mediaType = MediaType.fromWire(key.mediaType ?: MediaType.DOCUMENT.wire),
+            // The field FIRST, the MIME only when it is absent — Android's order
+            // (`mediaTypeFromV2:4123-4131`). Defaulting a missing field to DOCUMENT
+            // instead of asking the MIME made this client the only one of the three that
+            // would file a peer's `image/jpeg` as a document.
+            mediaType = key.mediaType?.takeIf { it.isNotBlank() }
+                ?.let { MediaType.fromWire(it) }
+                ?: MediaType.forMime(key.mime),
             mediaRef = if (written != null) out.absolutePath else null,
             sentAtMs = inbound.ts,
             sentAtSource = TimestampSource.RELAY_ENVELOPE_MS,
@@ -1228,10 +1637,20 @@ class OshiClient(
                 "png" -> "image/png"
                 "jpg", "jpeg" -> "image/jpeg"
                 "gif" -> "image/gif"
-                "mp4" -> "video/mp4"
-                "m4a" -> "audio/mp4"
+                "mp4", "mov", "webm" -> "video/mp4"
+                // EVERY audio extension this client can produce must be here, and `wav`
+                // was the one that was not. `Files.probeContentType` returns null on some
+                // Linux JDKs with no shared mime database, and this table is the only
+                // thing standing between a voice note and `application/octet-stream` —
+                // which `MediaType.forMime` maps to DOCUMENT, which is a "Download" button
+                // on the phone instead of a player. That is not a hypothetical: it is
+                // exactly the defect PARITY.md row 0.12 records as having already shipped
+                // once, for every photo, clip and voice note this client sent.
+                "m4a", "mp3", "aac" -> "audio/mp4"
+                "wav", "wave" -> "audio/wav"
+                "ogg", "opus" -> "audio/ogg"
                 "pdf" -> "application/pdf"
-                "txt" -> "text/plain"
+                "txt", "md" -> "text/plain"
                 else -> "application/octet-stream"
             }
 
@@ -1253,18 +1672,57 @@ class OshiClient(
 
     fun history(peerAddress: String): List<Message> = messages.messages(peerAddress)
 
-    /** Local wipe plus the server-side erase. Returns the server's receipt if it answered. */
-    fun deleteAccount(): Result<Unit> {
+    /**
+     * `DELETE /v2/account` and then the local wipe — PARITY.md row 0.11, guideline 5.1.1(v).
+     *
+     * **The server goes FIRST, and a server that did not answer aborts the local half.**
+     * The two orders are not equivalent and the wrong one is unrecoverable: the erase is
+     * authorised by a signature from the identity's own Ed25519 key, so wiping the vault
+     * before the server has answered destroys the only credential that could ever ask
+     * again. The bundle, the queued envelopes and the sync ciphertext would then sit on
+     * the relay for ever, with nobody left who can delete them — the exact outcome the
+     * route exists to prevent. Failing here leaves a usable account and a retry.
+     *
+     * Returns the RECEIPT rather than a Boolean, for the reason [V2AccountClient] gives:
+     * a 207 means some stores were erased and others were unreachable, and the caller has
+     * to be able to tell a user which. Collapsing it to success would report a finished
+     * deletion while data is still out there.
+     */
+    fun deleteAccount(): Result<AccountDeletionReceipt> {
         val receipt = account.deleteAccount()
+        if (receipt.isFailure) return receipt
         sessions.clear()
         prekeys.clear()
         IdentityStore.erase(vault)
         routerState.clear()
         syncCursor.reset()
-        return receipt.map { }
+        return receipt
     }
 
     companion object {
+
+        /**
+         * The sentence a UI is obliged to show beside any bot composer (row 0.26).
+         *
+         * One string with one owner, rather than a warning each surface re-invents or
+         * quietly omits. The bot lane is the only transport this client speaks that puts
+         * the user's words on the wire in the clear.
+         */
+        const val BOT_CHANNEL_IS_PLAINTEXT: String =
+            "Bot messages are NOT end-to-end encrypted. The server can read this, " +
+                "and it already knows the group's name and every member."
+        /**
+         * The biggest thing this client will read into memory because a SENDER said it was
+         * a contact card.
+         *
+         * 64 KiB is roughly a hundred times the largest card iOS or Android emits, so it
+         * refuses nothing real, and it is small enough that a hostile peer cannot spend
+         * this client's heap by lying about `mediaType`. The number is a CEILING on trust,
+         * not a format limit: a legitimate card that somehow grew past it is still
+         * delivered, just as an attachment rather than as a contact.
+         */
+        const val MAX_CONTACT_CARD_BYTES: Long = 64L * 1024
+
         fun defaultDisplayName(): String =
             System.getenv("OSHI_NAME")?.takeIf { it.isNotBlank() }
                 ?: "${System.getProperty("user.name") ?: "OSHI"} (${System.getProperty("os.name")})"

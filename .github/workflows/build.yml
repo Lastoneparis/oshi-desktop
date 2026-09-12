@@ -1,0 +1,78 @@
+# Proves this repository builds and tests FROM ONE CLONE, on the platforms it ships for.
+#
+# That is the whole point of the `shared/` directory: the seven files the desktop compiles
+# out of the Android tree are vendored here, so a reader can verify the client rather than
+# only read it. A green run on this workflow is the claim "the published source is the
+# source of the published installers" being checked rather than asserted.
+name: build
+
+on:
+  push: { branches: ['**'] }
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: test / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+
+      # The TRIPWIRE, enforced rather than documented. The shared crypto core is portable
+      # only as long as nothing in it reaches for the Android SDK; an `import android.*`
+      # there means the desktop and the phone have stopped compiling the same source.
+      - name: The shared core must not import the Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          hits=$(grep -rn '^import android' shared/ | wc -l | tr -d ' ')
+          grep -rn '^import android' shared/ || true
+          [ "$hits" = "0" ] || { echo "::error::the shared core imports the Android SDK"; exit 1; }
+          # `grep -c` and not `grep -q`: a needle that matches nothing and a grep that was
+          # never reached look identical, and this file has to tell them apart.
+          echo "checked $(find shared -name '*.kt' | wc -l | tr -d ' ') shared files"
+
+      - name: The vendored set is exactly the seven compiled files, plus named references
+        shell: bash
+        run: |
+          set -euo pipefail
+          v=shared/OSHI-Android/app/src/main/java/com/oshi/messenger
+          for f in network/v2/OSHICryptoV2.kt network/v2/OSHICryptoV2Streaming.kt \
+                   network/v2/OSHIRatchetV2.kt network/v2/V2Session.kt \
+                   network/v2/V2FileKeyMessage.kt network/v2/V2RetryBudget.kt \
+                   service/LlamaCpp.kt; do
+            [ -f "$v/$f" ] || { echo "::error::missing compiled shared source: $f"; exit 1; }
+          done
+          # Read by tests, never compiled — the include filter in build.gradle.kts omits them.
+          for f in network/v2/V2KeysClient.kt service/LocalLLMManager.kt; do
+            [ -f "$v/$f" ] || { echo "::error::missing parity reference: $f"; exit 1; }
+          done
+          echo "all nine present"
+
+      - name: Test
+        shell: bash
+        run: ./gradlew test --no-daemon
+
+      # A SKIPPED TEST LOOKS LIKE A PASSING ONE. 22 wire-parity tests read the iOS and
+      # Android trees, which are not in this repository, and guard themselves into
+      # skipping. Printing the count means a reader of this log knows what did NOT run.
+      - name: Say how many tests actually ran
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import glob, xml.etree.ElementTree as ET
+          t=f=s=0
+          for x in glob.glob("build/test-results/test/*.xml"):
+              r = ET.parse(x).getroot()
+              t += int(r.get("tests",0)); s += int(r.get("skipped",0))
+              f += int(r.get("failures",0)) + int(r.get("errors",0))
+          print("tests %d  ran %d  skipped %d  failed %d" % (t, t-s, s, f))
+          print("skipped tests need the private iOS/Android trees; they compare wire formats.")
+          PY

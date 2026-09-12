@@ -277,6 +277,73 @@ object WireClock {
         runCatching { java.time.OffsetDateTime.parse(value).toInstant().toEpochMilli() }
             .getOrNull()
 
+    // ===================================================== EPOCH 3 — UNIX SECONDS
+    //
+    // Added for PARITY.md row 2.1 (calls), and added HERE for the reason stated at the
+    // top of this file: this object is the one place an epoch is converted, and row 2.1
+    // is the first row whose payload puts epoch 3 ON THE WIRE rather than only inside a
+    // legacy wrapper it never emits.
+    //
+    // The call signalling envelope's `timestamp` is `System.currentTimeMillis() / 1000.0`
+    // — Unix SECONDS as a fractional Double (`VPSClient.kt:1167`), matched by iOS's
+    // `Date().timeIntervalSince1970` on the WebSocket and HTTP media frames
+    // (`VoiceCallManager.swift:14387`, `:14420`). It sits ONE NESTING LEVEL ABOVE a
+    // binary header that is Unix MILLIS, and both fields are called `timestamp`.
+    //
+    // See `com.oshi.desktop.call.CallSignalEnvelope` for the shipped Android bug this
+    // confusion appears to have caused, and for why that client reads staleness off the
+    // millis header inside the AEAD rather than off this field.
+
+    /**
+     * Unix millis → Unix SECONDS as a fractional Double, for a value about to go on the
+     * wire.
+     *
+     * Strict in the same window and for the same reason as [toAppleSeconds]: we control
+     * our own clock. Note it does NOT round to whole seconds — both shipped emitters
+     * divide by `1000.0` and keep the fraction, and [jsonNumber] then prints it without
+     * an exponent.
+     */
+    fun toUnixSecondsDouble(unixMillis: Long): Double {
+        require(unixMillis in MIN_PLAUSIBLE_UNIX_MS..MAX_PLAUSIBLE_UNIX_MS) {
+            "unixMillis=$unixMillis is outside [2000-01-01, 2100-01-01] — an un-converted " +
+                "epoch, most likely (PLAN.md §4.2). This function's INPUT is Unix MILLIS " +
+                "and its OUTPUT is Unix SECONDS."
+        }
+        return unixMillis / 1000.0
+    }
+
+    /**
+     * Unix seconds off the wire → Unix millis, or **null** when the value is not a
+     * plausible Unix-seconds instant.
+     *
+     * The guard here is the MIRROR of [toUnixMillis]'s: that one rejects values too LARGE
+     * to be Apple-epoch seconds, this one rejects values too large to be Unix seconds —
+     * i.e. it catches the far more common mistake of putting MILLIS in this field. A Unix
+     * millis value for any date after 1970 is ≥ 1e12, and 1e12 Unix seconds is the year
+     * 33 658, so the separation is clean in the direction that matters.
+     *
+     * Null rather than a throw, for [toUnixMillis]'s reason: the caller decides whether
+     * one unreadable date is worth the whole payload, and for a call envelope it is not.
+     */
+    fun fromUnixSecondsDouble(unixSeconds: Double): Long? {
+        if (!unixSeconds.isFinite()) return null
+        if (unixSeconds < 0.0) return null
+        val ms = Math.round(unixSeconds * 1000.0)
+        if (ms !in MIN_PLAUSIBLE_UNIX_MS..MAX_PLAUSIBLE_UNIX_MS) return null
+        return ms
+    }
+
+    /**
+     * True when a value in a Unix-SECONDS field is almost certainly Unix MILLIS that were
+     * never converted — the mistake shipped in Android's call signal parser.
+     *
+     * Advisory and countable, exactly like [looksLikeUnixMillis]. Never used to rewrite a
+     * value: see the note on [looksLikeUnixSeconds] for why a heuristic that silently
+     * shifts a timestamp is worse than the confusion it fixes.
+     */
+    fun secondsFieldLooksLikeMillis(unixSeconds: Double): Boolean =
+        unixSeconds.isFinite() && unixSeconds >= MIN_PLAUSIBLE_UNIX_MS.toDouble()
+
     /** 2000-01-01T00:00:00Z — the low end of [com.oshi.desktop.store.Message]'s window. */
     private const val MIN_PLAUSIBLE_UNIX_MS = 946_684_800_000L
 

@@ -120,8 +120,32 @@ class SharedSourceTripwireTest {
         val androidFields = Regex("""val\s+(\w+)\s*:""").findAll(decl).map { it.groupValues[1] }.toList()
         assertEquals("the declaration parser found the wrong number of fields", 6, androidFields.size)
 
+        // `$` NAMES ARE COMPILER OUTPUT, NOT DECLARATIONS — and this filter was added
+        // because a real change made this guard go red for the wrong reason.
+        //
+        // Adding the Compose Multiplatform plugin applies the Compose compiler to the
+        // WHOLE module, and it stamps a `$stable` field onto data classes — including
+        // this one. Compose does NOT mark it synthetic, so `isSynthetic` alone let it
+        // through and the tripwire reported "FetchedBundle drifted" when nothing had
+        // drifted: the Android declaration and the desktop copy were identical and only
+        // the toolchain had changed.
+        //
+        // What this gives up, stated rather than hidden: a field whose name contains `$`
+        // can no longer be detected as drift. In Kotlin that name is unreachable without
+        // backticks, and no data class in either tree has one, so the coverage lost is
+        // theoretical while the false positive was blocking every run.
+        //
+        // What it does NOT fix. The Compose compiler is now instrumenting bytecode the
+        // Android app compiles WITHOUT it, so "the same source, compiled the same way" is
+        // no longer strictly true of this module — see build.gradle.kts. The structural
+        // repair is the one this assertion's own message already recommends: extract a
+        // :v2-core module with no UI plugins on it and let the UI module depend on it.
+        // Until that happens, this filter is a plaster over a real (if currently
+        // harmless) divergence, and it is written down here so the next reader knows.
         val desktopFields = com.oshi.messenger.network.v2.FetchedBundle::class.java
-            .declaredFields.filterNot { it.isSynthetic }.map { it.name }
+            .declaredFields
+            .filterNot { it.isSynthetic || it.name.contains('$') }
+            .map { it.name }
 
         assertEquals(
             "FetchedBundle drifted between the Android tree and the desktop copy. " +

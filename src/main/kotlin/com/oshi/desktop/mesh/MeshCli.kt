@@ -39,7 +39,10 @@ fun runMeshCli(args: Array<String>) {
     val node = MeshNode(myKey, name)
     node.onPeersChanged = { peers ->
         println("── peers (${peers.size}) ─────────────────────────")
-        peers.forEach { println("   ${it.displayName} [${it.platform}] ${it.publicKey.take(16)}… ${it.host}:${it.port}") }
+        peers.forEach {
+            val where = if (it.portIsDialable) "${it.host}:${it.port}" else "${it.host} (dialled us — no listen port advertised)"
+            println("   ${it.displayName} [${it.platform}] ${it.publicKey.take(16)}… $where")
+        }
     }
     node.onMessage = { msg ->
         println("<< ${msg.type} from ${msg.senderName} (${msg.platform}): ${msg.payload.take(400)}")
@@ -87,7 +90,8 @@ fun runMeshCli(args: Array<String>) {
                 if (peers.isEmpty()) println("   (none)")
                 peers.forEach {
                     val live = if (node.isConnectedTo(it.publicKey)) "connected" else "discovered"
-                    println("   [$live] ${it.displayName} [${it.platform}] ${it.publicKey.take(24)}… ${it.host}:${it.port}")
+                    val where = if (it.portIsDialable) "${it.host}:${it.port}" else "${it.host} (dialled us — no listen port advertised)"
+                    println("   [$live] ${it.displayName} [${it.platform}] ${it.publicKey.take(24)}… $where")
                 }
             }
             trimmed == "/routes" -> {

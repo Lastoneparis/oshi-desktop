@@ -227,11 +227,71 @@ object BlockPolicy {
      * The gate BOTH phones do have: an outgoing call to a blocked peer is refused
      * (`VoiceCallManager.swift:5603` throws `CallError.peerBlocked`, `CallManager.kt:365`).
      *
-     * Nothing calls this yet — the desktop has no calls (PARITY.md 2.1). It is stated
-     * here so that row inherits the answer instead of re-deriving it.
+     * PARITY.md row 2.1 is now its caller — see
+     * [com.oshi.desktop.call.CallStateMachine.startCall].
      */
     fun outgoingCall(contacts: ContactStore, peer: String): Outbound =
         if (isBlocked(contacts, peer)) Outbound.REFUSE_BLOCKED else Outbound.ALLOW
+
+    /**
+     * The INCOMING call gate, added for PARITY.md row 2.1. §6 of the class note is its
+     * specification; this is the function that row calls.
+     *
+     * ============================================================ THE REFUSAL IS SILENT
+     *
+     * It returns [Inbound.DROP_BLOCKED] and the caller must send NOTHING back — not a
+     * decline, not a busy, not an error. That is the shipped behaviour on both platforms
+     * and both wrote down why. iOS, `VoiceCallManager.swift:6373-6377`:
+     *
+     * ```swift
+     * if BlockedContactsManager.shared.isBlocked(peerPublicKey) {
+     *     // Silently decline - don't even notify the caller we received it
+     *     return
+     * }
+     * ```
+     *
+     * Android drops the same way at `EnhancedCallManager.kt:2486-2489` and again in
+     * `IncomingCallService.kt:100-127`. The reason is the one §1 of this note already
+     * paid for on the message side: **a refusal that is observable tells the blocked
+     * person they are blocked.** A decline is indistinguishable from "the user pressed
+     * Decline"; silence is indistinguishable from "the phone is off". Only the second is
+     * a block.
+     *
+     * This is also why row 0.21's defect 1 — iOS answering a blocked sender's message
+     * with a delivery receipt — is a real bug and not a nitpick: the call path gets this
+     * right on both platforms and the message path does not.
+     *
+     * ============================================================ WHERE IT SITS: AFTER DECRYPT
+     *
+     * Same answer as [inbound], for a DIFFERENT reason, and the difference is worth
+     * stating because it changes what "before decryption" could even mean here.
+     *
+     * On V2 the ratchet must advance for a blocked sender or the chain desynchronises
+     * (§2). A call signal is sealed with a STATIC-static ECDH
+     * ([com.oshi.desktop.call.CallSignalCrypto]) — there is no chain and nothing to
+     * desynchronise, so that argument does not apply. What applies instead is that the
+     * TYPE of a call packet is byte 0 of the *plaintext*: until the seal is opened, a
+     * ring and a hang-up are the same opaque blob. Android names this exactly —
+     * `handleCallSignal` calls `resolveSignalType`, which decrypts at
+     * `EnhancedCallManager.kt:2334`, purely to read the type byte, and only then reaches
+     * the block check at `:2486`.
+     *
+     * So the block is evaluated after the AEAD and before ANY ring, state change or
+     * notification. The envelope's `sender` field is available earlier and is
+     * deliberately not used for this: it is an unauthenticated claim on a server with no
+     * authentication (`call_server.js:65`), so gating on it would let anyone suppress a
+     * call by spoofing a blocked sender's name.
+     *
+     * ============================================================ AND A GAP WE INHERIT
+     *
+     * On iOS the FIRST gate is in the VoIP push handler, before any decrypt
+     * (`VoIPPushManager.swift:1355-1364`), because a push carries the caller key in
+     * cleartext. The desktop has no push at all (PARITY.md row 2.3), so that gate has no
+     * desktop equivalent and needs none — there is no path here that learns a caller
+     * before the packet arrives.
+     */
+    fun incomingCall(contacts: ContactStore, from: String): Inbound =
+        if (isBlocked(contacts, from)) Inbound.DROP_BLOCKED else Inbound.DELIVER
 
     /**
      * Hide blocked peers from a conversation list.

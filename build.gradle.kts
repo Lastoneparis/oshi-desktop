@@ -6,6 +6,11 @@ import java.util.concurrent.atomic.AtomicInteger
 
 plugins {
     kotlin("jvm") version "2.2.20"
+    // PARITY.md row 1.1. Justified in full in the COMPOSE MULTIPLATFORM block below —
+    // this is the first new Gradle plugin this project has taken, and Working rule 4
+    // asks for a reason that survives being written down.
+    id("org.jetbrains.kotlin.plugin.compose") version "2.2.20"
+    id("org.jetbrains.compose") version "1.9.0"
     application
 }
 
@@ -21,7 +26,13 @@ version = "0.0.1"
  * `-PoshiAndroidRoot=...` when the layout differs.
  */
 val oshiAndroidRoot: String = providers.gradleProperty("oshiAndroidRoot").orNull
-    ?: rootDir.parentFile.resolve("OSHI-Android").absolutePath
+    ?: rootDir.parentFile.resolve("OSHI-Android").takeIf { it.isDirectory }?.absolutePath
+    // THE PUBLIC CHECKOUT. In the monorepo the Android tree is a sibling; in the
+    // standalone open-source repository the seven shared files are vendored here so the
+    // project builds from ONE clone. Without this fallback an outside reader could read
+    // the source and not compile it, which is the difference between published and
+    // auditable. `shared-sources-match` in CI is what keeps the vendored copy honest.
+    ?: rootDir.resolve("shared/OSHI-Android").absolutePath
 
 /** The iOS tree. Read only by tests, and only to diff wire contracts against Swift. */
 val oshiIosRoot: String = providers.gradleProperty("oshiIosRoot").orNull
@@ -49,9 +60,33 @@ val oshiIosRoot: String = providers.gradleProperty("oshiIosRoot").orNull
  */
 val sharedV2Sources = "$oshiAndroidRoot/app/src/main/java/com/oshi/messenger/network/v2"
 
+/**
+ * The SEVENTH shared file, and the only one outside `network/v2` — PARITY.md row 2.5.
+ *
+ * `service/LlamaCpp.kt` is the JNI declaration of llama.cpp: four `external fun`s and a
+ * `System.loadLibrary("llama_jni")`. It qualifies for the same treatment as the crypto
+ * six for exactly the same reason — it has NO imports at all, let alone `android.*` — and
+ * it must be shared rather than copied for a reason the crypto files do not have:
+ *
+ *   **A JNI declaration is half of an ABI.** The C++ side exports symbols named after the
+ *   fully-qualified class (`Java_com_oshi_messenger_service_LlamaCpp_generate`) and typed
+ *   by the Kotlin signature. A COPY in `com.oshi.desktop` would name different symbols and
+ *   need a second shim, or — worse — the same shim with the package edited, which drifts
+ *   silently: a renamed parameter type on one side and the other side still links, right
+ *   up to the `UnsatisfiedLinkError` at the first call. Compiling the Android file means
+ *   the desktop and the phone load a shim built from ONE header.
+ *
+ * The desktop does NOT share `LocalLLMManager.kt` or `NLPManager.kt`: those are Hilt +
+ * `android.content.Context` + ML Kit, and the parts of them worth having (the ChatML
+ * prompt, the output cleanup) are re-derived and byte-asserted against the Kotlin in
+ * `com.oshi.desktop.ai.OshiPrompt`. The TRIPWIRE above applies to this file too.
+ */
+val sharedServiceSources = "$oshiAndroidRoot/app/src/main/java/com/oshi/messenger/service"
+
 sourceSets {
     main {
         kotlin.srcDir(sharedV2Sources)
+        kotlin.srcDir(sharedServiceSources)
         kotlin.include(
             "**/OSHICryptoV2.kt",
             "**/OSHICryptoV2Streaming.kt",
@@ -59,9 +94,288 @@ sourceSets {
             "**/V2Session.kt",
             "**/V2FileKeyMessage.kt",
             "**/V2RetryBudget.kt",
+            "**/LlamaCpp.kt",
             // ...plus everything this project actually owns:
             "com/oshi/desktop/**",
         )
+    }
+}
+
+// =====================================================================================
+// COMPOSE MULTIPLATFORM — PARITY.md row 1.1. THE UI FRAMEWORK DECISION, TAKEN.
+// =====================================================================================
+//
+// This is the first new Gradle PLUGIN this project has ever taken, and the first
+// dependency that is not either the JDK or one of the two libraries Android pins. So it
+// gets the same treatment the WEBRTC block below gets: what was chosen, what was
+// rejected, what it costs measured rather than guessed, and what is NOT proven.
+//
+// THE DECISION: Compose Multiplatform for desktop (JVM), 1.9.0. Default ON, no opt-in
+// flag. PLAN.md §1 recommended it and deferred it "until the protocol layer is proven";
+// PARITY.md Tier 0 now records text AND media crossing to a shipped Android phone over
+// the live relay, so the condition it was deferred on has been met. A flag would have
+// been the cowardly version of this decision — an opt-in UI is a UI nobody compiles,
+// and this repository already has a row (0.27) about code that is written, green and
+// has never moved a byte.
+//
+// WHY IT WINS, AND THE ONE THING THAT ALMOST MADE IT LOSE
+//
+// PLAN.md §1's honest caveat about Compose was that "the Android UI is Jetpack Compose
+// married to Hilt, Room and Android ViewModels — the screens are not portable as-is."
+// That is still true and it is worth being blunt about: **there is no screen reuse
+// here.** Not one composable is shared with OSHI-Android. So the usual argument for
+// Compose Multiplatform — share the UI — does not apply to this project at all, and if
+// that were the only argument this row should have picked something else.
+//
+// What survives the caveat is narrower and is the actual reason:
+//
+//   1. **One language across the whole client.** The state layer this UI drives
+//      (`com.oshi.desktop.ui.state`) is plain Kotlin talking to `OshiClient` directly —
+//      the same objects, the same types, no serialisation boundary, no second model of
+//      what a Message is. Swing/JavaFX would have been Kotlin too, so this is not
+//      decisive on its own; it matters because of (2).
+//   2. **A Kotlin developer reading OSHI-Android's UI can read this one.** The idioms
+//      are identical even though the code is not shared: `@Composable`, state hoisting,
+//      `remember`, unidirectional data flow. This project's documented failure mode is
+//      two implementations drifting apart because nobody could hold both in their head;
+//      picking a UI toolkit that at least reads the same on both sides is the cheapest
+//      available hedge against that on the one layer where the code genuinely cannot be
+//      shared.
+//   3. **One artifact for all three targets.** Skiko renders identically on Windows,
+//      Linux and macOS. Swing's look and feel does not, and JavaFX is no longer in the
+//      JDK — adopting it would mean shipping OpenJFX per platform, which is the same
+//      per-platform native problem for a *worse* toolkit.
+//
+// WHAT WAS REJECTED
+//
+//   * **Swing.** Zero new dependencies, which under Working rule 4 is a genuine
+//     argument and the reason this was not dismissed. Rejected on the honest reading of
+//     what the remaining 101 screens in VIEWS.md need: a chat transcript with
+//     hover-reveal actions, reactions, inline media and a live-updating list is a lot of
+//     custom `paintComponent` and a lot of `SwingUtilities.invokeLater`. Compose's cost
+//     is paid once, at the dependency; Swing's is paid per screen, for 101 screens.
+//   * **JavaFX / OpenJFX.** Out of the JDK since 11. Adopting it means per-platform
+//     native modules — exactly the packaging problem the GStreamer option was rejected
+//     for below — for a toolkit with less momentum than Compose.
+//   * **An Electron/Tauri shell.** PLAN.md §1 already disposed of this as options (a)
+//     and (c): it is the web client, it is not end-to-end encrypted, and wrapping it
+//     does not change that.
+//
+// WHAT IT COSTS, MEASURED (Content-Length off repo1.maven.org, 1.9.0 / skiko 0.9.22.2)
+//
+//      compose runtime + foundation + ui + material3   ~9 MB of jars, pure Java/Kotlin
+//      skiko-awt-runtime-<host>                        ~28 MB unpacked, ONE per host
+//
+// The skiko native is loaded the same way the WebRTC one is — an ordinary classpath
+// resource inside an ordinary jar — so `jpackageInput`, which is a flat `Sync` of the
+// runtime classpath, stages it with no change to any packaging task. And like the
+// WebRTC native, only the HOST's classifier is resolved: `compose.desktop.currentOs`
+// picks it from `os.name`/`os.arch`, so each installer carries one and never all five.
+//
+// WHAT IS NOT PROVEN, and this is the part that matters most
+//
+//   * **The window is OPENED on Windows and Linux in CI, and has never been LOOKED AT
+//     there.** `package / windows-latest` launches `OSHI.exe --ui` and fails unless the
+//     process is still alive 25 seconds later, which is what proves skiko's windows-x64
+//     native loads at all; the Linux leg does the same under `xvfb`. That is the whole of
+//     the evidence. "Did not exit" is not "renders correctly", and no screenshot of this
+//     window on either platform exists.
+//   * **No test in this repository opens a window**, deliberately: a UI test that needs
+//     a display cannot run on a headless CI runner, and this project's rule is that a
+//     guard which has not been watched failing is not a guard. What IS tested is
+//     `com.oshi.desktop.ui.state`, which is plain Kotlin with zero `androidx.compose`
+//     imports and drives a REAL `OshiClient` over a REAL in-process relay. The
+//     composables are a thin renderer over that state and are NOT covered.
+//   * The 34 localisation catalogs (row 1.5) are NOT wired into this UI yet — its
+//     English strings are literals. Row 1.5's coverage claim is still "the 12 keys the
+//     CLI uses", and adding a window did not change that number.
+//
+// =====================================================================================
+// WEBRTC — PARITY.md row 2.1. OPT-IN, DEFAULT OFF. Read this before turning it on.
+// =====================================================================================
+//
+// THE FINDING THAT DECIDES THIS ROW: **neither shipped OSHI client uses WebRTC.**
+//
+// The ledger's own words for row 2.1 were "WebRTC + a codec pipeline", and that premise
+// turned out to be wrong in the same way row 0.25's "iOS-only" premise was wrong. What
+// the phones actually run was read line by line in both trees:
+//
+//   * iOS: `OSHI.xcodeproj` has ZERO SwiftPM/CocoaPods/Carthage entries — no Podfile, no
+//     Package.resolved, no WebRTC.xcframework. `StunClient.swift:12` says it outright:
+//     "No libwebrtc. Pure Network.framework." Every `WebRTC` grep hit in the Swift tree
+//     is a comment.
+//   * Android: `app/build.gradle.kts:221-235` is a comment block explaining the REMOVAL
+//     of `io.getstream:stream-webrtc-android` — "declared here and never used… `grep -rn
+//     org.webrtc app/src` returns zero hits".
+//   * There is no SDP anywhere in either tree. ICE candidates are a bespoke binary TLV
+//     (`[version 0x01][count][type][family][port BE16][addr][priority BE32]`), not
+//     `a=candidate:` text. STUN and TURN are hand-rolled against RFC 5389 / 5766.
+//   * Media is AAC-ELD / raw PCM / the in-house `OshiCodec`, AES-256-GCM under the
+//     offer's 32-byte session key. Not SRTP.
+//
+// And the project's own direction is explicitly AWAY from WebRTC's codec:
+// `CALL_V2_PLAN.md:26-31` specifies a proprietary codec and states the constraint as a
+// user requirement — *"Why proprietary: requirement from user. Cannot rely on Opus/AAC."*
+//
+// So a WebRTC media stack on the desktop would produce a client that **cannot call a
+// single shipped OSHI phone.** That is precisely the shape PARITY.md row 0.16 warns
+// about — "the obvious reading would produce something no phone can read" — and it is
+// why the media path this client actually ships (`com.oshi.desktop.call.media`) is the
+// OSHI one: raw PCM 48 kHz in packet type 0x15, sealed with the existing AES-256-GCM
+// under the call's session key and directional nonce salts, captured and rendered
+// through `javax.sound.sampled`. **Zero new dependencies**, and byte-compatible with
+// what an iPhone and an Android phone already decode.
+//
+// WHY THE DEPENDENCY IS DECLARED AT ALL, AND WHY IT IS OFF
+//
+// Turning it on buys desktop↔desktop calls with a mature congestion controller, jitter
+// buffer, echo canceller and packet-loss concealment — none of which `javax.sound`
+// provides and none of which this row writes. That is a real capability and the option
+// was verified rather than guessed (see below). It is DEFAULT OFF because Working rule 4
+// asks for a reason that survives being written down, and "adds 15 MB of native code per
+// installer to talk to nobody the product currently has" does not survive it. Whether
+// the desktop ever gets a WebRTC lane is a PRODUCT decision — the same status row 0.26
+// gives the bot lane, and recorded here as open rather than taken quietly.
+//
+// Enable with `-PwithWebRtc=true`. Nothing in `com.oshi.desktop.app` imports it.
+//
+// WHAT WAS VERIFIED, ON THIS MACHINE, 2026-08-25 (macOS aarch64, JDK 17)
+//
+//   * the artifact resolves and its native library loads: `new PeerConnectionFactory(
+//     new HeadlessAudioDeviceModule())` succeeded in 1 144 ms;
+//   * offered audio codecs are opus/48000, red, G722, PCMU, PCMA, CN, telephone-event;
+//   * a generated SDP offer is well-formed — 1 344 bytes, `m=audio`, `a=ice-ufrag:`,
+//     `a=fingerprint:`, opus present;
+//   * **two in-process peer connections completed offer → answer → ICE and both reached
+//     `RTCPeerConnectionState.CONNECTED`**, 5 host candidates each, gathering COMPLETE.
+//
+// WHAT WAS NOT AND CANNOT BE VERIFIED HERE, stated the way row 0.27 states the radio
+// link: no audio hardware was opened (the test uses `HeadlessAudioDeviceModule`), no
+// call crossed a machine boundary, no NAT was traversed, and no Windows or Linux native
+// has ever been loaded — only macos-aarch64 has. Two peers inside one JVM prove the API,
+// the DTLS handshake and the ICE loop; they do not prove a call.
+//
+// WHAT WAS CONSIDERED
+//
+//   1. `dev.onvoid.webrtc:webrtc-java` — JNI bindings over Google's own libwebrtc.
+//      CHOSEN, of the three. Apache-2.0 (`webrtc-java-parent-0.16.0.pom`, <licenses>). Publishes
+//      prebuilt natives to Maven Central for windows-x86_64, linux-x86_64,
+//      linux-aarch64, linux-aarch32, macos-x86_64 and macos-aarch64 — verified by
+//      listing the 0.16.0 directory on repo1, not by reading the README. 0.16.0 was
+//      released 2026-08-24, so the project is alive.
+//
+//   2. GStreamer via `gst1-java-core`. REJECTED on packaging. gst1-java-core is a pure
+//      Java JNA binding with NO bundled natives: it needs a SYSTEM GStreamer install
+//      plus the `webrtcbin` plugin from gst-plugins-bad. On Linux that is a distro
+//      package this build would have to declare as a .deb/.rpm dependency; on Windows
+//      it is a separate MSI the user installs by hand, or ~100 MB of DLLs this build
+//      would have to redistribute and keep in step. Row 1.6's whole position is that
+//      the installer is jpackage and nothing else — an external system runtime breaks
+//      that, and it breaks it worst on Windows, which is half the point of this port.
+//
+//   3. A pure-Java WebRTC stack. THERE ISN'T ONE, and this was checked rather than
+//      assumed. What exists in pure Java is the SIGNALLING and ICE half — e.g. ice4j —
+//      never the media half: SRTP, the Opus codec, the jitter buffer, echo cancellation
+//      and the congestion controller are all native in every shipped implementation.
+//      Writing that is not a row, it is a company. Recorded here so nobody re-opens it.
+//
+// WHAT IT COSTS, MEASURED (Content-Length off repo1.maven.org, 0.16.0)
+//
+//      webrtc-java-0.16.0.jar                  113 KB   pure Java API, all platforms
+//      ...-windows-x86_64.jar                 8.31 MB   → one .dll
+//      ...-linux-x86_64.jar                   9.36 MB   → one .so
+//      ...-linux-aarch64.jar                  8.37 MB
+//      ...-macos-aarch64.jar                  6.32 MB   → one 13.9 MB .dylib
+//
+// So roughly +8-10 MB compressed on the runtime classpath, ~15 MB unpacked. Only the
+// HOST's classifier is added (see [webrtcNativeClassifier]), because jpackage does not
+// cross-build anyway — each installer is already produced on its own runner, so each
+// installer gets exactly one native and never the other five.
+//
+// THE TRAP, OBSERVED NOT READ: the plain coordinate resolves to NOTHING.
+//
+// `implementation("dev.onvoid.webrtc:webrtc-java:0.16.0")` on its own compiles fine and
+// then dies at runtime with UnsatisfiedLinkError. The published POM declares its own
+// natives as a self-dependency with `<classifier>${platform.classifier}</classifier>`,
+// and `platform.classifier` is set by MAVEN PROFILES activated on <os><family>. Gradle
+// does not evaluate Maven profiles. It was run: `gradlew dependencies` printed
+//
+//     \--- dev.onvoid.webrtc:webrtc-java:0.16.0
+//
+// with no children and no warning — the natives are silently absent. That is exactly
+// the shape of failure this repository keeps writing rows about: a green build that
+// measured nothing. The classifier below is therefore declared EXPLICITLY, and
+// `WebRtcAvailability` fails loudly at runtime rather than reading as "calls are off".
+//
+// HOW THE NATIVE IS LOADED, and why it survives jpackage.
+//
+// `dev.onvoid.webrtc.internal.NativeLoader` (read from the -sources jar) does
+// `getClassLoader().getResourceAsStream("libwebrtc-java-<os>-<arch>.<ext>")`, copies it
+// to a temp file, `System.load`s it, then deletes it on POSIX / `deleteOnExit` on
+// Windows. So the native is an ordinary CLASSPATH RESOURCE inside an ordinary jar.
+// `jpackageInput` is a flat `Sync` of `tasks.jar` + `configurations.runtimeClasspath`,
+// and the natives jar is just another jar on that classpath with a distinct file name —
+// it stages and ships with no change to the packaging tasks. Two consequences worth
+// knowing before a release: startup writes ~15 MB to the system temp dir every launch,
+// and on Windows that file is only reclaimed on a CLEAN JVM exit (`deleteOnExit`), so a
+// crash leaks it. Neither is a blocker; both are things a support ticket will ask about.
+//
+// WHAT DOES NOT WORK: **windows-aarch64 is NOT published.** Windows on ARM gets no
+// native and therefore no calls. That is a platform gap, not a footnote — row 2.1 is
+// x86_64-only on Windows, and [webrtcNativeClassifier] names it in the failure message
+// instead of quietly resolving nothing.
+
+/** Pinned. A different libwebrtc is a media-interop risk, not a housekeeping detail. */
+val webrtcVersion = "0.16.0"
+
+/**
+ * Is the WebRTC lane compiled in? **Default false** — see the WEBRTC block above.
+ *
+ * `-PwithWebRtc=true` turns it on. When it is off, `com.oshi.desktop.call.webrtc` is
+ * excluded from BOTH source sets, so the default build has exactly the dependencies it
+ * had before this row and `WebRtcLane` cannot be referenced by accident from the
+ * shipping media path.
+ */
+val withWebRtc: Boolean = providers.gradleProperty("withWebRtc").orNull?.toBoolean() ?: false
+
+// Compile the WebRTC lane out entirely unless it was asked for. A source set that is
+// merely "not called" still has to compile, which would drag the dependency back in
+// through the back door and make the default build carry it after all.
+if (!withWebRtc) {
+    sourceSets {
+        main { kotlin.exclude("com/oshi/desktop/call/webrtc/**") }
+        test { kotlin.exclude("com/oshi/desktop/call/webrtc/**") }
+    }
+}
+
+/**
+ * The natives classifier for the machine this build is running on.
+ *
+ * Override with `-PwebrtcNatives=linux-x86_64` when staging a classpath for another
+ * platform. Returns null when the host has no published native, and the caller turns
+ * that into a NAMED failure — see the WHAT DOES NOT WORK note above.
+ */
+val webrtcNativeClassifier: String? = providers.gradleProperty("webrtcNatives").orNull ?: run {
+    val os = System.getProperty("os.name").orEmpty().lowercase()
+    val arch = System.getProperty("os.arch").orEmpty().lowercase()
+    val family = when {
+        os.contains("win") -> "windows"
+        os.contains("mac") || os.contains("darwin") -> "macos"
+        else -> "linux"
+    }
+    // `os.arch` spellings differ per JVM vendor; these are the ones actually observed.
+    val cpu = when (arch) {
+        "amd64", "x86_64", "x64" -> "x86_64"
+        "aarch64", "arm64" -> "aarch64"
+        "arm", "armv7l" -> "aarch32"
+        else -> null
+    }
+    when {
+        cpu == null -> null
+        // The one hole in the matrix. Named, not silently resolved to nothing.
+        family == "windows" && cpu != "x86_64" -> null
+        family == "macos" && cpu == "aarch32" -> null
+        else -> "$family-$cpu"
     }
 }
 
@@ -70,6 +384,34 @@ dependencies {
     // A different BouncyCastle is a parity risk, not a housekeeping detail.
     implementation("org.bouncycastle:bcprov-jdk18on:1.76")
     implementation("org.json:json:20231013")
+
+    // PARITY.md row 1.1 — see the COMPOSE MULTIPLATFORM block above for the whole
+    // justification. `currentOs` resolves the skiko native for THIS host only, for the
+    // same reason [webrtcNativeClassifier] does: jpackage does not cross-build, so an
+    // installer that carried all five natives would be carrying four it can never use.
+    implementation(compose.desktop.currentOs)
+    implementation(compose.material3)
+
+    // PARITY.md row 2.1. OPT-IN — see the WEBRTC block above for the whole justification
+    // and for why the SHIPPING media path needs none of this.
+    val nativeClassifier = webrtcNativeClassifier
+    if (withWebRtc) {
+        implementation("dev.onvoid.webrtc:webrtc-java:$webrtcVersion")
+        if (nativeClassifier != null) {
+            implementation("dev.onvoid.webrtc:webrtc-java:$webrtcVersion:$nativeClassifier")
+        }
+    }
+    if (withWebRtc && nativeClassifier == null) {
+        logger.warn(
+            "[webrtc] No published libwebrtc native for os.name='${System.getProperty("os.name")}' " +
+                "os.arch='${System.getProperty("os.arch")}'. Upstream publishes windows-x86_64, " +
+                "linux-x86_64, linux-aarch64, linux-aarch32, macos-x86_64 and macos-aarch64 — " +
+                "notably NOT windows-aarch64. The build proceeds and the SIGNALLING half of " +
+                "PARITY.md row 2.1 still compiles and tests; the MEDIA half will refuse to start " +
+                "at runtime with a named error (see WebRtcAvailability). Override with " +
+                "-PwebrtcNatives=<classifier> if you know better than this check."
+        )
+    }
 
     testImplementation("junit:junit:4.13.2")
 }
@@ -101,6 +443,54 @@ tasks.named<JavaExec>("run") {
     standardInput = System.`in`
 }
 
+/**
+ * Regenerate `src/main/resources/i18n/` from the iOS `.lproj` tree.
+ *
+ * DELIBERATELY NOT wired into `build`. The 34 catalogs are CHECKED IN, for the reason in
+ * `Catalog.kt`'s doc: a Windows or Linux runner has no `OSHI/` checkout, and a generation
+ * step that runs only where the iOS tree happens to exist would produce a packaged `.msi`
+ * containing zero translations without turning anything red. Generation is a deliberate
+ * act by someone holding both trees; `CatalogFreshnessTest` is what notices when they
+ * drift, and it SKIPS rather than fails where the iOS tree is absent.
+ */
+/**
+ * Rasterise this window's screens to PNG, with no display — `./gradlew renderScreens`.
+ *
+ * The composables in `com.oshi.desktop.ui` are covered by no test and that is deliberate
+ * (a test needing a display cannot run on the headless runners this project's Windows and
+ * Linux evidence comes from). The gap it leaves is the class of defect nobody finds in a
+ * diff: a pane that measures to zero height, a Canvas with no width, two labels on top of
+ * each other. `ImageComposeScene` renders into a Skia surface with no window and no display
+ * server, so this runs anywhere the suite runs — including the two platforms where nobody
+ * has ever LOOKED at this window.
+ *
+ * It is a task and not a test on purpose: rendering proves a composition measures and
+ * paints, never that it is correct, and a golden-image assertion on a UI this young would
+ * fail on every intentional change until somebody deleted it. See `ScreenRenderer`'s own
+ * doc. The blank-frame check it prints is the one piece that IS a judgement — and it reads
+ * the mean as well as the standard deviation, because a gate on the spread alone is how a
+ * previous campaign shipped 13 black frames.
+ */
+tasks.register<JavaExec>("renderScreens") {
+    group = "verification"
+    description = "Renders the window's screens to build/screens as PNG, without opening a window."
+    dependsOn(tasks.named("testClasses"))
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("com.oshi.desktop.ui.ScreenRenderer")
+    args(layout.buildDirectory.dir("screens").get().asFile.absolutePath)
+    // Skiko picks a software renderer here; there is no window to composite into and the
+    // default GPU path wants a surface it will not get on a headless runner.
+    systemProperty("skiko.renderApi", "SOFTWARE")
+}
+
+tasks.register<JavaExec>("i18nExtract") {
+    group = "localisation"
+    description = "Re-extract the 34 .lproj catalogs into src/main/resources/i18n (needs -PoshiIosRoot)."
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("com.oshi.desktop.i18n.tools.CatalogExtractor")
+    args(oshiIosRoot, layout.projectDirectory.dir("src/main/resources").asFile.absolutePath)
+}
+
 tasks.test {
     // Lets the tripwire test be pointed at a mutated copy of the Android tree, so the
     // guard can be watched FAILING instead of merely being green.
@@ -109,6 +499,47 @@ tasks.test {
     // tests read both trees. Absent either one, those tests skip rather than fail — a
     // Linux build box has no reason to hold the iOS sources.
     systemProperty("oshi.ios.root", providers.gradleProperty("oshiIosRootOverride").orNull ?: oshiIosRoot)
+
+    // PARITY.md row 2.5. Where `libllama_jni.so` / `llama_jni.dll` is, for the ONE test
+    // that can only be answered by a JVM: does `System.loadLibrary("llama_jni")` — inside
+    // a companion init in a file this project does not own — resolve?
+    //
+    // It has to be a JVM ARGUMENT and not `systemProperty` set later: `java.library.path`
+    // is read once, when the JVM starts, and a value assigned afterwards is ignored in
+    // silence. Gradle forks the test JVM, so this lands on that fork's command line.
+    //
+    // Unset on every developer machine and on every CI job except `native-llama`. Nothing
+    // skips as a result — LlamaNativeTest asserts the ABSENT behaviour when the library is
+    // absent and the LOADED behaviour when OSHI_EXPECT_LLAMA_NATIVE says one was built.
+    providers.gradleProperty("llamaLibDir").orNull?.let { dir ->
+        jvmArgs("-Djava.library.path=$dir")
+        logger.lifecycle("tests will look for the llama.cpp JNI library in: $dir")
+    }
+
+    // SKIKO RENDERS IN SOFTWARE UNDER THE SUITE TOO, not only under `renderScreens`.
+    //
+    // Tests that rasterise a composition through `ImageComposeScene` need this exactly as
+    // much as the screenshot task does, and they did not have it: three MediaViewer render
+    // tests failed in the full suite with "magenta pixels found: 0" — the bitmap decoded
+    // and never reached the surface — while passing when the same code was driven from
+    // `renderScreens`, which sets the property. The defect was invisible to whoever wrote
+    // either side: the renderer worked, the tests worked in isolation, and only the
+    // integrated run disagreed.
+    //
+    // It matters more on CI than here. A GitHub runner is headless; the default GPU path
+    // wants a surface it will never get, and the failure it produces is a blank frame
+    // rather than an exception — which is the shape of failure this project has already
+    // shipped once (PARITY.md's 13 black frames).
+    systemProperty("skiko.renderApi", "SOFTWARE")
+
+    // `BrandingTest` reads the jpackage resource directories off the FILE SYSTEM, and
+    // nothing else in this build does — so without this line Gradle has no idea they are
+    // an input and reports `:test UP-TO-DATE` after the Windows icon has been renamed or
+    // deleted. That was not a guess: the rename was tried, and the suite did not run.
+    // A guard that an incremental build can skip is not a guard.
+    inputs.files(
+        fileTree("platform") { include("*/packaging/**") }
+    ).withPropertyName("packagingResources").withPathSensitivity(PathSensitivity.RELATIVE)
     testLogging {
         events("passed", "failed", "skipped")
         showStandardStreams = true
@@ -320,9 +751,69 @@ tasks.jar {
             // A lazy provider, not `.get()`: resolving the runtime classpath at
             // CONFIGURATION time would make every invocation — `./gradlew tasks`
             // included — need the dependency cache or the network.
-            "Class-Path" to configurations.runtimeClasspath.map { cp -> cp.joinToString(" ") { it.name } },
+            // THE SAME GROUP PREFIX THE STAGING USES, and it must stay in step with it.
+            //
+            // These are bare filenames resolved relative to the jar's own directory, so
+            // they have to name the files that are ACTUALLY staged beside it. When the
+            // duplicate-jar fix below started qualifying staged names with their module
+            // group, three consumers were updated (`jpackageInput`, `distributions`,
+            // `startScripts`) and this one was not — leaving all ~44 entries naming files
+            // that no longer exist. `java -jar build/jpackage/input/OSHI-Desktop-*.jar`,
+            // the command this manifest exists to support, was broken by that omission,
+            // and nothing catches it: CI launches the jpackage launcher, which reads its
+            // own `.cfg`, and no job runs `java -jar`.
+            "Class-Path" to configurations.runtimeClasspath.map { cp ->
+                cp.joinToString(" ") { f -> stagedJarName(f) }
+            },
         )
     }
+}
+
+/**
+ * Two runtime jars share a FILE NAME, and dropping either one is a shipped app that
+ * does not start.
+ *
+ * Compose Multiplatform pulls `org.jetbrains.compose.runtime:runtime-desktop:1.9.0`,
+ * which is a RELOCATION SHIM that depends on `androidx.compose.runtime:runtime-desktop:
+ * 1.9.0`. Different coordinates, different content, identical file name:
+ *
+ *   androidx.compose.runtime/…/runtime-desktop-1.9.0.jar   1 458 134 bytes, 640 entries
+ *   org.jetbrains.compose.runtime/…/runtime-desktop-1.9.0.jar    416 bytes,   3 entries
+ *
+ * Flattened into one directory they collide, which is why `installDist` began failing
+ * with "Entry lib/runtime-desktop-1.9.0.jar is a duplicate" the first time anyone tried
+ * to RUN the app after the UI landed. No test caught it: no test runs `installDist`.
+ *
+ * **`DuplicatesStrategy.EXCLUDE` is the trap here.** It keeps whichever copy arrives
+ * first, and if that is the 416-byte shim the build still SUCCEEDS and produces an
+ * installer whose app dies at startup with a missing Compose runtime. A silent, shipping,
+ * order-dependent failure is strictly worse than the loud one we have.
+ *
+ * So both jars are kept and the name is qualified with the module group, which is unique
+ * by construction. The map is built from the RESOLVED ARTIFACTS rather than parsed out of
+ * the cache directory layout, because that layout is Gradle's private business.
+ */
+val runtimeJarGroups: Map<String, String> by lazy {
+    configurations.runtimeClasspath.get().incoming.artifacts.artifacts.associate { art ->
+        val id = art.id.componentIdentifier
+        val group = (id as? org.gradle.api.artifacts.component.ModuleComponentIdentifier)?.group
+        art.file.absolutePath to (group ?: "")
+    }
+}
+
+/**
+ * THE ONE PLACE A STAGED JAR IS NAMED. Four things must agree on it — the jar manifest's
+ * `Class-Path`, `jpackageInput`, the `distributions` copy and `startScripts` — and they
+ * drifted once already, which is why the name is computed here and nowhere else.
+ */
+fun stagedJarName(f: File): String {
+    val group = runtimeJarGroups[f.absolutePath].orEmpty()
+    return if (group.isEmpty()) f.name else "$group-${f.name}"
+}
+
+/** Prefix a staged dependency jar with its group when, and only when, it needs it. */
+fun org.gradle.api.file.FileCopyDetails.qualifyDuplicateJarName() {
+    name = stagedJarName(file)
 }
 
 /** The flat directory jpackage packages: our jar plus every runtime dependency. */
@@ -330,8 +821,43 @@ val jpackageInput by tasks.registering(Sync::class) {
     group = "distribution"
     description = "Stages the app jar and its runtime dependencies for jpackage."
     from(tasks.jar)
-    from(configurations.runtimeClasspath)
+    from(configurations.runtimeClasspath) { eachFile { qualifyDuplicateJarName() } }
     into(jpackageInputDir)
+}
+
+// The same collision breaks `installDist`, `distZip` and `distTar`, which the application
+// plugin builds from the same runtime classpath into a flat `lib/`.
+distributions {
+    named("main") {
+        contents {
+            eachFile { if (path.startsWith("lib/")) qualifyDuplicateJarName() }
+        }
+    }
+}
+
+/**
+ * ...and the start scripts have to be told, or the rename above is a launcher that cannot
+ * find its own classes.
+ *
+ * `CreateStartScripts` bakes a LITERAL classpath into `bin/OSHI-Desktop` — one
+ * `$APP_HOME/lib/<file name>` per dependency, fixed at generation time. Renaming the
+ * staged files without regenerating it produced a distribution that builds green and then
+ * dies on the first run:
+ *
+ *   Exception in thread "main" java.lang.NoClassDefFoundError: kotlin/jvm/internal/Intrinsics
+ *
+ * Found by running the app, not by building it — `installDist` succeeded. Only the names
+ * are read off this collection, so bare names are what it is given.
+ */
+tasks.named<CreateStartScripts>("startScripts") {
+    classpath = files(
+        listOf(tasks.jar.get().archiveFileName.get()) +
+            configurations.runtimeClasspath.get().incoming.artifacts.artifacts.map { art ->
+                val group = (art.id.componentIdentifier
+                    as? org.gradle.api.artifacts.component.ModuleComponentIdentifier)?.group
+                if (group != null) "$group-${art.file.name}" else art.file.name
+            }
+    )
 }
 
 /**
@@ -345,6 +871,37 @@ val hostOsName: String = System.getProperty("os.name").orEmpty()
 val hostIsWindows: Boolean = hostOsName.lowercase().contains("win")
 val hostIsMac: Boolean = hostOsName.lowercase().let { it.contains("mac") || it.contains("darwin") }
 val hostIsLinux: Boolean = !hostIsWindows && !hostIsMac
+
+/**
+ * The launcher icon for THIS host's installer, or null where none is checked in yet.
+ *
+ * Until this existed, every artifact this project produced wore jpackage's generic default
+ * — which on Windows is the Java coffee cup, and it is what a user would have seen in the
+ * Start menu, on the desktop shortcut, in Add/Remove Programs and in the taskbar. The
+ * shipped iOS/macOS app has one icon and this is the same image, resampled from
+ * `OSHI/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png`. A third client of the same
+ * product wearing a stock icon reads as a different program.
+ *
+ * PER HOST, not per target, for the same reason as [webrtcNativeClassifier]: jpackage does
+ * not cross-build, so the only icon a task can ever need is the one for the machine it runs
+ * on. Windows wants `.ico`, Linux `.png`, macOS `.icns`; only the `.ico` is checked in,
+ * because Windows and Linux are what this port exists for and Linux's menu entry is a
+ * smaller lie than Windows' Start menu. Missing file → no `--icon`, exactly as before.
+ *
+ * The file ALSO sits where jpackage's `--resource-dir` lookup finds it by name (`OSHI.ico`
+ * beside `OSHI-Console.ico`), which is what carries the icon into the MSI's Add/Remove
+ * Programs entry — `--icon` alone only dresses the launcher .exe. Both mechanisms point at
+ * one file on purpose; two icons that could disagree would be worse than none.
+ */
+val hostIconFile: File? = when {
+    hostIsWindows -> layout.projectDirectory.file("platform/windows/packaging/OSHI.ico").asFile
+    hostIsLinux -> layout.projectDirectory.file("platform/linux/packaging/OSHI.png").asFile
+    else -> layout.projectDirectory.file("platform/macos/packaging/OSHI.icns").asFile
+}?.takeIf { it.isFile }
+
+private fun iconArgs(): List<String> =
+    hostIconFile?.let { listOf("--icon", it.absolutePath) } ?: emptyList()
+
 
 /**
  * Locate jpackage in the JDK that is running Gradle.
@@ -420,10 +977,20 @@ fun registerJpackage(
                 "--input", jpackageInputDir.get().asFile.absolutePath,
                 "--main-jar", mainJar,
                 "--main-class", "com.oshi.desktop.MainKt",
+                // THE INSTALLED APP MUST OPEN THE WINDOW, and until this line existed it
+                // did not. jpackage bakes the launcher's arguments at build time; with
+                // none, the installed binary ran `main([])`, which falls past --ui, --mesh
+                // and --client into the protocol-skeleton walkthrough — it printed a crypto
+                // demo and EXITED. Double-clicking OSHI showed a console flash and closed.
+                //
+                // No test could see this: the suite never runs the packaged launcher, and
+                // `packageMsi` succeeding only proves an installer was produced. It was
+                // found by asking what a user double-clicking the download would get.
+                "--arguments", "--ui",
                 "--dest", outDir.absolutePath,
                 "--vendor", "OSHI",
                 "--description", "OSHI encrypted messenger — desktop client",
-            ) + extraArgs
+            ) + iconArgs() + extraArgs
         )
         logger.lifecycle("[jpackage] ${commandLine.joinToString(" ")}")
     }
@@ -483,24 +1050,55 @@ tasks.register("packagingOverrides") {
 /**
  * Windows .msi.
  *
- * `--win-console` is not cosmetic. Today's entry point is an interactive REPL
- * (`--client`, `--mesh`); a jpackage launcher without it is a GUI subsystem binary with
- * NO console attached, so the REPL reads EOF on its first line and exits — which looks
- * exactly like a crash on startup. This is the same failure the `run` task's
- * `standardInput` line above exists to prevent, one layer down. When Tier 1 lands a real
- * GUI, this flag comes off in the same commit as the windowed entry point, not before.
+ * TIER 1 HAS LANDED, SO `--win-console` IS GONE — as this comment previously promised
+ * it would be, "in the same commit as the windowed entry point, not before". The default
+ * launcher now opens the window (`--arguments --ui`), and a GUI-subsystem binary is what
+ * a windowed app should be: no console flashes behind the window.
+ *
+ * The REPL is not lost. It moves to a SECOND launcher, `OSHI-Console`, which keeps
+ * `win-console` — because the original reason for that flag is still true: a jpackage
+ * launcher without a console makes the REPL read EOF on its first line and exit, which
+ * looks exactly like a crash on startup.
+ *
+ * Two installers are produced, and the difference is convention rather than capability:
+ * `.exe` is what a person downloading a messenger expects to double-click, `.msi` is what
+ * an IT department deploys. Same app image inside both.
  */
-val packageMsi = registerJpackage(
-    "packageMsi", "msi", "Windows",
-    listOf(
-        "--win-console",
-        "--win-menu", "--win-menu-group", appName,
-        "--win-shortcut",
-        "--win-dir-chooser",
-        "--win-per-user-install",          // no UAC prompt, and no need for an admin runner
-        "--win-upgrade-uuid", windowsUpgradeUuid,
-    ) + resourceDirArgs("windows"),
-)
+private val windowsConsoleLauncher: File by lazy {
+    // jpackage takes a PROPERTIES FILE per extra launcher, not flags. `win-console=true`
+    // is the whole point of this one: it is the surface `/send`, `/lora`, `/call` and the
+    // rest live on, and it needs a console to read a line from.
+    val f = layout.buildDirectory.get().asFile.resolve("jpackage/OSHI-Console.properties")
+    f.parentFile.mkdirs()
+    // An add-launcher does NOT inherit the main launcher's `--icon`, and jpackage's
+    // resource-dir lookup for it is by the LAUNCHER's name (`OSHI-Console.ico`), not the
+    // app's. Without this line the second Start-menu entry is the coffee cup while the
+    // first one is OSHI — which reads as two unrelated programs from one installer.
+    val icon = hostIconFile?.let { "icon=${it.absolutePath.replace("\\", "\\\\")}\n" } ?: ""
+    f.writeText(
+        """
+        win-console=true
+        arguments=--client
+        description=OSHI encrypted messenger — terminal client
+        """.trimIndent() + "\n" + icon
+    )
+    f
+}
+
+private fun windowsInstallerArgs(): List<String> = listOf(
+    "--win-menu", "--win-menu-group", appName,
+    "--win-shortcut",
+    "--win-dir-chooser",
+    "--win-per-user-install",          // no UAC prompt, and no need for an admin runner
+    "--win-upgrade-uuid", windowsUpgradeUuid,
+    "--add-launcher", "OSHI-Console=${windowsConsoleLauncher.absolutePath}",
+) + resourceDirArgs("windows")
+
+/** What a person downloading a messenger expects to double-click. */
+val packageExe = registerJpackage("packageExe", "exe", "Windows", windowsInstallerArgs())
+
+/** What an IT department deploys. Same app image inside. */
+val packageMsi = registerJpackage("packageMsi", "msi", "Windows", windowsInstallerArgs())
 
 val packageDeb = registerJpackage(
     "packageDeb", "deb", "Linux",
@@ -549,7 +1147,7 @@ tasks.register("packageNative") {
     group = "distribution"
     description = "Builds this host's native installer(s): .msi on Windows, .deb + .rpm on Linux, .dmg on macOS."
     when {
-        hostIsWindows -> dependsOn(packageMsi)
+        hostIsWindows -> dependsOn(packageExe, packageMsi)
         hostIsLinux -> dependsOn(packageDeb, packageRpm)
         hostIsMac -> dependsOn(packageDmg)
         else -> doLast { throw GradleException("no packaging recipe for $hostOsName") }

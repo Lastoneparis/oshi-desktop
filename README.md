@@ -4,22 +4,27 @@ A desktop client for OSHI, written in Kotlin on the JVM. macOS already has a cli
 the iOS app built with Mac Catalyst — so "desktop" here means **Windows and Linux**, with
 macOS supported as a development host.
 
-**This is not a finished app.** It is a headless client that is being brought to parity with
-the shipped phones one capability at a time. There is no user interface yet. What is done,
-what is merely written, and what has not been started are tracked honestly in
-**[PARITY.md](PARITY.md)** — read it before assuming any feature exists.
+**This is not a finished app.** It is a client being brought to parity with the shipped
+phones one capability at a time. There is a window now — `--ui` — carrying the shipped app's
+own five destinations (Messages, AI, New, Places, More), 1:1 and group messaging, file
+attachments, pairing by QR, contacts, safety numbers and blocking. The REPL is still the
+full surface and reaches things the window does not. What is done, what is merely written,
+and what has not been started are tracked honestly in **[PARITY.md](PARITY.md)** — read it
+before assuming any feature exists.
 
 ---
 
 ## The one thing to know before you clone
 
-**This repository does not build on its own.** It compiles six Kotlin files *straight out of
-the Android tree*, with no copy step:
+**The crypto is not re-implemented here.** This project compiles seven Kotlin files
+*straight out of the Android tree*, with no copy step:
 
 ```
-../OSHI-Android/app/src/main/java/com/oshi/messenger/network/v2/
+app/src/main/java/com/oshi/messenger/network/v2/
     OSHICryptoV2.kt   OSHICryptoV2Streaming.kt   OSHIRatchetV2.kt
     V2Session.kt      V2FileKeyMessage.kt        V2RetryBudget.kt
+app/src/main/java/com/oshi/messenger/service/
+    LlamaCpp.kt
 ```
 
 That is deliberate and it is the load-bearing idea of the whole port. Those files are pure
@@ -29,20 +34,48 @@ vectors. A decision made for testability had already paid for most of a third pl
 
 The consequence: **the desktop client does not re-implement OSHI's crypto, and there is no
 third implementation to keep in sync.** If someone adds an `import android.*` to one of
-those six files, this build breaks. That is the point — a red desktop build is the cheapest
-possible alarm that the shared core has stopped being shared.
+those files, this build breaks. That is the point — a red desktop build is the cheapest
+possible alarm that the shared core has stopped being shared. CI enforces it directly.
 
-So you need the sibling trees checked out next to this one:
+### Two layouts, and the build finds either
+
+**Standalone (this public repository).** The shared files are vendored under `shared/`, so
+one clone builds and tests:
+
+```
+oshi-desktop/
+├── src/  platform/  build.gradle.kts
+└── shared/OSHI-Android/app/src/main/java/com/oshi/messenger/…   (the seven, plus two
+                                                                  read-only references)
+```
+
+    ./gradlew test
+
+**Beside the shipped trees (the monorepo).** If an `OSHI-Android` directory exists as a
+sibling, it wins over `shared/` — so a developer with the monorepo checked out is always
+compiling the live Android source, not a copy:
 
 ```
 some-parent/
-├── OSHI-Android/     (required — the shared crypto core)
-├── OSHI/             (optional — the iOS tree; read only by tests, to diff wire contracts)
+├── OSHI-Android/     (the shared crypto core — takes precedence when present)
+├── OSHI/             (the iOS tree; read only by tests, to diff wire contracts)
 └── oshi-desktop/     (this repo)
 ```
 
-Both live in the private `OSHI-private` monorepo. Override the locations with
-`-PoshiAndroidRoot=...` and `-PoshiIosRoot=...` if your layout differs.
+Override either with `-PoshiAndroidRoot=...` and `-PoshiIosRoot=...`.
+
+### What a standalone run does NOT check
+
+`./gradlew test` from this repository alone runs **1422 tests and skips 22.** The skipped
+ones read the iOS and Android trees to diff wire formats byte for byte, and they guard
+themselves into skipping rather than failing when those trees are absent. A skipped test
+looks exactly like a passing one in a summary line, so CI prints the ran/skipped split on
+every run and you should read it.
+
+Two files under `shared/` — `V2KeysClient.kt` and `LocalLLMManager.kt` — are **read by
+tests and never compiled**; the `kotlin.include` filter in `build.gradle.kts` names the
+seven and omits these. They are here so the parity assertions that compare the desktop's
+`FetchedBundle` and its ChatML prompt against the Android originals can still run.
 
 ## Build and run
 
@@ -58,11 +91,32 @@ each platform has a launcher that finds a JDK and forwards to Gradle:
 ```
 ./oshi.sh test                        the parity suite
 ./oshi.sh run --args="--client"       the client: account, relay, stores, mesh
+./oshi.sh run --args="--ui"           the window (Compose desktop) — PARITY.md row 1.1
 ./oshi.sh run --args="--mesh"         a live mesh node: mDNS discovery + TCP
 ./oshi.sh run --args="--probe"        adds one read-only GET against the live server
 ```
 
-## Three things this client does not do, stated out loud
+`--ui` is an **additional** entry point, not a replacement. `--client` is still the fuller
+surface. The window now does 1:1 and group messaging, file attachments, pairing (its own QR
+and a paste box), contacts, renaming, safety numbers, blocking and unblocking, the offline
+places reader and the local AI console. Reachable only from the REPL: creating and
+administering groups, reactions, edits and deletes, voice notes, scheduled messages, sync,
+LoRa, calls, bot posts and account deletion. The window says so itself, in its own "What
+this client will not do" pane, which names every gap with the PARITY.md row behind it. Both
+entry points share one account and one message store, so anything sent from one shows up in
+the other.
+
+    ./gradlew renderScreens               rasterise the window's screens to build/screens,
+                                          with no display — so the panes can be LOOKED at
+                                          on a runner as well as on a laptop
+
+The window opens on **Windows** as well as on macOS aarch64: the `package / windows-latest`
+CI job installs nothing, but it builds the app image, launches `OSHI.exe --ui` and requires the
+process to still be alive 25 seconds later, which is what proves skiko's `windows-x64` native
+loads. It has NOT been looked at on Windows — "the process did not exit" is a long way from
+"it renders correctly", and no screenshot of this window on Windows exists.
+
+## Five things this client does not do, stated out loud
 
 Each of these is a real limitation, not a gap that is about to close quietly.
 
@@ -76,6 +130,15 @@ Each of these is a real limitation, not a gap that is about to close quietly.
   `/v2/messages`. That is not the same thing: there is no wake-from-sleep delivery.
 - **No screenshot blocking.** iOS has an OS affordance for it; Windows and Linux do not.
   Claiming it in the UI would be a lie.
+- **It cannot sync with your phone.** Messaging a phone works — text crosses the live relay in
+  both directions, verified against a shipped Android handset. *Multi-device* sync does not, and
+  it is blocked twice: no shipped phone writes the `/v2/sync` archive this client reads (they use
+  the legacy `/api/sync` blob), and this client has no way to adopt an existing identity, so it is
+  always a different OSHI account with a different archive key. PARITY.md row 0.24 has the detail.
+- **Against an Android peer, only the text arrives.** Delivery and read receipts, typing,
+  reactions, edits, deletes, pins and profile updates are emitted by the Android app on the legacy
+  IPFS lane only — the lane row 0.23 is deliberately ⛔ against — so none of them reach this
+  client. An iPhone sends the same payloads "v2 first" and they would. PARITY.md row 0.18.
 
 ## Working rules
 

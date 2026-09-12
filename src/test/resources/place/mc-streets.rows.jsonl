@@ -1,0 +1,385 @@
+{"id":1,"name":"Avenue Princesse Alice","city":null,"country_code":"mc","lat":"43.738688937254906","lon":"7.4263182313725498","highway_type":"secondary"}
+{"id":2,"name":"Boulevard d'Italie","city":null,"country_code":"mc","lat":"43.749232580172411","lon":"7.4350809568965515","highway_type":"tertiary"}
+{"id":3,"name":"Avenue des Papalins","city":null,"country_code":"mc","lat":"43.728616899999999","lon":"7.4182351777777775","highway_type":"residential"}
+{"id":4,"name":"Boulevard Albert 1er","city":null,"country_code":"mc","lat":"43.734838014942525","lon":"7.421438743678161","highway_type":"secondary"}
+{"id":5,"name":"Place du Palais","city":null,"country_code":"mc","lat":"43.73105318918919","lon":"7.4210999756756761","highway_type":"pedestrian"}
+{"id":6,"name":"Rue des Remparts","city":null,"country_code":"mc","lat":"43.731392562499998","lon":"7.4222938208333327","highway_type":"residential"}
+{"id":7,"name":"Rue Philibert Florence","city":null,"country_code":"mc","lat":"43.731568442857146","lon":"7.4239961999999995","highway_type":"residential"}
+{"id":8,"name":"Virage Antony Nogues","city":null,"country_code":"mc","lat":"43.732328633333339","lon":"7.4229727499999996","highway_type":"secondary"}
+{"id":9,"name":"Rue Terrazzani","city":null,"country_code":"mc","lat":"43.732518511111117","lon":"7.4202589666666672","highway_type":"residential"}
+{"id":10,"name":"Place d'Armes","city":null,"country_code":"mc","lat":"43.732484839655172","lon":"7.419189244827586","highway_type":"secondary"}
+{"id":11,"name":"Avenue des Pins","city":null,"country_code":"mc","lat":"43.731711762499998","lon":"7.4259718374999997","highway_type":"residential"}
+{"id":12,"name":"Rue Princesse Marie de Lorraine","city":null,"country_code":"mc","lat":"43.731294866666666","lon":"7.4242376777777777","highway_type":"residential"}
+{"id":13,"name":"Place de la Visitation","city":null,"country_code":"mc","lat":"43.731528361538459","lon":"7.4252078923076921","highway_type":"residential"}
+{"id":14,"name":"Rue Colonel Bellando de Castro","city":null,"country_code":"mc","lat":"43.730387800000003","lon":"7.4218370199999999","highway_type":"residential"}
+{"id":15,"name":"Quai Antoine 1er","city":null,"country_code":"mc","lat":"43.73262200869565","lon":"7.4236911913043482","highway_type":"service"}
+{"id":16,"name":"Tunnel Rocher Antoine 1er","city":null,"country_code":"mc","lat":"43.732362700000003","lon":"7.4241625500000001","highway_type":"secondary"}
+{"id":17,"name":"Avenue de La Quarantaine","city":null,"country_code":"mc","lat":"43.732428319354838","lon":"7.4242595193548393","highway_type":"residential"}
+{"id":18,"name":"Rascasse","city":null,"country_code":"mc","lat":"43.732499907142859","lon":"7.4227299499999999","highway_type":"secondary"}
+{"id":19,"name":"Tunnel Rocher Palais","city":null,"country_code":"mc","lat":"43.732376243478264","lon":"7.4215263434782601","highway_type":"secondary"}
+{"id":20,"name":"Rue de Millo","city":null,"country_code":"mc","lat":"43.73302564285715","lon":"7.4200610142857144","highway_type":"pedestrian"}
+{"id":21,"name":"Rue Louis Notari","city":null,"country_code":"mc","lat":"43.734153544444446","lon":"7.4206886481481487","highway_type":"residential"}
+{"id":22,"name":"Avenue d'Ostende","city":null,"country_code":"mc","lat":"43.737309864102564","lon":"7.4237820794871796","highway_type":"secondary"}
+{"id":23,"name":"Rond-Point Sainte-Dévote","city":null,"country_code":"mc","lat":"43.736840712000003","lon":"7.4215341600000002","highway_type":"secondary"}
+{"id":24,"name":"Rue de la Colle","city":null,"country_code":"mc","lat":"43.732296568421049","lon":"7.4178143473684219","highway_type":"secondary"}
+{"id":25,"name":"Avenue de Fontvieille","city":null,"country_code":"mc","lat":"43.729800258064515","lon":"7.4150043709677425","highway_type":"tertiary"}
+{"id":26,"name":"Place des Moulins","city":null,"country_code":"mc","lat":"43.745312530434781","lon":"7.4292174608695651","highway_type":"service"}
+{"id":27,"name":"Avenue de Monte-Carlo","city":null,"country_code":"mc","lat":"43.738605813043478","lon":"7.4274834869565209","highway_type":"residential"}
+{"id":28,"name":"Boulevard Rainier III","city":null,"country_code":"mc","lat":"43.735261626136364","lon":"7.4181681420454542","highway_type":"secondary"}
+{"id":29,"name":"Pont Sainte-Dévote","city":null,"country_code":"mc","lat":"43.738391172881357","lon":"7.4193726966101696","highway_type":"secondary"}
+{"id":30,"name":"Boulevard Louis II","city":null,"country_code":"mc","lat":"43.739260118181825","lon":"7.4291691672727271","highway_type":"secondary"}
+{"id":31,"name":"Avenue de l'Hermitage","city":null,"country_code":"mc","lat":"43.738282944444443","lon":"7.4250530333333336","highway_type":"residential"}
+{"id":32,"name":"Avenue Henry Dunant","city":null,"country_code":"mc","lat":"43.738754159999999","lon":"7.4250544399999994","highway_type":"tertiary"}
+{"id":33,"name":"Impasse de la Fontaine","city":null,"country_code":"mc","lat":"43.739641952941177","lon":"7.4248280470588233","highway_type":"residential"}
+{"id":34,"name":"Place du Casino","city":null,"country_code":"mc","lat":"43.739371130769229","lon":"7.4274027769230777","highway_type":"service"}
+{"id":35,"name":"Avenue Albert II","city":null,"country_code":"mc","lat":"43.729828203296705","lon":"7.4166527461538463","highway_type":"secondary"}
+{"id":36,"name":"Avenue des Spélugues","city":null,"country_code":"mc","lat":"43.740534168115943","lon":"7.4289576014492757","highway_type":"residential"}
+{"id":37,"name":"Avenue Princesse Grace","city":null,"country_code":"mc","lat":"43.747209630395133","lon":"7.4352752231003043","highway_type":"tertiary"}
+{"id":38,"name":"Avenue de la Madone","city":null,"country_code":"mc","lat":"43.740880791304349","lon":"7.4271165565217396","highway_type":"residential"}
+{"id":39,"name":"Boulevard du Tenao","city":null,"country_code":"mc","lat":"43.748894095652176","lon":"7.4318730152173904","highway_type":"residential"}
+{"id":40,"name":"Boulevard du Ténao","city":null,"country_code":"mc","lat":"43.750052444736845","lon":"7.4348932000000003","highway_type":"residential"}
+{"id":41,"name":"Avenue Saint-Romain","city":null,"country_code":"mc","lat":"43.750127910526317","lon":"7.4364482052631589","highway_type":"residential"}
+{"id":42,"name":"Avenue Delphine","city":null,"country_code":"mc","lat":"43.750423451851852","lon":"7.4350168851851848","highway_type":"residential"}
+{"id":43,"name":"Lacets Saint-Léon","city":null,"country_code":"mc","lat":"43.748904957812499","lon":"7.4329171640625002","highway_type":"residential"}
+{"id":44,"name":"Avenue de l'Annonciade","city":null,"country_code":"mc","lat":"43.747532921739136","lon":"7.4308997826086953","highway_type":"residential"}
+{"id":45,"name":"Chemin des Oeillets","city":null,"country_code":"mc","lat":"43.746489314285718","lon":"7.4300096571428567","highway_type":"steps"}
+{"id":46,"name":"Rue Révérend Père Louis Frolla","city":null,"country_code":"mc","lat":"43.746249562857145","lon":"7.4292024057142854","highway_type":"residential"}
+{"id":47,"name":"Rue du Mont Agel","city":null,"country_code":"mc","lat":"43.744306382352939","lon":"7.427882482352941","highway_type":"service"}
+{"id":48,"name":"Avenue Camille Blanc","city":null,"country_code":"mc","lat":"43.741712990909093","lon":"7.4248410818181814","highway_type":"secondary"}
+{"id":49,"name":"Avenue Saint-Laurent","city":null,"country_code":"mc","lat":"43.74311066111111","lon":"7.4279280722222216","highway_type":"tertiary"}
+{"id":50,"name":"Avenue Saint-Charles","city":null,"country_code":"mc","lat":"43.742184088461535","lon":"7.4270162499999994","highway_type":"tertiary"}
+{"id":51,"name":"Boulevard du Jardin Exotique","city":null,"country_code":"mc","lat":"43.734085145454543","lon":"7.4149722504132232","highway_type":"secondary"}
+{"id":52,"name":"Boulevard du Général Leclerc","city":null,"country_code":"mc","lat":"43.743521789285708","lon":"7.4271511714285712","highway_type":"secondary"}
+{"id":53,"name":"Rue Grimaldi","city":null,"country_code":"mc","lat":"43.734883363829788","lon":"7.4195865617021273","highway_type":"secondary"}
+{"id":54,"name":"Escalier des Fleurs","city":null,"country_code":"mc","lat":"43.741749466666668","lon":"7.4278512333333326","highway_type":"steps"}
+{"id":55,"name":"Rue du Portier","city":null,"country_code":"mc","lat":"43.742269186486489","lon":"7.4296805405405415","highway_type":"primary_link"}
+{"id":56,"name":"Boulevard de la République","city":null,"country_code":"mc","lat":"43.742434283333331","lon":"7.4258896166666659","highway_type":"secondary"}
+{"id":57,"name":"Rue de la Source","city":null,"country_code":"mc","lat":"43.740274659999997","lon":"7.4214278899999995","highway_type":"residential"}
+{"id":58,"name":"Square Kraemer","city":null,"country_code":"mc","lat":"43.741658099999995","lon":"7.4236588333333335","highway_type":"service"}
+{"id":59,"name":"Avenue de Saint-Romain","city":null,"country_code":"mc","lat":"43.751282393877553","lon":"7.4364080918367348","highway_type":"residential"}
+{"id":60,"name":"Avenue John F. Kennedy","city":null,"country_code":"mc","lat":"43.736968129166662","lon":"7.4228087583333329","highway_type":"secondary"}
+{"id":61,"name":"Rue du Marché","city":null,"country_code":"mc","lat":"43.742920542857142","lon":"7.4263864571428568","highway_type":"pedestrian"}
+{"id":62,"name":"Avenue des Citronniers","city":null,"country_code":"mc","lat":"43.741647181250002","lon":"7.4289257375000002","highway_type":"residential"}
+{"id":63,"name":"Ruelle de la Fonderie","city":null,"country_code":"mc","lat":"43.731477533333333","lon":"7.4233826333333335","highway_type":"footway"}
+{"id":64,"name":"Rue Notre-Dame-de-Lorete","city":null,"country_code":"mc","lat":"43.73132487777778","lon":"7.4233598444444446","highway_type":"footway"}
+{"id":65,"name":"Passage de la Fonderie","city":null,"country_code":"mc","lat":"43.731260050000003","lon":"7.4237065500000003","highway_type":"footway"}
+{"id":66,"name":"Avenue Hector Otto","city":null,"country_code":"mc","lat":"43.733729414772725","lon":"7.4135729102272734","highway_type":"residential"}
+{"id":67,"name":"Avenue Claudio Fontenelle","city":null,"country_code":"mc","lat":"43.734747179999999","lon":"7.4231367800000001","highway_type":"service"}
+{"id":68,"name":"Rue du Castelleretto","city":null,"country_code":"mc","lat":"43.734310555555552","lon":"7.4174969888888889","highway_type":"residential"}
+{"id":69,"name":"Rue Augustin Vento","city":null,"country_code":"mc","lat":"43.735013366666664","lon":"7.417641146666667","highway_type":"service"}
+{"id":70,"name":"Rue des Iris","city":null,"country_code":"mc","lat":"43.740964849999997","lon":"7.4251464900000004","highway_type":"residential"}
+{"id":71,"name":"Boulevard Princesse Charlotte","city":null,"country_code":"mc","lat":"43.740398425675679","lon":"7.4240154472972977","highway_type":"secondary"}
+{"id":72,"name":"Tunnel Rocher Intermédiaire","city":null,"country_code":"mc","lat":"43.731871137500001","lon":"7.421873175","highway_type":"secondary"}
+{"id":73,"name":"Rue du Gabian","city":null,"country_code":"mc","lat":"43.728303575925928","lon":"7.4140888296296295","highway_type":"tertiary"}
+{"id":74,"name":"Avenue du Port","city":null,"country_code":"mc","lat":"43.731681782894739","lon":"7.4202369092105274","highway_type":"secondary"}
+{"id":75,"name":"Accès Villa Yéyé","city":null,"country_code":"mc","lat":"43.736927533333329","lon":"7.4182302333333334","highway_type":"residential"}
+{"id":76,"name":"Rue Honoré Labande","city":null,"country_code":"mc","lat":"43.73570122307693","lon":"7.4152817153846149","highway_type":"residential"}
+{"id":77,"name":"Square Lamark","city":null,"country_code":"mc","lat":"43.73722241851852","lon":"7.4175355259259259","highway_type":"secondary"}
+{"id":78,"name":"Rue Vourette","city":null,"country_code":"mc","lat":"43.737526871428571","lon":"7.4167294095238088","highway_type":"residential"}
+{"id":79,"name":"Escalier de la Costa","city":null,"country_code":"mc","lat":"43.737482171428567","lon":"7.4219422142857141","highway_type":"steps"}
+{"id":80,"name":"Boulevard du Larvotto","city":null,"country_code":"mc","lat":"43.742879570270269","lon":"7.4296585878378369","highway_type":"primary"}
+{"id":81,"name":"Rampe Major","city":null,"country_code":"mc","lat":"43.731649687878786","lon":"7.4209558030303029","highway_type":"steps"}
+{"id":82,"name":"Tunnel Dsc Fontvieille","city":null,"country_code":"mc","lat":"43.731528500000003","lon":"7.4163489285714288","highway_type":"tertiary"}
+{"id":83,"name":"Tunnel Rocher Albert Ier","city":null,"country_code":"mc","lat":"43.732058916666666","lon":"7.4217501833333337","highway_type":"secondary"}
+{"id":84,"name":"Tunnel Rocher Nice","city":null,"country_code":"mc","lat":"43.731743592857143","lon":"7.4191693857142855","highway_type":"secondary"}
+{"id":85,"name":"Rue des Oliviers","city":null,"country_code":"mc","lat":"43.74291295555556","lon":"7.4292599000000008","highway_type":"footway"}
+{"id":86,"name":"Escalier Grana","city":null,"country_code":"mc","lat":"43.743254333333333","lon":"7.4286169666666666","highway_type":"steps"}
+{"id":87,"name":"Avenue des Guelfes","city":null,"country_code":"mc","lat":"43.727161002857144","lon":"7.4180472742857138","highway_type":"residential"}
+{"id":88,"name":"Rond-Point de l'Hopital","city":null,"country_code":"mc","lat":"43.729257382352941","lon":"7.4105439617647058","highway_type":"tertiary"}
+{"id":89,"name":"Quai Jean-Charles Rey","city":null,"country_code":"mc","lat":"43.728628525396822","lon":"7.4201851015873022","highway_type":"service"}
+{"id":90,"name":"Avenue Pasteur","city":null,"country_code":"mc","lat":"43.730342239622637","lon":"7.4129738981132078","highway_type":"tertiary"}
+{"id":91,"name":"Tunnel Rocher Cathédrale","city":null,"country_code":"mc","lat":"43.731939933333337","lon":"7.4219732333333335","highway_type":"secondary"}
+{"id":92,"name":"Tunnel Serravalle","city":null,"country_code":"mc","lat":"43.7319975375","lon":"7.4198011375000004","highway_type":"secondary"}
+{"id":93,"name":"Tunnel Rocher Noghes","city":null,"country_code":"mc","lat":"43.732096757142862","lon":"7.4228820428571423","highway_type":"secondary"}
+{"id":94,"name":"Rue du Rocher","city":null,"country_code":"mc","lat":"43.732180128571429","lon":"7.4181738857142863","highway_type":"residential"}
+{"id":95,"name":"Rond-Point du Sporting","city":null,"country_code":"mc","lat":"43.749132347619046","lon":"7.437329157142857","highway_type":"tertiary"}
+{"id":96,"name":"Avenue de la Costa","city":null,"country_code":"mc","lat":"43.738284990410961","lon":"7.4236576999999997","highway_type":"secondary"}
+{"id":97,"name":"Ruelle Saint-Jean","city":null,"country_code":"mc","lat":"43.74328139","lon":"7.4300729450000009","highway_type":"residential"}
+{"id":98,"name":"Place de l'Opéra","city":null,"country_code":"mc","lat":"43.738648952000005","lon":"7.4281049440000002","highway_type":"service"}
+{"id":99,"name":"Avenue de France","city":null,"country_code":"mc","lat":"43.751870781249998","lon":"7.4379219249999995","highway_type":"primary"}
+{"id":100,"name":"Rue Professeur Calmette","city":null,"country_code":"mc","lat":"43.741724929999997","lon":"7.4221055199999997","highway_type":"service"}
+{"id":101,"name":"Rue Bosio","city":null,"country_code":"mc","lat":"43.736381390196073","lon":"7.4177391980392153","highway_type":"residential"}
+{"id":102,"name":"Boulevard de Belgique","city":null,"country_code":"mc","lat":"43.734156726724137","lon":"7.4160915482758618","highway_type":"tertiary"}
+{"id":103,"name":"Rond-Point Bosio","city":null,"country_code":"mc","lat":"43.735793934615387","lon":"7.4167160153846146","highway_type":"tertiary"}
+{"id":104,"name":"Square Beaumarchais","city":null,"country_code":"mc","lat":"43.738626512499998","lon":"7.4260398749999998","highway_type":"tertiary"}
+{"id":105,"name":"Avenue d'Alsace","city":null,"country_code":"mc","lat":"43.738777269811315","lon":"7.4181882905660377","highway_type":"tertiary"}
+{"id":106,"name":"Tunnel Aureglia","city":null,"country_code":"mc","lat":"43.73462524","lon":"7.4183048400000002","highway_type":"primary"}
+{"id":107,"name":"Tunnel Sainte-Dévote","city":null,"country_code":"mc","lat":"43.736896049999999","lon":"7.4200052999999997","highway_type":"unclassified"}
+{"id":108,"name":"Giratoire Aureglia","city":null,"country_code":"mc","lat":"43.734395892000002","lon":"7.4181229279999998","highway_type":"primary"}
+{"id":109,"name":"Tunnel de la Colle","city":null,"country_code":"mc","lat":"43.731755200000002","lon":"7.4170198833333343","highway_type":"primary"}
+{"id":110,"name":"Tunnel Dorsale","city":null,"country_code":"mc","lat":"43.732865593749999","lon":"7.4172947562500005","highway_type":"primary"}
+{"id":111,"name":"Chemin des Révoires","city":null,"country_code":"mc","lat":"43.734064924120602","lon":"7.4122268577889452","highway_type":"footway"}
+{"id":112,"name":"Rue Hubert Clerissi","city":null,"country_code":"mc","lat":"43.734932784615388","lon":"7.4180821615384609","highway_type":"residential"}
+{"id":113,"name":"Chemin des Yuccas","city":null,"country_code":"mc","lat":"43.729190539999998","lon":"7.4079674600000001","highway_type":"path"}
+{"id":114,"name":"Rue des Giroflées","city":null,"country_code":"mc","lat":"43.749505728571428","lon":"7.4358676821428569","highway_type":"residential"}
+{"id":115,"name":"Rue du Ténao","city":null,"country_code":"mc","lat":"43.748961483333339","lon":"7.4337705833333336","highway_type":"residential"}
+{"id":116,"name":"Place d'Alba","city":null,"country_code":"mc","lat":"43.739036053846156","lon":"7.4184035076923074","highway_type":"pedestrian"}
+{"id":117,"name":"Route de la Moyenne Corniche","city":null,"country_code":"mc","lat":"43.730598535999995","lon":"7.4099763399999992","highway_type":"primary"}
+{"id":118,"name":"Rue Biovès","city":null,"country_code":"mc","lat":"43.733135949999998","lon":"7.4168494374999998","highway_type":"residential"}
+{"id":119,"name":"Avenue Crovetto-Frères","city":null,"country_code":"mc","lat":"43.733583860606061","lon":"7.4166575878787881","highway_type":"residential"}
+{"id":120,"name":"Rue Joseph Bressan","city":null,"country_code":"mc","lat":"43.7320973","lon":"7.4155394750000001","highway_type":"service"}
+{"id":121,"name":"Rue Plati","city":null,"country_code":"mc","lat":"43.732203701724139","lon":"7.415401820689655","highway_type":"residential"}
+{"id":122,"name":"Boulevard des Moneghetti","city":null,"country_code":"mc","lat":"43.738344971428567","lon":"7.4170752714285717","highway_type":"residential"}
+{"id":123,"name":"Escalier Icare Rigolini","city":null,"country_code":"mc","lat":"43.744660566666674","lon":"7.4279278333333325","highway_type":"steps"}
+{"id":124,"name":"Passage Grana","city":null,"country_code":"mc","lat":"43.742310979999999","lon":"7.4287304399999998","highway_type":"footway"}
+{"id":125,"name":"Avenue Saint-Michel","city":null,"country_code":"mc","lat":"43.740550784375003","lon":"7.4238128468750002","highway_type":"secondary"}
+{"id":126,"name":"Avenue Sainte-Cécile","city":null,"country_code":"mc","lat":"43.741292399999999","lon":"7.4236673800000004","highway_type":"residential"}
+{"id":127,"name":"Avenue de Grande-Bretagne","city":null,"country_code":"mc","lat":"43.743103504347822","lon":"7.4288907695652169","highway_type":"residential"}
+{"id":128,"name":"Avenue de Roqueville","city":null,"country_code":"mc","lat":"43.73950397777778","lon":"7.4222378722222224","highway_type":"tertiary"}
+{"id":129,"name":"Avenue des Beaux-Arts","city":null,"country_code":"mc","lat":"43.739254261111114","lon":"7.4267611277777767","highway_type":"pedestrian"}
+{"id":130,"name":"Avenue du Berceau","city":null,"country_code":"mc","lat":"43.740003450000003","lon":"7.4225468100000001","highway_type":"residential"}
+{"id":131,"name":"Escalier des Gaumates","city":null,"country_code":"mc","lat":"43.737959419999996","lon":"7.4218803800000002","highway_type":"steps"}
+{"id":132,"name":"Rue Paradis","city":null,"country_code":"mc","lat":"43.740217445454547","lon":"7.4218235818181819","highway_type":"residential"}
+{"id":133,"name":"Rue des Genêts","city":null,"country_code":"mc","lat":"43.740801537499998","lon":"7.4236800624999999","highway_type":"residential"}
+{"id":134,"name":"Rue des Roses","city":null,"country_code":"mc","lat":"43.740969688888889","lon":"7.4227159111111103","highway_type":"residential"}
+{"id":135,"name":"Rue des Violettes","city":null,"country_code":"mc","lat":"43.740424019999999","lon":"7.4225820999999996","highway_type":"service"}
+{"id":136,"name":"Allées des Boulingrins","city":null,"country_code":"mc","lat":"43.740020100000002","lon":"7.4262607681818187","highway_type":"residential"}
+{"id":137,"name":"Avenue Saint-Martin","city":null,"country_code":"mc","lat":"43.730619970270276","lon":"7.4246193729729733","highway_type":"pedestrian"}
+{"id":138,"name":"Avenue des Castelans","city":null,"country_code":"mc","lat":"43.7276151988764","lon":"7.4150112460674151","highway_type":"tertiary"}
+{"id":139,"name":"Avenue Marquet","city":null,"country_code":"mc","lat":"43.725770827083331","lon":"7.411982295833333","highway_type":"residential"}
+{"id":140,"name":"Rue de l'Industrie","city":null,"country_code":"mc","lat":"43.727815144444449","lon":"7.4137087333333334","highway_type":"residential"}
+{"id":141,"name":"Tunnel Pont Cadre","city":null,"country_code":"mc","lat":"43.727180710526319","lon":"7.4183128210526315","highway_type":"residential"}
+{"id":142,"name":"Avenue des Ligures","city":null,"country_code":"mc","lat":"43.725555478787882","lon":"7.418557396969697","highway_type":"residential"}
+{"id":143,"name":"Impasse du Stade","city":null,"country_code":"mc","lat":"43.726399379999997","lon":"7.4134409000000003","highway_type":"service"}
+{"id":144,"name":"Port de Cap d'Ail","city":null,"country_code":"mc","lat":"43.725177219999999","lon":"7.414741897142858","highway_type":"service"}
+{"id":145,"name":"Rue de la Lüjerneta","city":null,"country_code":"mc","lat":"43.729645075000001","lon":"7.4160722875000005","highway_type":"residential"}
+{"id":146,"name":"Rue du Campanin","city":null,"country_code":"mc","lat":"43.728208074999998","lon":"7.4173865125000003","highway_type":"residential"}
+{"id":147,"name":"Ruelle Herculis","city":null,"country_code":"mc","lat":"43.730208233333336","lon":"7.4156217333333325","highway_type":"residential"}
+{"id":148,"name":"Allée Guillaume Apollinaire","city":null,"country_code":"mc","lat":"43.735022178947368","lon":"7.4188989789473681","highway_type":"residential"}
+{"id":149,"name":"Avenue Prince Pierre","city":null,"country_code":"mc","lat":"43.733133993181816","lon":"7.4177422000000002","highway_type":"secondary"}
+{"id":150,"name":"Avenue de la Porte Neuve","city":null,"country_code":"mc","lat":"43.732245139024386","lon":"7.4227741634146343","highway_type":"residential"}
+{"id":151,"name":"Rue Baron Sainte-Suzanne","city":null,"country_code":"mc","lat":"43.733645875000001","lon":"7.4190885250000003","highway_type":"residential"}
+{"id":152,"name":"Rue Imberty","city":null,"country_code":"mc","lat":"43.733748339999998","lon":"7.420243619999999","highway_type":"residential"}
+{"id":153,"name":"Rue Malbousquet","city":null,"country_code":"mc","lat":"43.736361018181817","lon":"7.4159084136363642","highway_type":"residential"}
+{"id":154,"name":"Rue Langlé","city":null,"country_code":"mc","lat":"43.733418566666671","lon":"7.4193346666666669","highway_type":"footway"}
+{"id":155,"name":"Rue Princesse Antoinette","city":null,"country_code":"mc","lat":"43.735389523076918","lon":"7.4203927846153839","highway_type":"pedestrian"}
+{"id":156,"name":"Rue Princesse Caroline","city":null,"country_code":"mc","lat":"43.733276591666673","lon":"7.4199763416666658","highway_type":"footway"}
+{"id":157,"name":"Rue Princesse Florestine","city":null,"country_code":"mc","lat":"43.734104090000002","lon":"7.4196781400000003","highway_type":"residential"}
+{"id":158,"name":"Rue Suffren Reymond","city":null,"country_code":"mc","lat":"43.734366695652177","lon":"7.4203759869565218","highway_type":"residential"}
+{"id":159,"name":"Rue de la Turbie","city":null,"country_code":"mc","lat":"43.732881085714283","lon":"7.4185619214285712","highway_type":"residential"}
+{"id":160,"name":"Rue des Orangers","city":null,"country_code":"mc","lat":"43.733743857142862","lon":"7.4202156571428572","highway_type":"footway"}
+{"id":161,"name":"Rue des Princes","city":null,"country_code":"mc","lat":"43.73404756","lon":"7.4201552599999996","highway_type":"residential"}
+{"id":162,"name":"Rue Louis Auréglia","city":null,"country_code":"mc","lat":"43.736185334210525","lon":"7.4191685052631575","highway_type":"residential"}
+{"id":163,"name":"Sortie du Sporting","city":null,"country_code":"mc","lat":"43.747932381818181","lon":"7.4382101636363638","highway_type":"service"}
+{"id":164,"name":"Avenue de Varavilla","city":null,"country_code":"mc","lat":"43.752797136170209","lon":"7.439552163829787","highway_type":"tertiary"}
+{"id":165,"name":"Allée François Blanc","city":null,"country_code":"mc","lat":"43.739852900000002","lon":"7.4287421499999997","highway_type":"footway"}
+{"id":166,"name":"Route de la Piscine","city":null,"country_code":"mc","lat":"43.734776716216217","lon":"7.4224935635135143","highway_type":"residential"}
+{"id":167,"name":"Avenue Louis Auréglia","city":null,"country_code":"mc","lat":"43.733285449999997","lon":"7.4243616750000001","highway_type":"service"}
+{"id":168,"name":"Quai Rainier 1er","city":null,"country_code":"mc","lat":"43.734454749999998","lon":"7.427756641666666","highway_type":"service"}
+{"id":169,"name":"Rue de l'Abbaye","city":null,"country_code":"mc","lat":"43.73034920909091","lon":"7.4235104909090914","highway_type":"footway"}
+{"id":170,"name":"Rue Comte Félix Gastaldi","city":null,"country_code":"mc","lat":"43.730970849999999","lon":"7.4224965333333337","highway_type":"footway"}
+{"id":171,"name":"Rue Émile de Loth","city":null,"country_code":"mc","lat":"43.730952556521736","lon":"7.4232492217391304","highway_type":"footway"}
+{"id":172,"name":"Entrée-Sortie de Parking","city":null,"country_code":"mc","lat":"43.733108674999997","lon":"7.4213316750000002","highway_type":"service"}
+{"id":173,"name":"Boulevard de Suisse","city":null,"country_code":"mc","lat":"43.738534209999997","lon":"7.4222070374999998","highway_type":"tertiary"}
+{"id":174,"name":"Rue des Martyrs de la Résistance","city":null,"country_code":"mc","lat":"43.739484585714287","lon":"7.4177853999999996","highway_type":"residential"}
+{"id":175,"name":"Rue Bellevue","city":null,"country_code":"mc","lat":"43.739411599999997","lon":"7.4205035571428573","highway_type":"residential"}
+{"id":176,"name":"Rue Pasteur","city":null,"country_code":"mc","lat":"43.739337219999996","lon":"7.4180439699999994","highway_type":"residential"}
+{"id":177,"name":"Rue Bel Respiro","city":null,"country_code":"mc","lat":"43.739233981818181","lon":"7.4207255545454549","highway_type":"residential"}
+{"id":178,"name":"Rue des Lilas","city":null,"country_code":"mc","lat":"43.740569399999998","lon":"7.4239264250000003","highway_type":"service"}
+{"id":179,"name":"Escalier Sainte-Cécile","city":null,"country_code":"mc","lat":"43.741001449999999","lon":"7.4241924250000002","highway_type":"steps"}
+{"id":180,"name":"Square Winston Churchill","city":null,"country_code":"mc","lat":"43.742471199999997","lon":"7.428431775","highway_type":"residential"}
+{"id":181,"name":"Rond-Point du Portier","city":null,"country_code":"mc","lat":"43.741403875925926","lon":"7.4301260500000001","highway_type":"secondary"}
+{"id":182,"name":"Boulevard des Moulins","city":null,"country_code":"mc","lat":"43.742871155555555","lon":"7.4277978015873014","highway_type":"secondary"}
+{"id":183,"name":"Ruelle Sainte-Barbe","city":null,"country_code":"mc","lat":"43.730337463157895","lon":"7.4213002315789476","highway_type":"footway"}
+{"id":184,"name":"Rue de l'Église","city":null,"country_code":"mc","lat":"43.730873250000002","lon":"7.4224012999999998","highway_type":"footway"}
+{"id":185,"name":"Chemin des Revoires Supérieurs","city":null,"country_code":"mc","lat":"43.735190758333339","lon":"7.4123051166666665","highway_type":"footway"}
+{"id":186,"name":"Chemin des Salines","city":null,"country_code":"mc","lat":"43.733765561904761","lon":"7.4126763952380959","highway_type":"path"}
+{"id":187,"name":"Passage de la Miséricorde","city":null,"country_code":"mc","lat":"43.731043339999999","lon":"7.4230535599999996","highway_type":"footway"}
+{"id":188,"name":"Passage du Coin","city":null,"country_code":"mc","lat":"43.731036149999994","lon":"7.4223300999999999","highway_type":"footway"}
+{"id":189,"name":"Place de la Mairie","city":null,"country_code":"mc","lat":"43.730928375000005","lon":"7.4236078249999995","highway_type":"residential"}
+{"id":190,"name":"Rue Basse","city":null,"country_code":"mc","lat":"43.731115689473683","lon":"7.4226333263157889","highway_type":"footway"}
+{"id":191,"name":"Rue Saige","city":null,"country_code":"mc","lat":"43.732401199999998","lon":"7.4213258222222214","highway_type":"residential"}
+{"id":192,"name":"Rue des Açores","city":null,"country_code":"mc","lat":"43.732663250000002","lon":"7.4207285166666672","highway_type":"residential"}
+{"id":193,"name":"Entrée Parking","city":null,"country_code":"mc","lat":"43.730398100000002","lon":"7.4174558333333325","highway_type":"service"}
+{"id":194,"name":"Passage de l'Ancienne Poterie","city":null,"country_code":"mc","lat":"43.741010375000002","lon":"7.4254705750000003","highway_type":"footway"}
+{"id":195,"name":"Travolator","city":null,"country_code":"mc","lat":"43.732634557142852","lon":"7.4210067857142858","highway_type":"footway"}
+{"id":196,"name":"Rue de Vedel","city":null,"country_code":"mc","lat":"43.730701824999997","lon":"7.4222245500000001","highway_type":"footway"}
+{"id":197,"name":"Avenue du Maréchal Foch","city":null,"country_code":"mc","lat":"43.742158347826091","lon":"7.4231469260869565","highway_type":"residential"}
+{"id":198,"name":"Tunnel du Millenium","city":null,"country_code":"mc","lat":"43.730071300000006","lon":"7.4133432714285714","highway_type":"primary"}
+{"id":199,"name":"Rue des Géraniums","city":null,"country_code":"mc","lat":"43.741336574999998","lon":"7.4227165062499996","highway_type":"service"}
+{"id":200,"name":"Rue Jean Bouin","city":null,"country_code":"mc","lat":"43.737633318181821","lon":"7.4157098909090911","highway_type":"residential"}
+{"id":201,"name":"Galerie Princesse Stéphanie","city":null,"country_code":"mc","lat":"43.729217866666666","lon":"7.4173546999999997","highway_type":"footway"}
+{"id":202,"name":"Tunnel Pasteur","city":null,"country_code":"mc","lat":"43.731202044999996","lon":"7.4157845399999998","highway_type":"primary"}
+{"id":203,"name":"Bretelle Ostende","city":null,"country_code":"mc","lat":"43.737587294444445","lon":"7.4228705777777781","highway_type":"primary_link"}
+{"id":204,"name":"Avenue du 3 Septembre","city":null,"country_code":"mc","lat":"43.726444813636363","lon":"7.4107275818181817","highway_type":"secondary"}
+{"id":205,"name":"Galerie Sainte-Dévote","city":null,"country_code":"mc","lat":"43.737025916666674","lon":"7.4198377500000001","highway_type":"footway"}
+{"id":206,"name":"Passage de la Porte Rouge","city":null,"country_code":"mc","lat":"43.738440875000002","lon":"7.4238461000000004","highway_type":"residential"}
+{"id":207,"name":"Entrée du Sporting","city":null,"country_code":"mc","lat":"43.748311362499997","lon":"7.4378458812500003","highway_type":"service"}
+{"id":208,"name":"Impasse","city":null,"country_code":"mc","lat":"43.736366160000003","lon":"7.4204584150000006","highway_type":"service"}
+{"id":209,"name":"Chemin de la Turbie","city":null,"country_code":"mc","lat":"43.736577709090909","lon":"7.4176068136363638","highway_type":"steps"}
+{"id":210,"name":"Galerie du parking de la Costa","city":null,"country_code":"mc","lat":"43.7375162875","lon":"7.4233139374999997","highway_type":"footway"}
+{"id":211,"name":"Boulevard Charles III","city":null,"country_code":"mc","lat":"43.730596421428572","lon":"7.4156490321428574","highway_type":"secondary"}
+{"id":212,"name":"Tunnel de Serravalle","city":null,"country_code":"mc","lat":"43.731886690909093","lon":"7.4180892545454551","highway_type":"secondary"}
+{"id":213,"name":"Entrée Parking de la Comdamine","city":null,"country_code":"mc","lat":"43.732428111538461","lon":"7.4220433307692311","highway_type":"service"}
+{"id":214,"name":"Sortie Pompiers","city":null,"country_code":"mc","lat":"43.733307985714291","lon":"7.4217165428571423","highway_type":"service"}
+{"id":215,"name":"Entrée Parking de la Costa","city":null,"country_code":"mc","lat":"43.737463400000003","lon":"7.4228315999999994","highway_type":"service"}
+{"id":216,"name":"Sortie Parking de la Costa","city":null,"country_code":"mc","lat":"43.737612486666663","lon":"7.4228770466666667","highway_type":"service"}
+{"id":217,"name":"Tunnel Rocher-Fontvieille","city":null,"country_code":"mc","lat":"43.731539500000004","lon":"7.4198368200000004","highway_type":"secondary"}
+{"id":218,"name":"Parking du Jardin Exotique","city":null,"country_code":"mc","lat":"43.733910933333334","lon":"7.4153498000000004","highway_type":"service"}
+{"id":219,"name":"Chemin de la Noix","city":null,"country_code":"mc","lat":"43.746166055555562","lon":"7.4282270666666665","highway_type":"service"}
+{"id":220,"name":"Jetée Lucciana","city":null,"country_code":"mc","lat":"43.737269500000004","lon":"7.4293396999999999","highway_type":"service"}
+{"id":221,"name":"Quai Louis II","city":null,"country_code":"mc","lat":"43.737418750000003","lon":"7.42828015","highway_type":"service"}
+{"id":222,"name":"Quai de l’Hirondelle","city":null,"country_code":"mc","lat":"43.736262019999998","lon":"7.4270904499999997","highway_type":"service"}
+{"id":223,"name":"Liaison Marquet","city":null,"country_code":"mc","lat":"43.727499296296301","lon":"7.4125263111111108","highway_type":"tertiary"}
+{"id":224,"name":"Place des Moneghetti","city":null,"country_code":"mc","lat":"43.738110583333331","lon":"7.4175511500000004","highway_type":"residential"}
+{"id":225,"name":"Allée Lazare Sauvaigo","city":null,"country_code":"mc","lat":"43.733628282432434","lon":"7.4179382283783779","highway_type":"pedestrian"}
+{"id":226,"name":"Tunnel Albert II","city":null,"country_code":"mc","lat":"43.731775815789476","lon":"7.4098612447368426","highway_type":"primary"}
+{"id":227,"name":"Avenue Hugues Savorani","city":null,"country_code":"mc","lat":"43.726714135294117","lon":"7.4096361220588234","highway_type":"residential"}
+{"id":228,"name":"Avenue Jacques Abba","city":null,"country_code":"mc","lat":"43.727349335714287","lon":"7.4089456785714285","highway_type":"residential"}
+{"id":229,"name":"Rue Jean Bono","city":null,"country_code":"mc","lat":"43.728006909090908","lon":"7.4108700272727273","highway_type":"residential"}
+{"id":230,"name":"Route de l'Hôpital","city":null,"country_code":"mc","lat":"43.730536168181821","lon":"7.4113240409090908","highway_type":"residential"}
+{"id":231,"name":"Place de la Source","city":null,"country_code":"mc","lat":"43.73980436428571","lon":"7.4205290892857141","highway_type":"residential"}
+{"id":232,"name":"Traverse Monte Cristo","city":null,"country_code":"mc","lat":"43.739657000000001","lon":"7.4193681571428574","highway_type":"residential"}
+{"id":233,"name":"Impasse des Carrières","city":null,"country_code":"mc","lat":"43.738235400000001","lon":"7.4187439749999999","highway_type":"service"}
+{"id":234,"name":"Jetée de Cap d'Ail","city":null,"country_code":"mc","lat":"43.724626592857142","lon":"7.4180666571428571","highway_type":"service"}
+{"id":235,"name":"Moyenne Corniche","city":null,"country_code":"mc","lat":"43.733129159999997","lon":"7.4125038600000002","highway_type":"primary"}
+{"id":236,"name":"Place du Campanin","city":null,"country_code":"mc","lat":"43.727802368421052","lon":"7.4182747631578954","highway_type":"pedestrian"}
+{"id":237,"name":"Promenade Honoré II","city":null,"country_code":"mc","lat":"43.731368748437497","lon":"7.4164505218750003","highway_type":"pedestrian"}
+{"id":238,"name":"Escalier Sainte-Dévote","city":null,"country_code":"mc","lat":"43.737334015384619","lon":"7.4206389846153842","highway_type":"steps"}
+{"id":239,"name":"Passage Saint-Michel","city":null,"country_code":"mc","lat":"43.740807799999999","lon":"7.422160466666667","highway_type":"service"}
+{"id":240,"name":"Passage Doda","city":null,"country_code":"mc","lat":"43.740302566666664","lon":"7.4229145999999995","highway_type":"service"}
+{"id":241,"name":"Rue des Lauriers","city":null,"country_code":"mc","lat":"43.74106802","lon":"7.4231185999999996","highway_type":"residential"}
+{"id":242,"name":"Rue de Castillon","city":null,"country_code":"mc","lat":"43.736713799999997","lon":"7.4142848875","highway_type":"residential"}
+{"id":243,"name":"Rue Pierre Curie","city":null,"country_code":"mc","lat":"43.736996122222223","lon":"7.4143277111111114","highway_type":"residential"}
+{"id":244,"name":"Escalier des Pissarelles","city":null,"country_code":"mc","lat":"43.728711349999998","lon":"7.4108800499999994","highway_type":"steps"}
+{"id":245,"name":"Chemin du Ténao","city":null,"country_code":"mc","lat":"43.750257140000002","lon":"7.4347115599999993","highway_type":"steps"}
+{"id":246,"name":"Escalier du Castelleretto","city":null,"country_code":"mc","lat":"43.734492400000001","lon":"7.4165577857142848","highway_type":"steps"}
+{"id":247,"name":"Rue des Agaves","city":null,"country_code":"mc","lat":"43.734355300000004","lon":"7.4178996500000007","highway_type":"residential"}
+{"id":248,"name":"Escalier Gabriel Arnoux","city":null,"country_code":"mc","lat":"43.735179933333335","lon":"7.416119066666667","highway_type":"steps"}
+{"id":249,"name":"Chemin de la Callada","city":null,"country_code":"mc","lat":"43.749268700000002","lon":"7.4353120500000003","highway_type":"steps"}
+{"id":250,"name":"Descente du Ténao","city":null,"country_code":"mc","lat":"43.7484520625","lon":"7.43417391875","highway_type":"steps"}
+{"id":251,"name":"Escalier du Ténao","city":null,"country_code":"mc","lat":"43.748799820000002","lon":"7.4336959199999999","highway_type":"steps"}
+{"id":252,"name":"Escalier des Grottes","city":null,"country_code":"mc","lat":"43.752161100000002","lon":"7.43780953","highway_type":"steps"}
+{"id":253,"name":"Traverse des Grottes","city":null,"country_code":"mc","lat":"43.752571266666671","lon":"7.4379980000000003","highway_type":"path"}
+{"id":254,"name":"Avenue Prince Rainier III Monaco","city":null,"country_code":"mc","lat":"43.735240899999994","lon":"7.4129230599999998","highway_type":"primary"}
+{"id":255,"name":"Chemin de la Rousse","city":null,"country_code":"mc","lat":"43.749666842857145","lon":"7.4313835190476194","highway_type":"path"}
+{"id":256,"name":"Rue Orchidées Prolongée","city":null,"country_code":"mc","lat":"43.74654065","lon":"7.4285816000000002","highway_type":"residential"}
+{"id":257,"name":"Impasse Delphine","city":null,"country_code":"mc","lat":"43.750525350000004","lon":"7.4355516000000001","highway_type":"footway"}
+{"id":258,"name":"Rue de la Gaité","city":null,"country_code":"mc","lat":"43.741899533333331","lon":"7.4229200999999998","highway_type":"footway"}
+{"id":259,"name":"Ruelle du Tenao","city":null,"country_code":"mc","lat":"43.74983585555556","lon":"7.4331093722222228","highway_type":"footway"}
+{"id":260,"name":"Rue Jean Jaurès","city":null,"country_code":"mc","lat":"43.736578399999999","lon":"7.4154630000000008","highway_type":"service"}
+{"id":261,"name":"Escalier des Salines","city":null,"country_code":"mc","lat":"43.730157371428568","lon":"7.4127980428571432","highway_type":"steps"}
+{"id":262,"name":"Rond-Point Canton","city":null,"country_code":"mc","lat":"43.731577518181815","lon":"7.417252784090909","highway_type":"primary"}
+{"id":263,"name":"Galeries du Parc Palace","city":null,"country_code":"mc","lat":"43.739923679999997","lon":"7.4246934199999997","highway_type":"footway"}
+{"id":264,"name":"Rue des Fours","city":null,"country_code":"mc","lat":"43.730598950000001","lon":"7.4230558099999993","highway_type":"footway"}
+{"id":265,"name":"La Vallée de la Pinède","city":null,"country_code":"mc","lat":"43.742480836363633","lon":"7.431521254545455","highway_type":"pedestrian"}
+{"id":266,"name":"Quai des États-Unis","city":null,"country_code":"mc","lat":"43.736982673333337","lon":"7.4240377000000004","highway_type":"service"}
+{"id":267,"name":"Quai Chicane","city":null,"country_code":"mc","lat":"43.737181671428573","lon":"7.426243928571429","highway_type":"service"}
+{"id":268,"name":"Rue des Carmes","city":null,"country_code":"mc","lat":"43.730673433333337","lon":"7.4220946866666671","highway_type":"footway"}
+{"id":269,"name":"Place Saint-Nicolas","city":null,"country_code":"mc","lat":"43.730520428571431","lon":"7.4223263428571427","highway_type":"pedestrian"}
+{"id":270,"name":"Tunnel Rainier III","city":null,"country_code":"mc","lat":"43.732849568749998","lon":"7.4130964187499995","highway_type":"primary"}
+{"id":271,"name":"Place Sainte-Dévote","city":null,"country_code":"mc","lat":"43.738752166666671","lon":"7.4197495333333343","highway_type":"platform"}
+{"id":272,"name":"Rond-Point Papalins","city":null,"country_code":"mc","lat":"43.728320473684207","lon":"7.4179584789473685","highway_type":"residential"}
+{"id":273,"name":"Belgique","city":null,"country_code":"mc","lat":"43.737410789999998","lon":"7.4187408700000006","highway_type":"platform"}
+{"id":274,"name":"Terrasses du Casino","city":null,"country_code":"mc","lat":"43.7378328","lon":"7.4266012799999999","highway_type":"platform"}
+{"id":275,"name":"Monte-Carlo (Casino)","city":null,"country_code":"mc","lat":"43.740979324999998","lon":"7.4260690499999997","highway_type":"platform"}
+{"id":276,"name":"Monte-Carlo (Tourisme)","city":null,"country_code":"mc","lat":"43.740756050000002","lon":"7.4258921499999992","highway_type":"platform"}
+{"id":277,"name":"Hôpital","city":null,"country_code":"mc","lat":"43.7308156","lon":"7.4130963333333328","highway_type":"platform"}
+{"id":278,"name":"Escalier de la Peirera","city":null,"country_code":"mc","lat":"43.739336066666667","lon":"7.4200032600000005","highway_type":"steps"}
+{"id":279,"name":"Rue des Spelugues","city":null,"country_code":"mc","lat":"43.730547674999997","lon":"7.4232462000000003","highway_type":"footway"}
+{"id":280,"name":"Ruelle Sainte-Dévote","city":null,"country_code":"mc","lat":"43.73060031","lon":"7.4234928499999997","highway_type":"footway"}
+{"id":281,"name":"Allée Saint-Jean-Paul II","city":null,"country_code":"mc","lat":"43.730397866666664","lon":"7.4223842500000003","highway_type":"service"}
+{"id":282,"name":"Allée Kléber","city":null,"country_code":"mc","lat":"43.727095866666666","lon":"7.4122248833333337","highway_type":"footway"}
+{"id":283,"name":"Place Léo Ferré","city":null,"country_code":"mc","lat":"43.739830312499997","lon":"7.4238541375000002","highway_type":"pedestrian"}
+{"id":284,"name":"Promenade Princesse Charlène","city":null,"country_code":"mc","lat":"43.739404","lon":"7.4261147800000007","highway_type":"pedestrian"}
+{"id":285,"name":"Avenue Mareterra","city":null,"country_code":"mc","lat":"43.742199541666672","lon":"7.4322765500000001","highway_type":"pedestrian"}
+{"id":286,"name":"Escalier Malbousquet","city":null,"country_code":"mc","lat":"43.736484331249997","lon":"7.4157763750000001","highway_type":"steps"}
+{"id":287,"name":"Jardin Paul Paray","city":null,"country_code":"mc","lat":"43.7372929","lon":"7.417178166666667","highway_type":"pedestrian"}
+{"id":288,"name":"Ruelle Chanoine Georges Franzi","city":null,"country_code":"mc","lat":"43.731228510000001","lon":"7.4256730199999996","highway_type":"footway"}
+{"id":289,"name":"Allée Louis Barral","city":null,"country_code":"mc","lat":"43.731553500000004","lon":"7.4143401625000003","highway_type":"footway"}
+{"id":290,"name":"Escalier de la Source Marie","city":null,"country_code":"mc","lat":"43.7501982","lon":"7.4377236999999994","highway_type":"steps"}
+{"id":291,"name":"Le Méridien • Valet Parking","city":null,"country_code":"mc","lat":"43.748396674999995","lon":"7.4356913000000002","highway_type":"service"}
+{"id":292,"name":"Gallerie Charles Despeaux","city":null,"country_code":"mc","lat":"43.738484299999996","lon":"7.4250535000000006","highway_type":"corridor"}
+{"id":293,"name":"Rue Victor Hugo","city":null,"country_code":"mc","lat":"43.736971416216214","lon":"7.4139336378378378","highway_type":"residential"}
+{"id":294,"name":"Tunnel Rocher Canton","city":null,"country_code":"mc","lat":"43.731680685714288","lon":"7.4167072785714288","highway_type":"secondary"}
+{"id":295,"name":"Passage Franciosy","city":null,"country_code":"mc","lat":"43.743197500000001","lon":"7.4291863909090914","highway_type":"steps"}
+{"id":296,"name":"Voie des stands","city":null,"country_code":"mc","lat":"43.73344347419355","lon":"7.4222869322580642","highway_type":"raceway"}
+{"id":297,"name":"Esplanade et promenade Prince Jacques","city":null,"country_code":"mc","lat":"43.742066689473688","lon":"7.4326257263157895","highway_type":"pedestrian"}
+{"id":298,"name":"Grimaldi Forum/Villa Sauber","city":null,"country_code":"mc","lat":"43.744001299999994","lon":"7.4312612599999994","highway_type":"platform"}
+{"id":299,"name":"Parvis Sainte-Dévote","city":null,"country_code":"mc","lat":"43.738082499999997","lon":"7.4198022937500001","highway_type":"pedestrian"}
+{"id":300,"name":"Promenade des Champions","city":null,"country_code":"mc","lat":"43.738511525","lon":"7.4292617500000002","highway_type":"footway"}
+{"id":301,"name":"Circuit de Monaco","city":null,"country_code":"mc","lat":"43.735850176000007","lon":"7.4241693550000001","highway_type":"raceway"}
+{"id":302,"name":"Sortie Parking de la Condamine","city":null,"country_code":"mc","lat":"43.733378277777781","lon":"7.4216908888888895","highway_type":"service"}
+{"id":303,"name":"Stade Nautique","city":null,"country_code":"mc","lat":"43.733783200000005","lon":"7.4216972999999999","highway_type":"platform"}
+{"id":304,"name":"Princesse Antoinette","city":null,"country_code":"mc","lat":"43.735546849999999","lon":"7.4212756500000001","highway_type":"platform"}
+{"id":305,"name":"Kennedy","city":null,"country_code":"mc","lat":"43.737050850000003","lon":"7.4239731999999998","highway_type":"platform"}
+{"id":306,"name":"Auditorium Rainier III","city":null,"country_code":"mc","lat":"43.737704624999999","lon":"7.4279581500000003","highway_type":"platform"}
+{"id":307,"name":"Passerelle Wurtemberg","city":null,"country_code":"mc","lat":"43.729801066666674","lon":"7.4135266999999994","highway_type":"footway"}
+{"id":308,"name":"Galerie Pietonne des Salines","city":null,"country_code":"mc","lat":"43.730572275","lon":"7.4128756999999998","highway_type":"footway"}
+{"id":309,"name":"Rampe des Revoirs","city":null,"country_code":"mc","lat":"43.732112492307692","lon":"7.4122094923076922","highway_type":"footway"}
+{"id":310,"name":"Sortie des stands","city":null,"country_code":"mc","lat":"43.736871027272727","lon":"7.4217322636363638","highway_type":"raceway"}
+{"id":311,"name":"Passerelle Fontvieille","city":null,"country_code":"mc","lat":"43.729626500000002","lon":"7.4136451999999995","highway_type":"footway"}
+{"id":312,"name":"Avenue de la Madone","city":"Monaco","country_code":"mc","lat":"43.740935200000003","lon":"7.4279184000000003","highway_type":"unknown"}
+{"id":313,"name":"Avenue de Grande-Bretagne","city":"Monte-Carlo","country_code":"mc","lat":"43.741546700000001","lon":"7.4282233","highway_type":"unknown"}
+{"id":314,"name":"Boulevard Princesse Charlotte","city":"Monaco","country_code":"mc","lat":"43.741527099999999","lon":"7.4257261000000003","highway_type":"unknown"}
+{"id":315,"name":"Quai Antoine 1er","city":"Monaco","country_code":"mc","lat":"43.732659899999994","lon":"7.4248356333333332","highway_type":"unknown"}
+{"id":316,"name":"Rue Terrazzani","city":"Monaco","country_code":"mc","lat":"43.732402700000002","lon":"7.4203859999999997","highway_type":"unknown"}
+{"id":317,"name":"Boulevard Albert 1er","city":"Monaco","country_code":"mc","lat":"43.735746419999998","lon":"7.4211687400000006","highway_type":"unknown"}
+{"id":318,"name":"Rue des Roses","city":"Monte-Carlo","country_code":"mc","lat":"43.740728537500004","lon":"7.4223871624999997","highway_type":"unknown"}
+{"id":319,"name":"Avenue Prince Pierre","city":"Monaco","country_code":"mc","lat":"43.732805300000003","lon":"7.4181571000000002","highway_type":"unknown"}
+{"id":320,"name":"Rue Grimaldi","city":"Monaco","country_code":"mc","lat":"43.735139783333331","lon":"7.4198593833333328","highway_type":"unknown"}
+{"id":321,"name":"Rue de la Lüjerneta","city":"Monaco","country_code":"mc","lat":"43.729802149999998","lon":"7.4162257999999994","highway_type":"unknown"}
+{"id":322,"name":"Boulevard Rainier III","city":"Monaco","country_code":"mc","lat":"43.738326600000001","lon":"7.4189403","highway_type":"unknown"}
+{"id":323,"name":"Rond-Point du Portier;Rue du Portier","city":"Monaco","country_code":"mc","lat":"43.741770199999998","lon":"7.4307637","highway_type":"unknown"}
+{"id":324,"name":"Quai Jean-Charles Rey","city":"Monaco","country_code":"mc","lat":"43.728314912499997","lon":"7.4209971875000003","highway_type":"unknown"}
+{"id":325,"name":"Place du Campanin","city":"Monaco","country_code":"mc","lat":"43.72795","lon":"7.4178417000000003","highway_type":"unknown"}
+{"id":326,"name":"Square Beaumarchais","city":"Monaco","country_code":"mc","lat":"43.7384603","lon":"7.4259576000000003","highway_type":"unknown"}
+{"id":327,"name":"Avenue du Port","city":"Monaco","country_code":"mc","lat":"43.732391399999997","lon":"7.4216832000000004","highway_type":"unknown"}
+{"id":328,"name":"Avenue d'Ostende","city":"Monaco","country_code":"mc","lat":"43.737625966666663","lon":"7.4256120999999995","highway_type":"unknown"}
+{"id":329,"name":"Place d'Armes","city":"Monaco","country_code":"mc","lat":"43.732686257142859","lon":"7.4198214285714288","highway_type":"unknown"}
+{"id":330,"name":"Boulevard Charles Iii","city":"Monaco","country_code":"mc","lat":"43.730161600000002","lon":"7.4139457000000002","highway_type":"unknown"}
+{"id":331,"name":"Avenue Princesse Grace","city":"Monaco","country_code":"mc","lat":"43.744192575","lon":"7.4319498583333328","highway_type":"unknown"}
+{"id":332,"name":"Rue du Ténao","city":"Monaco","country_code":"mc","lat":"43.7493245","lon":"7.4341222","highway_type":"unknown"}
+{"id":333,"name":"Avenue de l'Annonciade","city":"Monaco","country_code":"mc","lat":"43.747904900000002","lon":"7.4308070750000006","highway_type":"unknown"}
+{"id":334,"name":"Place du Casino","city":"Monaco","country_code":"mc","lat":"43.739374233333329","lon":"7.4282077333333332","highway_type":"unknown"}
+{"id":335,"name":"Chemin de la Turbie","city":"Monaco","country_code":"mc","lat":"43.737634200000002","lon":"7.4176308000000004","highway_type":"unknown"}
+{"id":336,"name":"Rue du Castelleretto","city":"Monaco","country_code":"mc","lat":"43.734986900000003","lon":"7.4174319000000004","highway_type":"unknown"}
+{"id":337,"name":"Route de la piscine","city":"Monaco","country_code":"mc","lat":"43.734063399999997","lon":"7.4221615666666665","highway_type":"unknown"}
+{"id":338,"name":"Rue Louis Notari","city":"Monaco","country_code":"mc","lat":"43.734331900000001","lon":"7.4205766999999998","highway_type":"unknown"}
+{"id":339,"name":"Place des Bougainvilliers","city":"Monaco","country_code":"mc","lat":"43.734200100000002","lon":"7.4180698999999999","highway_type":"unknown"}
+{"id":340,"name":"Rue Suffren Reymond","city":"Monaco","country_code":"mc","lat":"43.734135850000001","lon":"7.4189835999999998","highway_type":"unknown"}
+{"id":341,"name":"Pool Road","city":"Monaco","country_code":"mc","lat":"43.7335238","lon":"7.4222795000000001","highway_type":"unknown"}
+{"id":342,"name":"Avenue des Papalins","city":"Monaco","country_code":"mc","lat":"43.728354850000002","lon":"7.4189691500000006","highway_type":"unknown"}
+{"id":343,"name":"Quai Albert 1er","city":"Monaco","country_code":"mc","lat":"43.733450566666669","lon":"7.4227036666666661","highway_type":"unknown"}
+{"id":344,"name":"Promenade Honoré II","city":"Monaco","country_code":"mc","lat":"43.732439200000002","lon":"7.4172271250000001","highway_type":"unknown"}
+{"id":345,"name":"Avenue des Spélugues","city":"Monaco","country_code":"mc","lat":"43.740394774999999","lon":"7.4289556000000001","highway_type":"unknown"}
+{"id":346,"name":"Avenue de Monte-Carlo","city":"Monaco","country_code":"mc","lat":"43.738134166666669","lon":"7.4274018166666664","highway_type":"unknown"}
+{"id":347,"name":"Boulevard de Suisse","city":"Monaco","country_code":"mc","lat":"43.738498","lon":"7.4218849000000002","highway_type":"unknown"}
+{"id":348,"name":"Rue Jean Jaurès","city":"Beausoleil","country_code":"mc","lat":"43.737329500000001","lon":"7.4166622999999996","highway_type":"unknown"}
+{"id":349,"name":"Boulevard du Jardin Exotique","city":"Monaco","country_code":"mc","lat":"43.737007550000001","lon":"7.4165955500000003","highway_type":"unknown"}
+{"id":350,"name":"Boulevard d'Italie","city":"Monaco","country_code":"mc","lat":"43.7498705","lon":"7.4368163999999997","highway_type":"unknown"}
+{"id":351,"name":"Rue des Genêts","city":"Monaco","country_code":"mc","lat":"43.740895799999997","lon":"7.4236190999999998","highway_type":"unknown"}
+{"id":352,"name":"Avenue de Fontvieille","city":"Monaco","country_code":"mc","lat":"43.729364000000004","lon":"7.4141443999999996","highway_type":"unknown"}
+{"id":353,"name":"Rue des Géraniums","city":"Monaco","country_code":"mc","lat":"43.740993799999998","lon":"7.4219664999999999","highway_type":"unknown"}
+{"id":354,"name":"Rue des Açores","city":"Monaco","country_code":"mc","lat":"43.732704099999999","lon":"7.4206785000000002","highway_type":"unknown"}
+{"id":355,"name":"galerie Charles III","city":"Monte-Carlo","country_code":"mc","lat":"43.740534199999999","lon":"7.4279397999999999","highway_type":"unknown"}
+{"id":356,"name":"Allée François Blanc","city":"Monaco","country_code":"mc","lat":"43.739737566666662","lon":"7.4286772666666669","highway_type":"unknown"}
+{"id":357,"name":"Rue Princesse Caroline","city":"Monaco","country_code":"mc","lat":"43.733231125000003","lon":"7.4197680249999998","highway_type":"unknown"}
+{"id":358,"name":"Terrasses de Fontvieille","city":"Monaco","country_code":"mc","lat":"43.7308722","lon":"7.4175836999999998","highway_type":"unknown"}
+{"id":359,"name":"Rue du Gabian","city":"Monaco","country_code":"mc","lat":"43.728855824999997","lon":"7.4140565250000003","highway_type":"unknown"}
+{"id":360,"name":"Avenue John F. Kennedy","city":"Monaco","country_code":"mc","lat":"43.737057199999995","lon":"7.4232195499999998","highway_type":"unknown"}
+{"id":361,"name":"Allée Saimt Jean-Paul II","city":null,"country_code":"mc","lat":"43.730616400000002","lon":"7.4222807","highway_type":"unknown"}
+{"id":362,"name":"Place de la Crèmaillère","city":null,"country_code":"mc","lat":"43.741165199999998","lon":"7.4249527999999998","highway_type":"unknown"}
+{"id":363,"name":"Avenue Saint-Michel","city":"Monte-Carlo","country_code":"mc","lat":"43.740803700000001","lon":"7.4227331000000003","highway_type":"unknown"}
+{"id":364,"name":"Avenue Crovetto-Frères","city":"Monaco","country_code":"mc","lat":"43.732891266666662","lon":"7.415805633333334","highway_type":"unknown"}
+{"id":365,"name":"Boulevard des Moulins","city":"Monaco","country_code":"mc","lat":"43.741910700000005","lon":"7.4271164666666669","highway_type":"unknown"}
+{"id":366,"name":"Rue de la Turbie","city":"Monaco","country_code":"mc","lat":"43.733411400000001","lon":"7.4183030500000005","highway_type":"unknown"}
+{"id":367,"name":"Avenue Princesse Alice","city":"Monaco","country_code":"mc","lat":"43.738876533333332","lon":"7.4263429333333333","highway_type":"unknown"}
+{"id":368,"name":"Avenue de l'Hermitage","city":"Monaco","country_code":"mc","lat":"43.7384968","lon":"7.4258547999999998","highway_type":"unknown"}
+{"id":369,"name":"Quai Louis II","city":"Monaco","country_code":"mc","lat":"43.737313149999999","lon":"7.4275597250000001","highway_type":"unknown"}
+{"id":370,"name":"Rue de Millo","city":"Monaco","country_code":"mc","lat":"43.733015675000004","lon":"7.4201540000000001","highway_type":"unknown"}
+{"id":371,"name":"Rue Langlé","city":"Monaco","country_code":"mc","lat":"43.733265299999999","lon":"7.4194830999999999","highway_type":"unknown"}
+{"id":372,"name":"Sq. Beaumarchais","city":"Monaco","country_code":"mc","lat":"43.737863599999997","lon":"7.4256409000000003","highway_type":"unknown"}
+{"id":373,"name":"Rue du Portier","city":"Monaco","country_code":"mc","lat":"43.742245699999998","lon":"7.4296904000000001","highway_type":"unknown"}
+{"id":374,"name":"Rue Princesse Florestine","city":"Monaco","country_code":"mc","lat":"43.734145150000003","lon":"7.4196843000000001","highway_type":"unknown"}
+{"id":375,"name":"Rue des Violettes","city":"Monte-Carlo","country_code":"mc","lat":"43.7406717","lon":"7.4226935000000003","highway_type":"unknown"}
+{"id":376,"name":"Rue du Rocher","city":"Monaco","country_code":"mc","lat":"43.732305799999999","lon":"7.4180323000000001","highway_type":"unknown"}
+{"id":377,"name":"1 Prom. Honoré II","city":"Monaco","country_code":"mc","lat":"43.732136599999997","lon":"7.4171893999999998","highway_type":"unknown"}
+{"id":378,"name":"Rue des Orangers","city":"Monaco","country_code":"mc","lat":"43.733446999999998","lon":"7.4202301999999998","highway_type":"unknown"}
+{"id":379,"name":"Quai Albert 1er","city":null,"country_code":"mc","lat":"43.736744600000002","lon":"7.4219362000000002","highway_type":"unknown"}
+{"id":380,"name":"Avenue des Castelans","city":"Monaco","country_code":"mc","lat":"43.726914399999998","lon":"7.4146596999999996","highway_type":"unknown"}
+{"id":381,"name":"Avenue de la Costa","city":"Monte-Carlo","country_code":"mc","lat":"43.740072599999998","lon":"7.4246613000000004","highway_type":"unknown"}
+{"id":382,"name":"Boulevard du Général Leclerc","city":"Beausoleil","country_code":"mc","lat":"43.745275700000001","lon":"7.4282433000000001","highway_type":"unknown"}
+{"id":383,"name":"Avenue des Citronniers","city":"Monaco","country_code":"mc","lat":"43.741793800000004","lon":"7.4295837999999996","highway_type":"unknown"}
+{"id":384,"name":"Avenue de la Costa","city":"Monaco","country_code":"mc","lat":"43.738519400000001","lon":"7.4241887999999996","highway_type":"unknown"}
+{"id":385,"name":"Boulevard Princesse Charlotte – Immeuble « Le Forum » (6ème Etage)","city":"Monaco","country_code":"mc","lat":"43.741446699999997","lon":"7.4256196000000001","highway_type":"unknown"}

@@ -55,6 +55,14 @@ class RelayServer : AutoCloseable {
     /** Count of bundle fetches per peer — the one-time-prekey economics, observable. */
     val bundleFetches = ConcurrentHashMap<String, Int>()
 
+    /**
+     * Make `DELETE /v2/account` refuse, so a test can watch what the client does with a
+     * deletion the server did NOT perform. The real route refuses on a bad signature and
+     * on an unreachable downstream store, and both look like this from here.
+     */
+    @Volatile var failAccountDelete = false
+
+
     val baseUrl: String get() = "http://127.0.0.1:${server.address.port}"
 
     init {
@@ -151,7 +159,7 @@ class RelayServer : AutoCloseable {
         }
 
         val (code, response) = try {
-            route(ex.requestMethod, path, query, body)
+            route(ex.requestMethod, path, query, body, ex.requestHeaders.getFirst("x-oshi-user"))
         } catch (e: Exception) {
             500 to """{"error":"${e.javaClass.simpleName}: ${e.message}"}"""
         }
@@ -161,10 +169,64 @@ class RelayServer : AutoCloseable {
         ex.responseBody.use { it.write(bytes) }
     }
 
-    private fun route(method: String, path: String, query: String?, body: ByteArray): Pair<Int, String> {
+    // ---- bot queue state (row 0.26) ------------------------------------------------
+    /** pathKey -> queue entries, exactly as the legacy route serves them: raw strings. */
+    val pendingQueue = ConcurrentHashMap<String, MutableList<String>>()
+
+    /** Path keys that a `/api/bot/send` fans out to. A test registers its receivers here. */
+    val botSubscribers = java.util.concurrent.CopyOnWriteArrayList<String>()
+
+    private val botSeq = AtomicLong(0)
+
+    private fun route(
+        method: String,
+        path: String,
+        query: String?,
+        body: ByteArray,
+        /** `x-oshi-user`. Only the account route reads it; every other route signs the path. */
+        userHeader: String? = null,
+    ): Pair<Int, String> {
         val segments = path.trim('/').split('/').map { URLDecoder.decode(it, "UTF-8") }
         return when {
             method == "GET" && path == "/v2/config" -> 200 to configJson
+
+            // ---- the LEGACY pending queue (row 0.26's bot lane) ----------------------
+            // Deliberately modelled with its real shape: entries are STRINGS whose type is
+            // their prefix, not a typed field, and a bot post is the whole message inlined
+            // rather than a pointer. A test relay that returned typed objects here would
+            // let a client pass that could never read a real queue.
+            // A BARE JSON ARRAY of strings — not an object with a `hashes` key. The queue
+            // is a list of opaque strings whose type is their prefix; wrapping it would let
+            // a client pass here that could never read the real route.
+            method == "GET" && segments.size == 3 && segments[0] == "api" && segments[1] == "pending" ->
+                200 to JSONArray().also { a -> pendingQueue[segments[2]]?.forEach { a.put(it) } }.toString()
+
+            method == "POST" && segments.size == 3 && segments[0] == "api" &&
+                segments[1] == "bot-received" -> {
+                // Ack by ENVELOPE message id — the key the entry was filed under.
+                val id = JSONObject(String(body)).optString("messageId")
+                pendingQueue[segments[2]]?.removeAll { it.startsWith("bot:$id:") }
+                200 to "{}"
+            }
+
+            method == "POST" && path == "/api/bot/send" -> {
+                val j = JSONObject(String(body))
+                val id = "bot-msg-" + botSeq.incrementAndGet()
+                val payload = JSONObject()
+                    .put("type", "bot_message").put("messageId", id)
+                    .put("botToken", j.optString("token").take(8) + "...")
+                    .put("botName", "test-bot")
+                    .put("groupId", j.optString("groupId")).put("groupName", "Test Group")
+                    .put("content", j.optString("content"))
+                    .put("timestamp", "2023-11-14T22:13:20.000Z")   // ISO-8601, as the server emits
+                    .put("senderAddress", "bot")
+                val entry = "bot:$id:" + java.util.Base64.getEncoder()
+                    .encodeToString(payload.toString().toByteArray())
+                botSubscribers.forEach { pendingQueue.getOrPut(it) { mutableListOf() }.add(entry) }
+                200 to JSONObject().put("delivered", botSubscribers.size)
+                    .put("totalMembers", botSubscribers.size).put("messageId", id)
+                    .put("groupName", "Test Group").put("hasMedia", false).toString()
+            }
 
             method == "POST" && path == "/v2/keys/publish" -> publish(JSONObject(String(body)))
 
@@ -181,7 +243,22 @@ class RelayServer : AutoCloseable {
             method == "GET" && segments.size == 3 && segments[1] == "messages" ->
                 pull(segments[2], (query ?: "").substringAfter("after=", "0").toLongOrNull() ?: 0)
 
-            method == "DELETE" && path == "/v2/account" -> 200 to """{"complete":true,"erased":{"prekeys":true}}"""
+            method == "DELETE" && path == "/v2/account" -> {
+                // The route ERASES, rather than answering a receipt over untouched state:
+                // a fake that reports a deletion it did not perform cannot tell a client
+                // that skipped the request apart from one that made it.
+                val who = userHeader
+                if (failAccountDelete) 500 to """{"error":"unauthorized"}"""
+                else {
+                    val hadBundle = who != null && bundles.remove(who) != null
+                    val envelopes = who?.let { mailboxes.remove(it)?.size } ?: 0
+                    200 to JSONObject()
+                        .put("complete", true)
+                        .put("erased", JSONObject().put("prekeys", hadBundle)
+                            .put("relay", JSONObject().put("envelopes", envelopes)))
+                        .toString()
+                }
+            }
 
             else -> 404 to """{"error":"no route for $method $path"}"""
         }

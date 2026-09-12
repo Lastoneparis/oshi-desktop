@@ -56,6 +56,56 @@ class MeshNodeTest {
         waitUntil("B has no route to A") { b.routes()[KEY_A]?.hopCount == 1 }
     }
 
+    /**
+     * Found by a red Windows CI job, and it was never a Windows bug.
+     *
+     * `handleIdentityExchange` recorded `conn.socket.port` as the peer's port. On an
+     * ACCEPTED socket that is the DIALLING side's ephemeral source port — a number nobody
+     * can connect to, and one that looks plausible because it usually sits a couple above
+     * their real listen port. Worse, it OVERWROTE the true port mDNS had already resolved,
+     * so whichever landed last won. macOS and Linux happened to lose that race in the
+     * harmless direction and Windows in the visible one, which is why one CI leg went red
+     * over a defect present on all three.
+     *
+     * The overwrite half is guarded by `MdnsDiscoveryTest` — that is the assertion that
+     * caught this. This is the other half: what we record when the peer only ever dialled
+     * in and nothing has told us a port at all.
+     */
+    @Test
+    fun `a peer that dialled in is not given a port we could never dial back`() {
+        val a = node("A", KEY_A)
+        val b = node("B", KEY_B)
+
+        val bSawA = CountDownLatch(1)
+        b.onPeersChanged = { peers -> if (peers.any { it.publicKey == KEY_A }) bSawA.countDown() }
+
+        a.connectToPeer("127.0.0.1", b.listenPort, KEY_B)
+        assertTrue("B never learned A's identity", bSawA.await(10, TimeUnit.SECONDS))
+
+        val aAsSeenByB = b.peers().first { it.publicKey == KEY_A }
+        assertEquals(
+            "B invented a listen port for a peer that only ever dialled in — the value it " +
+                "had is A's outbound SOURCE port, which reaches nothing",
+            MeshNode.PORT_UNKNOWN, aAsSeenByB.port,
+        )
+        assertFalse(
+            "a port nobody advertised must not be reported as dialable",
+            aAsSeenByB.portIsDialable,
+        )
+        assertEquals(
+            "the host is kept — that address demonstrably carried a connection",
+            "127.0.0.1", aAsSeenByB.host,
+        )
+        // And the dialling side is unaffected: A learned B's port by dialling it.
+        //
+        // The wait is not decoration. `bSawA` only says B processed A's identity; A
+        // processes B's REPLY on its own thread, and asserting straight after the latch
+        // passed in isolation and lost the race under a full-suite run. A flake that only
+        // fires under load is worse than no test.
+        waitUntil("A never registered B") { a.peers().any { it.publicKey == KEY_B } }
+        assertEquals(b.listenPort, a.peers().first { it.publicKey == KEY_B }.port)
+    }
+
     @Test
     fun `a message reaches the peer it is addressed to`() {
         val a = node("A", KEY_A)

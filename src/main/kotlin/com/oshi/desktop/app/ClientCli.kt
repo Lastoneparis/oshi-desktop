@@ -1,6 +1,7 @@
 package com.oshi.desktop.app
 
 import com.oshi.desktop.group.GroupType
+import com.oshi.desktop.i18n.t
 import com.oshi.desktop.pairing.ContactQr
 import com.oshi.desktop.pairing.QrMatrix
 import com.oshi.desktop.place.LiveState
@@ -90,13 +91,60 @@ fun runClientCli(args: Array<String>) {
         println("\n[group ${r.groupId?.take(8) ?: "?"}…] ${r.outcome}: ${r.detail}")
         print("> "); System.out.flush()
     }
+    // THE SURFACE FOR AN INBOUND CALL, and without it the whole lane is invisible.
+    //
+    // `onCall` was declared, fed by CallLane, and subscribed by NOBODY. A peer could ring,
+    // the poller would open the seal and drive the machine to RINGING, and the user was
+    // told nothing — then 45 s later the watchdog sent a callEnd and the caller saw "no
+    // answer". In between, the user's own /call was refused BUSY for a call they had never
+    // been shown. Every line here is printed, none is swallowed.
+    client.onCall = { event ->
+        when (event) {
+            is com.oshi.desktop.call.CallLane.CallEvent.Ringing ->
+                if (event.incoming) {
+                    println("\n\u0007>> INCOMING ${if (event.video) "VIDEO " else ""}CALL from ${short(event.peer)}")
+                    println("   /answer to accept, /decline to refuse. ${audioNote(client)}")
+                } else {
+                    println("\n   ringing ${short(event.peer)}…")
+                }
+            com.oshi.desktop.call.CallLane.CallEvent.RingingStopped -> {}
+            is com.oshi.desktop.call.CallLane.CallEvent.Connected ->
+                // The EVENT decides, not the configuration: a lane with an opener can still
+                // connect without audio if the leg refused, and that call must say so.
+                println(
+                    "\n   connected to ${short(event.peer)} — " +
+                        if (event.noAudio) com.oshi.desktop.call.CallLane.NO_AUDIO_WILL_FLOW
+                        else "audio devices open; sound starts once a candidate pair answers."
+                )
+            is com.oshi.desktop.call.CallLane.CallEvent.Ended ->
+                println("\n   call with ${short(event.peer)} ended: ${event.reason}")
+            is com.oshi.desktop.call.CallLane.CallEvent.Refused ->
+                println("\n   call refused: ${event.refusal}${event.from?.let { " (from ${short(it)})" } ?: ""}")
+            is com.oshi.desktop.call.CallLane.CallEvent.TransportProblem ->
+                println("\n   call transport: ${event.detail}")
+        }
+        print("> "); System.out.flush()
+    }
+
     client.onScheduledRun = { run ->
         val late = if (run.wasLate) " — ${run.lateByMs / 1000}s LATE (this client was not running when it came due)" else ""
         println("\n[scheduled] sent ${run.sent}, deferred ${run.deferred}, failed ${run.failed}$late")
         print("> "); System.out.flush()
     }
 
-    client.start(pollIntervalMs = argValue(args, "--poll")?.toLongOrNull() ?: 3_000)
+    // Calls reach a SECOND server with no authentication (see OshiClient.start). Opt-in,
+    // and said out loud on the line above the prompt rather than buried in a doc.
+    val withCalls = args.contains("--calls")
+    if (withCalls) {
+        println("  calls      : polling ${com.oshi.desktop.call.CallLane.POLL_INTERVAL_MS} ms — this contacts the CALL server,")
+        println("               which has no authentication and logs key prefixes and IPs. SIGNALLING ONLY: no audio.")
+    } else {
+        println("  calls      : off — pass --calls to ring and be rung (signalling only, no audio)")
+    }
+    client.start(
+        pollIntervalMs = argValue(args, "--poll")?.toLongOrNull() ?: 3_000,
+        callPollIntervalMs = if (withCalls) com.oshi.desktop.call.CallLane.POLL_INTERVAL_MS else 0,
+    )
     Runtime.getRuntime().addShutdownHook(Thread { client.stop() })
 
     println(ClientCommands.HELP)
@@ -119,6 +167,31 @@ fun runClientCli(args: Array<String>) {
  *
  * @return false when the caller should stop reading input (`/quit`).
  */
+/**
+ * What the REPL says about audio on a call, in ONE place.
+ *
+ * There used to be five unconditional prints of `NO_AUDIO_WILL_FLOW`, and the repetition
+ * was deliberate and right while it was true — a person told "calling…" and then
+ * "connected" has been told they are on a call. It stopped being true when `OshiClient`
+ * gained a media opener.
+ *
+ * The warning is not deleted, it is made CONDITIONAL, because both sentences have to keep
+ * existing: a build with no opener must still say nothing will be heard, and a build with
+ * one must not. A surface that cries "no audio" over a call that is carrying audio teaches
+ * the user to skip that line, and they will skip it when it matters.
+ *
+ * The audio-capable sentence is deliberately unexcited. Devices open does not mean sound
+ * arrives: a candidate pair still has to answer, there is no TURN, and no call has ever
+ * been carried between two machines.
+ */
+private fun audioNote(client: OshiClient): String =
+if (client.calls.carriesAudio) {
+    "audio devices open on connect; sound starts only once a candidate pair answers, " +
+        "and there is no relay to fall back on if none does."
+} else {
+    com.oshi.desktop.call.CallLane.NO_AUDIO_WILL_FLOW
+}
+
 object ClientCommands {
 
     val HELP: String = """
@@ -156,9 +229,24 @@ object ClientCommands {
           /schedule <address> <when> <text>  queue a message; <when> is +15m / +2h / +1d / epoch-ms
           /scheduled [address]               the queue
           /cancel <id>                       cancel a scheduled message
+          /call <address>                    ring a peer — SIGNALLING ONLY, NO AUDIO
+          /answer                            answer the ringing call (still no audio)
+          /decline                           decline the ringing call
+          /hangup                            end the call that is up
+          /calls                             the call state now, and this session's call log
+          /bot poll                          fetch bot posts  (NOT encrypted)
+          /bot send <token> <group> <text>   post to a bot group (NOT encrypted)
           /sync push|pull|status             the V2 archive (multi-device)
           /sync checkpoint <seq>             let the server drop everything up to <seq>
           /sync legacy push|pull             the legacy /api/sync alias map
+          /call <address>                    ring a peer — SIGNALLING ONLY, no audio (needs --calls)
+          /lora attach <host> [port]         attach to a Meshtastic node over TCP (default 4403)
+          /lora status|detach                the radio link — receive only, see /lora status
+          /ai <prompt>                       ask the OFFLINE model (nothing leaves this machine)
+          /ai model <path>                   point at a .gguf; nothing is ever downloaded
+          /ai status                         engine, model, and what a question would do now
+          /ai forget                         drop the remembered conversation context
+          /deleteaccount confirm             erase this identity on the server, then wipe it here
           /quit
     """.trimIndent()
 
@@ -183,7 +271,7 @@ object ClientCommands {
 
                 input == "/chats" -> {
                     val chats = client.conversations()
-                    if (chats.isEmpty()) out("   (none yet)")
+                    if (chats.isEmpty()) out("   " + t("messages.empty"))
                     chats.forEach { out(chatLine(client, it)) }
                 }
 
@@ -196,10 +284,10 @@ object ClientCommands {
 
                 input == "/contacts" -> {
                     val all = client.contacts.all()
-                    if (all.isEmpty()) out("   (none yet)")
+                    if (all.isEmpty()) out("   " + t("contacts.empty"))
                     all.forEach {
                         val flags = buildString {
-                            if (it.blocked) append(" [blocked]")
+                            if (it.blocked) append(" [${t("contact.blocked")}]")
                             append(" [${it.verification.wire}]")
                         }
                         out("   ${short(it.address)}  ${it.displayName ?: ""}$flags")
@@ -208,8 +296,13 @@ object ClientCommands {
 
                 input == "/peers" -> {
                     val peers = client.mesh.peers()
-                    if (peers.isEmpty()) out("   (none on this network)")
-                    peers.forEach { out("   ${it.displayName} [${it.platform}] ${short(it.publicKey)} ${it.host}:${it.port}") }
+                    if (peers.isEmpty()) out("   " + t("mesh.no_peers"))
+                    // A peer that dialled us has no listen port we know of. Printing
+                    // ":0" would read as an address; naming it is the honest render.
+                    peers.forEach {
+                        val where = if (it.portIsDialable) "${it.host}:${it.port}" else "${it.host} (dialled us — no listen port advertised)"
+                        out("   ${it.displayName} [${it.platform}] ${short(it.publicKey)} $where")
+                    }
                 }
 
                 input.startsWith("/send ") -> {
@@ -249,7 +342,7 @@ object ClientCommands {
 
                 input.startsWith("/history ") -> withPeer(client, input, "/history ", out) { target ->
                     val rows = client.history(target)
-                    if (rows.isEmpty()) out("   (nothing yet)")
+                    if (rows.isEmpty()) out("   " + t("messages.empty"))
                     rows.forEach { m ->
                         val who = if (m.fromMe) "me" else short(m.senderAddress)
                         val state = if (m.fromMe) " (${m.deliveryStatus.wire})" else ""
@@ -260,7 +353,7 @@ object ClientCommands {
                         }
                         val reactions = if (m.reactions.isEmpty()) "" else
                             "  " + m.reactions.values.flatten().joinToString("")
-                        val edited = if (m.editedAtMs != null) " (edited)" else ""
+                        val edited = if (m.editedAtMs != null) " " + t("edit.edited_label") else ""
                         out("   ${m.id.take(8)}  ${stamp(m.sentAtMs)}  $who$state: $body$edited$reactions")
                     }
                 }
@@ -352,7 +445,12 @@ object ClientCommands {
 
                 input.startsWith("/safety ") -> withPeer(client, input, "/safety ", out) {
                     out("   ${client.safetyNumber(it)}")
-                    out("   Read these 60 digits to each other. They match only if nobody is in the middle.")
+                    // A key that TAKES AN ARGUMENT, on purpose: "%@" here is not "%s" to
+                    // the JDK, and this is the call site that would throw if IosFormat
+                    // stopped converting. See IosFormatTest.
+                    out("   " + t("safety.instruction_1", short(it)))
+                    out("   " + t("safety.instruction_2"))
+                    out("   " + t("safety.instruction_3"))
                 }
 
                 input.startsWith("/verify ") -> {
@@ -368,9 +466,9 @@ object ClientCommands {
 
                 input == "/groups" -> {
                     val all = client.groups.all()
-                    if (all.isEmpty()) out("   (none)")
+                    if (all.isEmpty()) out("   " + t("empty.no_groups"))
                     all.forEach {
-                        val admin = if (it.isAdmin(client.address)) " [admin]" else ""
+                        val admin = if (it.isAdmin(client.address)) " [${t("groups.admin")}]" else ""
                         out("   ${it.groupId.take(8)}…  ${it.name}  ${it.members.size} members  ${it.type.raw}$admin  last ${stamp(it.lastActivityUnixMillis)}")
                     }
                 }
@@ -415,6 +513,11 @@ object ClientCommands {
                         if (target == null) { out("   unknown address"); emptyList() }
                         else client.scheduled.pendingFor(target)
                     }
+                    // NOT localised, and the reason is recorded rather than left blank:
+                    // the shipped iOS asset has no key for an empty SCHEDULED queue.
+                    // `scheduled.empty` exists in exactly ONE of the 34 catalogs (pl) and
+                    // not in English, so using it would show Polish users a string and
+                    // everyone else the key. See CatalogAuditTest.
                     if (rows.isEmpty()) out("   (nothing queued)")
                     rows.forEach { out(scheduledLine(it)) }
                 }
@@ -432,7 +535,32 @@ object ClientCommands {
                     }
                 }
 
+                // `/calls` is matched by EQUALITY and `/call` only with its trailing space,
+                // so neither can swallow the other however they are ordered.
+                input == "/calls" -> callLog(client, out)
+                input.startsWith("/call ") -> withPeer(client, input, "/call ", out) { peer ->
+                    // The warning goes out BEFORE the ring, every single time — not once at
+                    // startup, not in a doc comment. A person who is told "calling…" and then
+                    // "connected" has been told they are on a call, and this client cannot
+                    // carry a sample of audio in either direction.
+                    out("   ! " + audioNote(client))
+                    when (val d = client.calls.call(peer)) {
+                        is com.oshi.desktop.call.CallLane.Dialled.Ringing ->
+                            out("   ringing ${short(peer)} — call ${d.callId.take(8)}…, the server said '${d.delivery}'")
+                        is com.oshi.desktop.call.CallLane.Dialled.Refused ->
+                            out("   NOT RINGING — ${d.why}")
+                    }
+                }
+                input == "/answer" -> answered(client.calls.answer(), client, out, "answered")
+                input == "/decline" -> answered(client.calls.decline(), client, out, "declined")
+                input == "/hangup" -> answered(client.calls.hangUp(), client, out, "ended")
+
+                input.startsWith("/bot") -> bot(client, input.removePrefix("/bot").trim(), out)
                 input.startsWith("/sync") -> sync(client, input.removePrefix("/sync").trim(), out)
+                input.startsWith("/lora") -> lora(client, input.removePrefix("/lora").trim(), out)
+                input == "/ai" || input.startsWith("/ai ") -> ai(input.removePrefix("/ai").trim(), out)
+                input.startsWith("/deleteaccount") ->
+                    deleteAccount(client, input.removePrefix("/deleteaccount").trim(), out)
 
                 else -> out("   unknown command")
             }
@@ -472,7 +600,7 @@ object ClientCommands {
                 val updated =
                     if (parts[0] == "add") client.addGroupMember(gid, who) else client.removeGroupMember(gid, who)
                 out(
-                    if (updated == null) "   unknown group"
+                    if (updated == null) "   " + t("alert.add_failed")
                     else "   roster is now ${updated.members.size}; update broadcast"
                 )
             }
@@ -499,7 +627,171 @@ object ClientCommands {
 
     // ------------------------------------------------------------------ sync
 
-    private fun sync(client: OshiClient, rest: String, out: (String) -> Unit) {
+    /**
+ * The bot lane (row 0.26) — the one command in this REPL that is NOT end-to-end encrypted.
+ *
+ * The warning is printed on every send rather than once at startup, and it is printed
+ * BEFORE the post goes out, because a warning a user has already scrolled past is not a
+ * warning. `OshiClient.BOT_CHANNEL_IS_PLAINTEXT` is the single owner of that sentence so
+ * this surface cannot drift from any UI that appears later.
+ */
+private fun bot(client: OshiClient, args: String, out: (String) -> Unit) {
+    val parts = args.split(" ", limit = 4).filter { it.isNotEmpty() }
+    when (parts.firstOrNull()) {
+        "poll" -> {
+            val n = client.pollBots()
+            out(if (n == 0) "   no new bot messages" else "   stored $n bot message(s) — this lane is NOT encrypted")
+        }
+        "send" -> {
+            if (parts.size < 4) { out("   usage: /bot send <token> <groupId> <text>"); return }
+            out("   ! " + OshiClient.BOT_CHANNEL_IS_PLAINTEXT)
+            client.sendBotMessage(parts[1], parts[2], parts[3])
+                .onSuccess { out("   posted to ${it.groupName}: ${it.delivered}/${it.totalMembers} delivered, in cleartext") }
+                .onFailure { out("   bot send failed: ${it.javaClass.simpleName}: ${it.message}") }
+        }
+        else -> out("   usage: /bot poll | /bot send <token> <groupId> <text>")
+    }
+}
+
+    // ------------------------------------------------------------------ calls (row 2.1)
+
+    /**
+     * Report what `/answer`, `/decline` or `/hangup` did.
+     *
+     * A [com.oshi.desktop.call.CallRefusal] is printed by NAME rather than folded into "that
+     * didn't work", because the whole reason the state machine returns one is that "there is
+     * no call ringing", "that call already ended" and "a decline cannot end a connected call"
+     * are three different things to tell a person.
+     */
+    private fun answered(
+        refusal: com.oshi.desktop.call.CallRefusal,
+        client: OshiClient,
+        out: (String) -> Unit,
+        verb: String,
+    ) {
+        if (refusal == com.oshi.desktop.call.CallRefusal.NONE) {
+            out("   $verb — ${client.calls.state}")
+            if (verb == "answered") {
+                // Said again on the answer, because the answering side is the one that never
+                // saw /call's warning.
+                out("   ! " + audioNote(client))
+            }
+        } else {
+            out("   nothing $verb — $refusal (state is ${client.calls.state})")
+        }
+    }
+
+
+private fun callLog(client: OshiClient, out: (String) -> Unit) {
+        val lane = client.calls
+        val where = lane.peer?.let { " with ${short(it)}" } ?: ""
+        val dir = if (lane.state == com.oshi.desktop.call.CallState.IDLE) ""
+        else if (lane.isOutgoing) " (outgoing)" else " (incoming)"
+        out("   state: ${lane.state}$where$dir")
+        out("   ! " + audioNote(client))
+        val rows = lane.calls()
+        if (rows.isEmpty()) out("   (no calls this session)")
+        rows.forEach {
+            val how = if (it.incoming) "in " else "out"
+            val got = if (it.connected) "connected" else "not connected"
+            out("   $how  ${stamp(it.atMs)}  ${short(it.peer)}  ${it.reason.wire}  $got")
+        }
+        if (rows.isNotEmpty()) {
+            // Stated where someone would otherwise assume a history: this is a signalling
+            // row, not a call-history row, and it has no store behind it.
+            out("   (this log is in memory only — it does not survive a restart)")
+        }
+        val problems = lane.unopenable + lane.unaddressable + lane.sendFailures
+        if (problems > 0) {
+            out("   ${lane.unopenable} signal(s) did not open, ${lane.unaddressable} named no valid" +
+                " sender, ${lane.sendFailures} send(s) failed")
+        }
+    }
+
+private fun lora(client: OshiClient, rest: String, out: (String) -> Unit) {
+        val parts = rest.split(' ').filter { it.isNotEmpty() }
+        when (parts.firstOrNull()) {
+            "attach" -> {
+                val host = parts.getOrNull(1)
+                if (host == null) { out("   usage: /lora attach <host> [port]"); return }
+                val port = parts.getOrNull(2)?.toIntOrNull() ?: com.oshi.desktop.lora.LoRaAttach.TCP_PORT
+                client.loraAttach(host, port)
+                out("   attaching to $host:$port …")
+                // Said on every attach, because this is the one lane where "connected"
+                // and "can read your messages" are different facts.
+                out("   RECEIVE ONLY, and mostly unreadable: stock Meshtastic text arrives")
+                out("   flagged UNVERIFIED; an OSHI envelope is sealed with the LEGACY ratchet")
+                out("   this client does not implement, so it is reported and never opened.")
+            }
+            "detach" -> { client.loraDetach(); out("   detached") }
+            "status" -> out(if (client.loraAttached) "   attached" else "   not attached")
+            else -> out("   usage: /lora attach <host> [port] | status | detach")
+        }
+    }
+
+/**
+ * `/ai` — PARITY.md row 2.5, the offline model.
+ *
+ * Takes no [OshiClient]: this is the one feature in the client that touches no identity,
+ * no session and no wire. The engine is process-global because llama.cpp is (see
+ * [com.oshi.desktop.ai.DesktopAi]).
+ *
+ * **Everything the model cannot do is printed, never swallowed.** There is no native
+ * library in this repository and no model is shipped, so on a fresh machine every one of
+ * these commands says exactly what is missing and where it looked. That is the whole
+ * point of the row: the iOS app's Apple-only fast path cannot exist here, the portable
+ * fallback can, and a client that quietly printed nothing would be indistinguishable from
+ * one that had answered with silence.
+ */
+private fun ai(rest: String, out: (String) -> Unit) {
+    val mgr = com.oshi.desktop.ai.DesktopAi.manager()
+    when {
+        rest.isEmpty() -> {
+            out("   usage: /ai <prompt> | /ai model <path> | /ai status | /ai forget")
+            com.oshi.desktop.ai.AiConsole.render(mgr.status()).forEach(out)
+        }
+        rest == "status" -> com.oshi.desktop.ai.AiConsole.render(mgr.status()).forEach(out)
+        rest == "forget" -> out("   dropped ${mgr.forget()} remembered turn(s)")
+        rest == "model" -> out("   usage: /ai model <path-to-a-.gguf>")
+        rest.startsWith("model ") ->
+            com.oshi.desktop.ai.AiConsole.render(mgr.configureModel(rest.removePrefix("model ").trim())).forEach(out)
+        else -> com.oshi.desktop.ai.AiConsole.render(mgr.generate(rest)).forEach(out)
+    }
+}
+
+private fun deleteAccount(client: OshiClient, rest: String, out: (String) -> Unit) {
+        // The word is required and it is not a flourish. Every other command here is
+        // undoable or repeatable; this one ends the account, and the local half takes the
+        // signing key with it, so a mistyped prefix of some other command must not reach it.
+        if (rest != "confirm") {
+            out("   usage: /deleteaccount confirm")
+            out("   This erases this identity's prekey bundle, queued envelopes, sync archive")
+            out("   and stored media on the server, then wipes the account on this machine.")
+            out("   It cannot be undone and this address can never be used again.")
+            return
+        }
+        client.deleteAccount().fold(
+            { r ->
+                // 207 is a real answer and it is not success. Print what is GONE and what
+                // is not, rather than a tick that means "the request did not throw".
+                out(if (r.complete) "   account erased" else "   account PARTIALLY erased")
+                out("   prekeys ${if (r.prekeysErased) "erased" else "NOT erased"}" +
+                    ", ${r.relayEnvelopes} envelope(s), ${r.syncItems} sync item(s), ${r.inboundBlobs} blob(s)")
+                if (r.outboundBlobsLeft > 0) out("   ${r.outboundBlobsLeft} blob(s) sent to others remain — they are not this account's to delete")
+                if (r.unreachable.isNotEmpty()) out("   STILL OUT THERE — unreachable store(s): ${r.unreachable.joinToString(", ")}")
+                out("   local account wiped. Restart to mint a new one.")
+            },
+            {
+                // Nothing was wiped locally — see OshiClient.deleteAccount for why that is
+                // the safe direction. Say so, or the user retries believing they are already
+                // half-deleted.
+                out("   delete failed: ${it.message}")
+                out("   NOTHING was wiped — the account here is intact, so this can be retried.")
+            },
+        )
+    }
+
+private fun sync(client: OshiClient, rest: String, out: (String) -> Unit) {
         val parts = rest.split(' ').filter { it.isNotEmpty() }
         when (parts.firstOrNull()) {
             "push" -> client.syncPushContacts().fold(
@@ -563,7 +855,7 @@ object ClientCommands {
             if (m.attempts > 0) "  (${m.attempts} attempt(s))" else ""
 
     private fun outcomeText(o: OshiClient.SendOutcome): String = when (o) {
-        OshiClient.SendOutcome.SENT -> "sent"
+        OshiClient.SendOutcome.SENT -> t("messages.sent_successfully")
         OshiClient.SendOutcome.BLOCKED -> "NOT SENT — that contact is blocked"
         OshiClient.SendOutcome.NO_V2_PATH ->
             "NOT DELIVERED — that peer has published no prekey bundle, so V2 cannot reach them"

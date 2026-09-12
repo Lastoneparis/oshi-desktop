@@ -60,12 +60,29 @@ class MeshNode(
         val displayName: String,
         val platform: String,
         val host: String,
+        /**
+         * The port this peer ACCEPTS connections on, or [PORT_UNKNOWN] when we have not
+         * been told one — see [handleIdentityExchange]. Never a socket's remote port.
+         */
         val port: Int,
-    )
+    ) {
+        /** True when this peer reached us and never advertised a port we could dial back. */
+        val portIsDialable: Boolean get() = port != PORT_UNKNOWN
+    }
 
     data class RouteInfo(val nextHop: String, val hopCount: Int, val lastSeen: Long)
 
-    private class Conn(val socket: Socket, val out: DataOutputStream) {
+    private class Conn(
+        val socket: Socket,
+        val out: DataOutputStream,
+        /**
+         * True when WE opened this socket. It decides whether `socket.port` means
+         * anything: on a dialled socket it is the port we dialled — the peer's listen
+         * port — and on an accepted one it is the peer's ephemeral SOURCE port, which
+         * reaches nothing. See [handleIdentityExchange].
+         */
+        val weDialled: Boolean,
+    ) {
         @Volatile var peerKey: String? = null
     }
 
@@ -223,7 +240,7 @@ class MeshNode(
 
     private fun startConnection(socket: Socket, expectedKey: String?) {
         socket.tcpNoDelay = true
-        val conn = Conn(socket, DataOutputStream(socket.getOutputStream()))
+        val conn = Conn(socket, DataOutputStream(socket.getOutputStream()), weDialled = expectedKey != null)
         if (expectedKey != null) {
             conn.peerKey = expectedKey
             connections[expectedKey] = conn
@@ -302,12 +319,35 @@ class MeshNode(
         conn.peerKey = key
         connections[key] = conn
         routingTable[key] = RouteInfo(key, 1, System.currentTimeMillis())
+        // `conn.socket.port` IS THE PEER'S LISTEN PORT ONLY WHEN WE DIALLED.
+        //
+        // On a socket we ACCEPTED it is the remote end's EPHEMERAL SOURCE port — the port
+        // their kernel picked for the outgoing connection — not the port they listen on.
+        // Recording it published a number nobody can dial: it usually sits a couple above
+        // their real listen port (a node bound to 62739 dials out from 62741), which is
+        // exactly why it reads as plausible.
+        //
+        // It also OVERWROTE the good value. mDNS carries the real listen port in the SRV
+        // record, and whichever of the two landed last won — a race macOS and Linux lost
+        // harmlessly and Windows lost visibly, so `MdnsDiscoveryTest` went red on one CI
+        // leg over a defect that was on all three.
+        //
+        // The identity-exchange payload has no port field on ANY platform (Android's
+        // `CrossPlatformMesh.sendIdentity` sends `publicKey`, `name`, `platform`; iOS reads
+        // the same three), so inventing one here would be a dialect no phone speaks. For a
+        // peer that dialled US the honest record is [PORT_UNKNOWN] — mDNS fills it in when
+        // it arrives, and until then nothing claims we can call back. The HOST is kept
+        // either way: that address demonstrably carried a connection.
+        val port = when {
+            conn.weDialled -> conn.socket.port
+            else -> peers[key]?.port ?: PORT_UNKNOWN
+        }
         peers[key] = Peer(
             publicKey = key,
             displayName = msg.senderName,
             platform = msg.platform,
             host = conn.socket.inetAddress?.hostAddress ?: "?",
-            port = conn.socket.port,
+            port = port,
         )
         onPeersChanged(peers())
         log("mesh: identity ${msg.senderName} (${msg.platform}) ${key.take(12)}…")
@@ -578,6 +618,14 @@ class MeshNode(
         /** Route staleness cutoff and sweep period — both shipped clients use 5 min / 60 s. */
         const val ROUTE_TTL_MS = 300_000L
         const val ROUTE_CLEANUP_PERIOD_MS = 60_000L
+
+        /**
+         * "this peer reached us; we have never been told a port we can dial back".
+         *
+         * Zero rather than -1 because it is the one value a TCP peer can never be
+         * listening on, so nothing downstream can mistake it for an address.
+         */
+        const val PORT_UNKNOWN = 0
 
         /** `OSHI-` + the first 8 characters of the base64 key — the format both platforms publish. */
         fun instanceLabel(publicKey: String): String =

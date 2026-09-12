@@ -46,10 +46,24 @@ object DesktopPaths {
     /**
      * Create a directory only its owner can read.
      *
-     * On POSIX this is 0700 and it is enforced. On Windows the JDK's `setReadable`
-     * shims do nothing useful for ACLs — the honest position is that the directory is
-     * protected by the user profile, and that the FILES inside are encrypted anyway
-     * (see [KeyVault]). Never rely on directory permissions alone for secrets.
+     * On POSIX this is 0700 and it is enforced. On Windows the JDK's `setReadable` shims
+     * do nothing useful for ACLs, so there the directory is protected by the user profile
+     * and by nothing else this code does.
+     *
+     * **THIS COMMENT USED TO SAY "the FILES inside are encrypted anyway" AND THAT WAS
+     * FALSE.** [KeyVault] encrypts the vault. It does not encrypt what sits beside it:
+     * the message log, the contact store, the group store, scheduled messages, and every
+     * attachment this client decrypts to disk are PLAINTEXT FILES. A reader who trusted
+     * that sentence would have concluded that a copied profile directory gives up
+     * nothing, and it gives up the entire conversation history.
+     *
+     * The real posture, stated so nobody has to infer it: on this client, at rest, the
+     * KEYS are encrypted and the MESSAGES are not. Anyone who can read the user's profile
+     * directory can read their history — which on a single-user desktop means the user
+     * and anyone who has already taken over that account. Full-disk encryption is the
+     * layer that answers this, and it is the operating system's to provide.
+     *
+     * Never rely on directory permissions alone for secrets.
      */
     fun ensurePrivateDir(dir: File) {
         if (!dir.isDirectory && !dir.mkdirs() && !dir.isDirectory) {

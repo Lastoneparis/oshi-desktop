@@ -1,0 +1,118 @@
+{"id":1,"name":"Parking","category":"parking","subcategory":"parking","lat":"33.550676299999999","lon":"-5.1112979000000003","address":"","phone":"","website":"","opening_hours":""}
+{"id":2,"name":"Restaurants","category":"restaurant","subcategory":"restaurant","lat":"33.539309099999997","lon":"-5.1057721000000003","address":"","phone":"","website":"","opening_hours":""}
+{"id":3,"name":"Chez Said","category":"restaurant","subcategory":"fast_food","lat":"33.526135400000001","lon":"-5.1163996999999997","address":"","phone":"","website":"","opening_hours":""}
+{"id":4,"name":"AUI Shop","category":"supermarket","subcategory":"convenience","lat":"33.539123400000001","lon":"-5.1062583000000004","address":"","phone":"","website":"","opening_hours":""}
+{"id":5,"name":"Cafeteria Newrest","category":"cafe","subcategory":"cafe","lat":"33.539274900000002","lon":"-5.1060704000000001","address":"","phone":"","website":"","opening_hours":""}
+{"id":6,"name":"Restaurant Al-Akhawayn","category":"restaurant","subcategory":"restaurant","lat":"33.525664399999997","lon":"-5.1158846000000002","address":"","phone":"","website":"","opening_hours":""}
+{"id":7,"name":"CTM","category":"bus_station","subcategory":"bus_station","lat":"33.526476299999999","lon":"-5.1150567000000002","address":"","phone":"","website":"","opening_hours":""}
+{"id":8,"name":"Restaurant Chez Amal","category":"restaurant","subcategory":"restaurant","lat":"33.525764299999999","lon":"-5.1161257000000004","address":"","phone":"","website":"","opening_hours":""}
+{"id":9,"name":"Chicken Restaurant","category":"restaurant","subcategory":"restaurant","lat":"33.526076500000002","lon":"-5.1156509000000003","address":"","phone":"","website":"","opening_hours":""}
+{"id":10,"name":"La Paix","category":"restaurant","subcategory":"restaurant","lat":"33.528588999999997","lon":"-5.1070631000000004","address":"","phone":"","website":"","opening_hours":""}
+{"id":11,"name":"Main Auditorium","category":"cinema","subcategory":"theatre","lat":"33.537621100000003","lon":"-5.1065937000000003","address":"","phone":"","website":"","opening_hours":""}
+{"id":12,"name":"Grand Hotel","category":"hotel","subcategory":"hotel","lat":"33.5278961","lon":"-5.1087156","address":"","phone":"","website":"","opening_hours":""}
+{"id":13,"name":"Forest","category":"restaurant","subcategory":"restaurant","lat":"33.529044200000001","lon":"-5.1073719000000004","address":"","phone":"","website":"","opening_hours":""}
+{"id":14,"name":"Atm","category":"atm","subcategory":"atm","lat":"33.529129400000002","lon":"-5.1086191999999997","address":"","phone":"","website":"","opening_hours":""}
+{"id":15,"name":"Atm","category":"atm","subcategory":"atm","lat":"33.528903300000003","lon":"-5.1085950999999996","address":"","phone":"","website":"","opening_hours":""}
+{"id":16,"name":"Shell شل","category":"fuel","subcategory":"fuel","lat":"33.515651900000002","lon":"-5.1181254999999997","address":"","phone":"","website":"","opening_hours":""}
+{"id":17,"name":"Platene","category":"restaurant","subcategory":"restaurant","lat":"33.525885299999999","lon":"-5.1161497999999996","address":"IFRANE","phone":"","website":"https://www.facebook.com/RestaurantPlatane","opening_hours":""}
+{"id":18,"name":"Ifrane","category":"post_office","subcategory":"post_office","lat":"33.528692999999997","lon":"-5.1076161999999998","address":"Ifrane ⵉⴼⵔⴰⵏ إفران, 53002","phone":"","website":"","opening_hours":""}
+{"id":19,"name":"Chamonix ⵛⴰⵎⵓⵏⵉ شاموني","category":"hotel","subcategory":"hotel","lat":"33.528529599999999","lon":"-5.1067029000000002","address":"إفران","phone":"","website":"","opening_hours":""}
+{"id":20,"name":"Atm","category":"atm","subcategory":"atm","lat":"33.528544199999999","lon":"-5.1068324","address":"","phone":"","website":"","opening_hours":""}
+{"id":21,"name":"Lycee Militaire Royal","category":"school","subcategory":"school","lat":"33.523628199999997","lon":"-5.1126803000000001","address":"","phone":"","website":"","opening_hours":""}
+{"id":22,"name":"Chamonix شاموني","category":"restaurant","subcategory":"restaurant","lat":"33.5286179","lon":"-5.1063210000000003","address":"إفران","phone":"","website":"","opening_hours":""}
+{"id":23,"name":"Le Master","category":"restaurant","subcategory":"restaurant","lat":"33.5286896","lon":"-5.107342","address":"","phone":"","website":"","opening_hours":""}
+{"id":24,"name":"Atm","category":"atm","subcategory":"atm","lat":"33.528846100000003","lon":"-5.1076772999999998","address":"","phone":"","website":"","opening_hours":""}
+{"id":25,"name":"Akhawain","category":"supermarket","subcategory":"supermarket","lat":"33.528947500000001","lon":"-5.1074460000000004","address":"","phone":"","website":"","opening_hours":""}
+{"id":26,"name":"Farah Inn ifrane فرح ان افران","category":"hotel","subcategory":"hotel","lat":"33.518381900000001","lon":"-5.1330746999999999","address":"nouvelle station touristique biladi, 53000","phone":"+212 5 35 56 71 24","website":"","opening_hours":"24/7"}
+{"id":27,"name":"Gendarmerie Royal","category":"police","subcategory":"police","lat":"33.528638399999998","lon":"-5.1115703999999997","address":"","phone":"","website":"","opening_hours":""}
+{"id":28,"name":"l'église de Notre-Dame-des-Cèdres","category":"place_of_worship","subcategory":"place_of_worship","lat":"33.529632200000002","lon":"-5.1101799999999997","address":"","phone":"","website":"","opening_hours":""}
+{"id":29,"name":"Épicerie Ghazal ⵜⴰⵃⴰⵏⵓⵜ ⵏ ⵖⴰⵣⴰⵍ بقالة غزال","category":"supermarket","subcategory":"convenience","lat":"33.522861800000001","lon":"-5.1213487999999998","address":"","phone":"","website":"","opening_hours":""}
+{"id":30,"name":"Attijariwafa Bank التجاري وفا بنك","category":"bank","subcategory":"bank","lat":"33.528849399999999","lon":"-5.1097387000000003","address":"","phone":"","website":"","opening_hours":""}
+{"id":31,"name":"Banque Populaire البنك الشعبي","category":"bank","subcategory":"bank","lat":"33.528522000000002","lon":"-5.1085918000000001","address":"","phone":"","website":"","opening_hours":""}
+{"id":32,"name":"Bus Station","category":"bus_station","subcategory":"bus_station","lat":"33.523563699999997","lon":"-5.1239194000000001","address":"","phone":"","website":"","opening_hours":""}
+{"id":33,"name":"L'Empreinte d'Ifrane","category":"restaurant","subcategory":"restaurant","lat":"33.529341799999997","lon":"-5.1075016","address":"","phone":"","website":"","opening_hours":""}
+{"id":34,"name":"Bonsai Sushi Bar","category":"restaurant","subcategory":"restaurant","lat":"33.528920999999997","lon":"-5.1098056999999999","address":"","phone":"","website":"","opening_hours":""}
+{"id":35,"name":"Hani Cook","category":"restaurant","subcategory":"restaurant","lat":"33.529134499999998","lon":"-5.1097351","address":"","phone":"","website":"","opening_hours":""}
+{"id":36,"name":"Bus Station","category":"bus_station","subcategory":"bus_station","lat":"33.524196600000003","lon":"-5.1241751999999998","address":"","phone":"","website":"","opening_hours":""}
+{"id":37,"name":"Crédit Agricole","category":"bank","subcategory":"bank","lat":"33.528593299999997","lon":"-5.1085487000000001","address":"","phone":"","website":"","opening_hours":""}
+{"id":38,"name":"AttijariWafa","category":"bank","subcategory":"bank","lat":"33.528477000000002","lon":"-5.1087043000000003","address":"","phone":"","website":"","opening_hours":""}
+{"id":39,"name":"Beethoven","category":"cafe","subcategory":"cafe","lat":"33.5289815","lon":"-5.1098597999999997","address":"","phone":"","website":"","opening_hours":""}
+{"id":40,"name":"Pharmacie Al Fadila صيدلية الفضيلة","category":"pharmacy","subcategory":"pharmacy","lat":"33.5367903","lon":"-5.1174692999999998","address":"Ifrane ⵉⴼⵔⴰⵏ إفران, 53000","phone":"","website":"","opening_hours":""}
+{"id":41,"name":"Parking","category":"parking","subcategory":"parking","lat":"33.540053800000003","lon":"-5.1088377999999999","address":"","phone":"","website":"","opening_hours":""}
+{"id":42,"name":"AUI Post Office","category":"post_office","subcategory":"post_office","lat":"33.539303099999998","lon":"-5.1050516999999997","address":"","phone":"","website":"","opening_hours":""}
+{"id":43,"name":"Bus Shelter","category":"bus_station","subcategory":"bus_stop","lat":"33.5371533","lon":"-5.1041911000000004","address":"","phone":"","website":"","opening_hours":""}
+{"id":44,"name":"Bus Shelter","category":"bus_station","subcategory":"bus_stop","lat":"33.537324699999999","lon":"-5.106179","address":"","phone":"","website":"","opening_hours":""}
+{"id":45,"name":"Pharmacie Dispensaire صيدلية المستوصف","category":"pharmacy","subcategory":"pharmacy","lat":"33.5197176","lon":"-5.1193815999999996","address":"Ifrane, 53000","phone":"","website":"","opening_hours":""}
+{"id":46,"name":"Pharmacie Des Iris صيدلية سوسن","category":"pharmacy","subcategory":"pharmacy","lat":"33.525828400000002","lon":"-5.1164239","address":"IFRANE, 53000","phone":"","website":"","opening_hours":""}
+{"id":47,"name":"Pharmacie Hiba صيدلية هبة","category":"pharmacy","subcategory":"pharmacy","lat":"33.542619199999997","lon":"-5.1192732000000003","address":"Ifrane, 53000","phone":"","website":"","opening_hours":""}
+{"id":48,"name":"Pharmacie Vitelle صيدلية فيتال","category":"pharmacy","subcategory":"pharmacy","lat":"33.5408866","lon":"-5.1188462000000001","address":"Ifrane, 53000","phone":"","website":"","opening_hours":""}
+{"id":49,"name":"Pharmacie Bel Yazid صيدلية بليازيد","category":"pharmacy","subcategory":"pharmacy","lat":"33.521812099999998","lon":"-5.1193055000000003","address":"Ifrane, 53000","phone":"","website":"","opening_hours":""}
+{"id":50,"name":"Pharmacie Michlifen صيدلية ميشليفن","category":"pharmacy","subcategory":"pharmacy","lat":"33.529101300000001","lon":"-5.1069943999999996","address":"Ifrane ⵉⴼⵔⴰⵏ إفران, 53002","phone":"","website":"","opening_hours":""}
+{"id":51,"name":"Pharmacie Assalam صيدلية السلام","category":"pharmacy","subcategory":"pharmacy","lat":"33.520853199999998","lon":"-5.1207289999999999","address":"Ifrane, 53000","phone":"","website":"","opening_hours":""}
+{"id":52,"name":"Pharmacie Bowling صيدلية البولينغ","category":"pharmacy","subcategory":"pharmacy","lat":"33.5290447","lon":"-5.1099344999999996","address":"Avenue Marche Verte, Ifrane إفران, 53000","phone":"","website":"","opening_hours":""}
+{"id":53,"name":"مستشفى بن صميم","category":"hospital","subcategory":"hospital","lat":"33.498027800000003","lon":"-5.1681919000000001","address":"","phone":"","website":"","opening_hours":""}
+{"id":54,"name":"Park Ras Elma","category":"park","subcategory":"park","lat":"33.476900999999998","lon":"-5.1365704000000001","address":"","phone":"","website":"","opening_hours":""}
+{"id":55,"name":"Parking","category":"parking","subcategory":"parking","lat":"33.494609599999997","lon":"-5.1777600000000001","address":"","phone":"","website":"","opening_hours":""}
+{"id":56,"name":"Parking","category":"parking","subcategory":"parking","lat":"33.547753100000001","lon":"-5.0987923999999998","address":"","phone":"","website":"","opening_hours":""}
+{"id":57,"name":"L’Empreinte d’Ifrane","category":"hotel","subcategory":"hotel","lat":"33.529362800000001","lon":"-5.1075531999999999","address":"","phone":"","website":"","opening_hours":""}
+{"id":58,"name":"foodies","category":"restaurant","subcategory":"restaurant","lat":"33.528806699999997","lon":"-5.1090140000000002","address":"","phone":"","website":"","opening_hours":""}
+{"id":59,"name":"Lemsieh Appartements Meublés","category":"hotel","subcategory":"hotel","lat":"33.543593999999999","lon":"-5.1181989999999997","address":"","phone":"","website":"","opening_hours":""}
+{"id":60,"name":"Restaurant les Saveurs des Monts","category":"restaurant","subcategory":"restaurant","lat":"33.517335000000003","lon":"-5.1371919999999998","address":"","phone":"","website":"","opening_hours":""}
+{"id":61,"name":"Houari Grill","category":"restaurant","subcategory":"restaurant","lat":"33.522852999999998","lon":"-5.1196950000000001","address":"","phone":"","website":"","opening_hours":""}
+{"id":62,"name":"Tonton shawarma","category":"restaurant","subcategory":"restaurant","lat":"33.537061000000001","lon":"-5.1197540000000004","address":"","phone":"","website":"","opening_hours":""}
+{"id":63,"name":"Pharmacie LAYLA KAMAL","category":"pharmacy","subcategory":"pharmacy","lat":"33.540304999999996","lon":"-5.1180209999999997","address":"","phone":"","website":"","opening_hours":""}
+{"id":64,"name":"Arz Village Appart Hotel","category":"hotel","subcategory":"hotel","lat":"33.517476000000002","lon":"-5.134125","address":"","phone":"","website":"","opening_hours":""}
+{"id":65,"name":"Perk & Roll","category":"cafe","subcategory":"cafe","lat":"33.517719999999997","lon":"-5.1211570000000002","address":"","phone":"","website":"","opening_hours":""}
+{"id":66,"name":"فندق فرح ان","category":"hotel","subcategory":"hotel","lat":"33.517834999999998","lon":"-5.1359890000000004","address":"","phone":"","website":"","opening_hours":""}
+{"id":67,"name":"مقهى فلورانس","category":"cafe","subcategory":"cafe","lat":"33.539543000000002","lon":"-5.1189369999999998","address":"","phone":"","website":"","opening_hours":""}
+{"id":68,"name":"مقهى يعقوب","category":"cafe","subcategory":"cafe","lat":"33.542876999999997","lon":"-5.1188669999999998","address":"","phone":"","website":"","opening_hours":""}
+{"id":69,"name":"Boulangerie Pâtisserie","category":"restaurant","subcategory":"restaurant","lat":"33.52402","lon":"-5.1196890000000002","address":"","phone":"","website":"","opening_hours":""}
+{"id":70,"name":"Chez mi'ma","category":"restaurant","subcategory":"restaurant","lat":"33.523713999999998","lon":"-5.1211419999999999","address":"","phone":"","website":"","opening_hours":""}
+{"id":71,"name":"La Bella Napoli","category":"restaurant","subcategory":"restaurant","lat":"33.524515999999998","lon":"-5.1208429999999998","address":"","phone":"","website":"","opening_hours":""}
+{"id":72,"name":"Lechalet Coffee shop","category":"cafe","subcategory":"cafe","lat":"33.534846000000002","lon":"-5.1197150000000002","address":"","phone":"","website":"","opening_hours":""}
+{"id":73,"name":"Toilet","category":"toilet","subcategory":"toilet","lat":"33.529457700000002","lon":"-5.1050521","address":"","phone":"","website":"","opening_hours":""}
+{"id":74,"name":"King of Crepes","category":"restaurant","subcategory":"restaurant","lat":"33.528572400000002","lon":"-5.1068898000000003","address":"","phone":"","website":"","opening_hours":""}
+{"id":75,"name":"مقهى مطعم السلام","category":"restaurant","subcategory":"restaurant","lat":"33.528638999999998","lon":"-5.107227","address":"","phone":"","website":"","opening_hours":""}
+{"id":76,"name":"بنك أفريقيا","category":"bank","subcategory":"bank","lat":"33.528576100000002","lon":"-5.1069239","address":"","phone":"","website":"","opening_hours":""}
+{"id":77,"name":"Parc D'Ifrane","category":"park","subcategory":"park","lat":"33.532550000000001","lon":"-5.1065187999999999","address":"","phone":"","website":"","opening_hours":""}
+{"id":78,"name":"grand taxis","category":"bus_station","subcategory":"bus_station","lat":"33.522798600000002","lon":"-5.1186705999999997","address":"","phone":"","website":"","opening_hours":""}
+{"id":79,"name":"Marché","category":"supermarket","subcategory":"marketplace","lat":"33.526033699999999","lon":"-5.1154197000000003","address":"","phone":"","website":"","opening_hours":""}
+{"id":80,"name":"Masjid Al Akhawayn","category":"place_of_worship","subcategory":"place_of_worship","lat":"33.539632599999997","lon":"-5.1070378999999999","address":"","phone":"","website":"","opening_hours":""}
+{"id":81,"name":"Parking","category":"parking","subcategory":"parking","lat":"33.525368700000001","lon":"-5.1115287","address":"","phone":"","website":"","opening_hours":""}
+{"id":82,"name":"Hotel Michliffen","category":"hotel","subcategory":"hotel","lat":"33.534902199999998","lon":"-5.1084468999999997","address":"","phone":"","website":"","opening_hours":""}
+{"id":83,"name":"Centre de Santé Essalam","category":"hospital","subcategory":"hospital","lat":"33.519928299999997","lon":"-5.1196408","address":"","phone":"","website":"","opening_hours":""}
+{"id":84,"name":"Park Essalam","category":"park","subcategory":"park","lat":"33.520724000000001","lon":"-5.1205790999999996","address":"","phone":"","website":"","opening_hours":""}
+{"id":85,"name":"Parking","category":"parking","subcategory":"parking","lat":"33.511136899999997","lon":"-5.1259360000000003","address":"","phone":"","website":"","opening_hours":""}
+{"id":86,"name":"Park Mohammed 5","category":"park","subcategory":"park","lat":"33.526810900000001","lon":"-5.1100846000000004","address":"","phone":"","website":"","opening_hours":""}
+{"id":87,"name":"Masjid Niger","category":"place_of_worship","subcategory":"place_of_worship","lat":"33.523993099999998","lon":"-5.1163147999999996","address":"","phone":"","website":"","opening_hours":""}
+{"id":88,"name":"Parking","category":"parking","subcategory":"parking","lat":"33.5027933","lon":"-5.1615684000000002","address":"إفران","phone":"","website":"","opening_hours":""}
+{"id":89,"name":"Parking","category":"parking","subcategory":"parking","lat":"33.523919200000002","lon":"-5.1247081999999997","address":"","phone":"","website":"","opening_hours":""}
+{"id":90,"name":"Parking","category":"parking","subcategory":"parking","lat":"33.533963200000002","lon":"-5.1069063999999997","address":"","phone":"","website":"","opening_hours":""}
+{"id":91,"name":"Parking","category":"parking","subcategory":"parking","lat":"33.534178300000001","lon":"-5.1065417000000002","address":"","phone":"","website":"","opening_hours":""}
+{"id":92,"name":"Parking","category":"parking","subcategory":"parking","lat":"33.535262500000002","lon":"-5.1076353000000001","address":"","phone":"","website":"","opening_hours":""}
+{"id":93,"name":"Parking","category":"parking","subcategory":"parking","lat":"33.535080999999998","lon":"-5.1084908000000002","address":"","phone":"","website":"","opening_hours":""}
+{"id":94,"name":"Parking","category":"parking","subcategory":"parking","lat":"33.534990200000003","lon":"-5.1086951999999997","address":"","phone":"","website":"","opening_hours":""}
+{"id":95,"name":"Parking","category":"parking","subcategory":"parking","lat":"33.520448000000002","lon":"-5.1219013999999996","address":"","phone":"","website":"","opening_hours":""}
+{"id":96,"name":"Masjid Mohammed VI مسجد محمد السادس","category":"place_of_worship","subcategory":"place_of_worship","lat":"33.521212800000001","lon":"-5.1220033000000003","address":"","phone":"","website":"","opening_hours":""}
+{"id":97,"name":"Grand Hotel","category":"hotel","subcategory":"hotel","lat":"33.528156799999998","lon":"-5.1087607000000004","address":"","phone":"","website":"","opening_hours":""}
+{"id":98,"name":"Masjid Quartier Atlas","category":"place_of_worship","subcategory":"place_of_worship","lat":"33.536449599999997","lon":"-5.1188900999999998","address":"","phone":"","website":"","opening_hours":""}
+{"id":99,"name":"Parking","category":"parking","subcategory":"parking","lat":"33.549978500000002","lon":"-5.1136075999999999","address":"","phone":"","website":"","opening_hours":""}
+{"id":100,"name":"Parkings","category":"parking","subcategory":"parking","lat":"33.530389300000003","lon":"-5.1050716999999999","address":"","phone":"","website":"","opening_hours":""}
+{"id":101,"name":"Atlas house","category":"hotel","subcategory":"guest_house","lat":"33.505916999999997","lon":"-5.1680744000000001","address":"","phone":"","website":"","opening_hours":""}
+{"id":102,"name":"Parking","category":"parking","subcategory":"parking","lat":"33.540453599999999","lon":"-5.1029214999999999","address":"","phone":"","website":"","opening_hours":""}
+{"id":103,"name":"De La Paix Botanical Garden حديقة السلام","category":"park","subcategory":"park","lat":"33.528407100000003","lon":"-5.1066925999999997","address":"","phone":"","website":"","opening_hours":""}
+{"id":104,"name":"Parking","category":"parking","subcategory":"parking","lat":"33.537486299999998","lon":"-5.1057471000000003","address":"","phone":"","website":"","opening_hours":""}
+{"id":105,"name":"Parking","category":"parking","subcategory":"parking","lat":"33.536527200000002","lon":"-5.1045882999999996","address":"","phone":"","website":"","opening_hours":""}
+{"id":106,"name":"Parking","category":"parking","subcategory":"parking","lat":"33.541646999999998","lon":"-5.1046201","address":"","phone":"","website":"","opening_hours":""}
+{"id":107,"name":"Al Akhawayn University ⵜⴰⵙⴷⴰⵡⵉⵜ ⵏⵍ ⴰⵅⴰⵡⴰⵢⵏ جامعة الأخوين","category":"school","subcategory":"university","lat":"33.536332899999998","lon":"-5.1049309000000003","address":"Ifrane ⵉⴼⵔⴰⵏ إفران","phone":"+212 5 35 86 20 00","website":"https://aui.ma/","opening_hours":""}
+{"id":108,"name":"Aéroport d'Ifrane ⴰⵣⴰⴳⵯⵣ ⵏ ⵉⴼⵔⴰⵏ مطار إفران","category":"airport","subcategory":"aerodrome","lat":"33.5003575","lon":"-5.1607056","address":"إفران","phone":"","website":"","opening_hours":""}
+{"id":109,"name":"Parking","category":"parking","subcategory":"parking","lat":"33.520840700000001","lon":"-5.1260703000000003","address":"","phone":"","website":"","opening_hours":""}
+{"id":110,"name":"Parking","category":"parking","subcategory":"parking","lat":"33.521145199999999","lon":"-5.1258224999999999","address":"","phone":"","website":"","opening_hours":""}
+{"id":111,"name":"Parking","category":"parking","subcategory":"parking","lat":"33.521112600000002","lon":"-5.1259006999999999","address":"","phone":"","website":"","opening_hours":""}
+{"id":112,"name":"Parking","category":"parking","subcategory":"parking","lat":"33.521049499999997","lon":"-5.1250868000000001","address":"","phone":"","website":"","opening_hours":""}
+{"id":113,"name":"Parking","category":"parking","subcategory":"parking","lat":"33.521599700000003","lon":"-5.1263572999999996","address":"","phone":"","website":"","opening_hours":""}
+{"id":114,"name":"Parking","category":"parking","subcategory":"parking","lat":"33.520488899999997","lon":"-5.1279878999999999","address":"","phone":"","website":"","opening_hours":""}
+{"id":115,"name":"Parking","category":"parking","subcategory":"parking","lat":"33.520129599999997","lon":"-5.1290727","address":"","phone":"","website":"","opening_hours":""}
+{"id":116,"name":"Parking","category":"parking","subcategory":"parking","lat":"33.521994100000001","lon":"-5.1281996999999997","address":"","phone":"","website":"","opening_hours":""}
+{"id":117,"name":"Parking","category":"parking","subcategory":"parking","lat":"33.5222202","lon":"-5.1265204000000004","address":"","phone":"","website":"","opening_hours":""}
+{"id":118,"name":"Masjid Abou Bakr Seddik","category":"place_of_worship","subcategory":"place_of_worship","lat":"33.540305400000001","lon":"-5.1187547999999996","address":"","phone":"","website":"","opening_hours":""}
