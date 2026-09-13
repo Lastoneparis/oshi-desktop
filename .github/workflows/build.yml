@@ -149,3 +149,21 @@ jobs:
           sudo apt-get remove -y oshi-desktop
           ! dpkg -s oshi-desktop 2>/dev/null | grep -q '^Status: install ok installed'
           echo "built, installed, ran and removed on a host with no desktop environment."
+
+      # Published from HERE rather than from the private pipeline, deliberately: this is
+      # the repository whose source anyone can read, so the package people download should
+      # be the one built from it. The sums are emitted beside it for the download page.
+      - name: Checksum and upload
+        run: |
+          set -euo pipefail
+          cd build/jpackage/out
+          sha256sum *.deb | tee SHA256SUMS-deb.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oshi-desktop-deb
+          path: |
+            build/jpackage/out/*.deb
+            build/jpackage/out/SHA256SUMS-deb.txt
+          if-no-files-found: error
+          retention-days: 5
