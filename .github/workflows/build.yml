@@ -153,11 +153,36 @@ jobs:
       # Published from HERE rather than from the private pipeline, deliberately: this is
       # the repository whose source anyone can read, so the package people download should
       # be the one built from it. The sums are emitted beside it for the download page.
+      # THE FORMAT LINUX WAS MISSING. A .deb needs dpkg and root; an .rpm needs dnf and
+      # root. A Windows user double-clicks an .exe. Anyone on Arch, Alpine, NixOS, or on a
+      # machine where they are not root, had nothing at all — so this builds the portable
+      # tree jpackage already knows how to produce and ships it as a plain tarball that
+      # extracts anywhere and runs from where it lands.
+      - name: Portable tarball, for every distribution the packages do not cover
+        run: |
+          set -euo pipefail
+          ./gradlew packageAppImage -PappVersion=1.0.0 --no-daemon
+          root="$(find build/jpackage -maxdepth 3 -type d -name 'OSHI' | head -1)"
+          [ -n "$root" ] || { echo "::error::packageAppImage produced no app tree"; exit 1; }
+          [ -x "$root/bin/OSHI" ] || { echo "::error::no runnable launcher in $root"; exit 1; }
+
+          # Run it from the tree BEFORE packing: a tarball whose contents do not start is
+          # worse than no tarball, and this is the only place that is cheap to check.
+          out="$("$root/bin/OSHI" --probe 2>&1 || true)"
+          echo "$out" | grep -q 'known-answer vectors' || {
+            echo "::error::the portable tree did not reproduce iOS's crypto vectors"; exit 1; }
+
+          mkdir -p build/portable
+          tar -C "$(dirname "$root")" -czf build/portable/oshi-desktop-linux-x86_64.tar.gz "$(basename "$root")"
+          ls -l build/portable/
+
       - name: Checksum and upload
         run: |
           set -euo pipefail
           cd build/jpackage/out
           sha256sum *.deb | tee SHA256SUMS-deb.txt
+          cd "$GITHUB_WORKSPACE"
+          ( cd build/portable && sha256sum *.tar.gz | tee SHA256SUMS-portable.txt )
 
       - uses: actions/upload-artifact@v4
         with:
@@ -165,5 +190,7 @@ jobs:
           path: |
             build/jpackage/out/*.deb
             build/jpackage/out/SHA256SUMS-deb.txt
+            build/portable/*.tar.gz
+            build/portable/SHA256SUMS-portable.txt
           if-no-files-found: error
           retention-days: 5
