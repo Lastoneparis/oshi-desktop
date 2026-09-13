@@ -1,0 +1,72 @@
+#!/bin/sh
+# Debian postinst — overrides jpackage's default (see README.md in this directory).
+#
+# ============================================================ WHY THIS FILE EXISTS
+#
+# jpackage's default postinst is:
+#
+#     set -e
+#     case "$1" in
+#         configure)
+#     xdg-desktop-menu install /opt/oshi-desktop/lib/oshi-desktop-OSHI.desktop
+#         ;;
+#
+# `set -e` plus an `xdg-desktop-menu` that can fail means MENU REGISTRATION CAN FAIL THE
+# WHOLE INSTALL. Measured on 2026-09-13 against the published package, on a clean
+# ubuntu-24.04 runner:
+#
+#     Setting up oshi-desktop (1.0.0-1) ...
+#     xdg-desktop-menu: No writable system menu directory found.
+#     -> dpkg leaves the package half-configured, apt-get exits non-zero
+#
+# And jpackage's default `prerm` has the same shape, so the package could then neither be
+# configured NOR removed. That is the worst state a package can be left in, and it lands on
+# exactly the machines a privacy-minded user is likely to have: a headless server, a
+# container, WSL without a desktop environment — anywhere `xdg-desktop-menu` has no menu
+# directory to write to.
+#
+# A menu shortcut is a convenience. An installable messenger is the product. The shortcut
+# must never be able to take the product down with it.
+#
+# ============================================================ WHY IT DOES NOT USE
+# JPACKAGE'S TOKENS
+#
+# jpackage substitutes placeholders into its own templates. Guessing those names would give
+# a file that either silently registers nothing or ships a literal placeholder — both of
+# which LOOK like a working install. This script finds the .desktop file on disk instead,
+# so it is correct by inspection and cannot desynchronise from a renamed token.
+#
+# `/opt/oshi-desktop` is jpackage's default install root for this package: `/opt/<package>`
+# where `<package>` is `linuxPackageName` in build.gradle.kts. Change that and change this.
+
+set -e
+
+APPDIR=/opt/oshi-desktop
+
+register_menu() {
+    # Every failure here is non-fatal, deliberately: no menu directory, no xdg-utils
+    # installed, a read-only /usr — none of them mean the application is unusable.
+    command -v xdg-desktop-menu >/dev/null 2>&1 || return 0
+    for d in "$APPDIR"/lib/*.desktop; do
+        [ -e "$d" ] || continue
+        xdg-desktop-menu install --novendor "$d" >/dev/null 2>&1 || return 0
+    done
+    xdg-desktop-menu forceupdate >/dev/null 2>&1 || true
+    return 0
+}
+
+case "$1" in
+    configure)
+        register_menu || true
+        ;;
+
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+
+    *)
+        echo "postinst called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+exit 0

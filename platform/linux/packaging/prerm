@@ -1,0 +1,36 @@
+#!/bin/sh
+# Debian prerm — overrides jpackage's default (see README.md, and postinst's note).
+#
+# jpackage's default calls `xdg-desktop-menu uninstall` under `set -e`, so on any machine
+# where registration failed at install time, REMOVAL FAILS TOO. A package that can be
+# neither configured nor removed has to be dug out by hand with `dpkg --remove --force-*`,
+# which is not something a user should ever be asked to do to get rid of a messenger.
+
+set -e
+
+APPDIR=/opt/oshi-desktop
+
+unregister_menu() {
+    command -v xdg-desktop-menu >/dev/null 2>&1 || return 0
+    for d in "$APPDIR"/lib/*.desktop; do
+        [ -e "$d" ] || continue
+        xdg-desktop-menu uninstall --novendor "$d" >/dev/null 2>&1 || return 0
+    done
+    return 0
+}
+
+case "$1" in
+    remove|upgrade|deconfigure)
+        unregister_menu || true
+        ;;
+
+    failed-upgrade)
+        ;;
+
+    *)
+        echo "prerm called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+exit 0
