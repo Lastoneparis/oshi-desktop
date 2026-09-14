@@ -36,7 +36,7 @@ jobs:
       # Windows .msi needs WiX Toolset v3 on PATH (jpackage 17 does not understand WiX v4+).
       - name: Install WiX Toolset v3 (Windows)
         if: matrix.name == 'windows'
-        run: choco install wixtoolset --version=3.11.2 -y --no-progress
+        run: choco install wixtoolset -y --no-progress
         shell: pwsh
 
       - name: Make gradlew executable (Unix)
