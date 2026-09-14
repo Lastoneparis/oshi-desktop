@@ -43,8 +43,17 @@ jobs:
         if: matrix.name != 'windows'
         run: chmod +x ./gradlew
 
+      - name: Derive app version from the tag (v1.2.3 -> 1.2.3)
+        id: ver
+        run: |
+          REF="${GITHUB_REF_NAME:-v1.0.0}"
+          echo "appVersion=${REF#v}" >> "$GITHUB_OUTPUT"
+        shell: bash
+
       - name: Build native installer(s)
-        run: ./gradlew packageNative --no-daemon --stacktrace
+        # macOS jpackage requires the app-version's first number >= 1, and the build refuses
+        # to relabel silently, so pass the tag version explicitly.
+        run: ./gradlew packageNative -PappVersion=${{ steps.ver.outputs.appVersion }} --no-daemon --stacktrace
         shell: bash
 
       - name: Collect installers
