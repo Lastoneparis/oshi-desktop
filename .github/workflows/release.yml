@@ -1,0 +1,70 @@
+name: Release installers
+
+# Tag-triggered: builds the native installer on each OS (jpackage does NOT cross-build) and
+# attaches them to the GitHub Release for that tag. Push a tag like `v1.0.0` to trigger.
+# The existing build.yml keeps handling push/PR build+test.
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # create/update the Release and upload assets
+
+jobs:
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux
+          - os: windows-latest
+            name: windows
+          - os: macos-latest
+            name: macos
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17 (Temurin — includes jpackage)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Windows .msi needs WiX Toolset v3 on PATH (jpackage 17 does not understand WiX v4+).
+      - name: Install WiX Toolset v3 (Windows)
+        if: matrix.name == 'windows'
+        run: choco install wixtoolset --version=3.11.2 -y --no-progress
+        shell: pwsh
+
+      - name: Make gradlew executable (Unix)
+        if: matrix.name != 'windows'
+        run: chmod +x ./gradlew
+
+      - name: Build native installer(s)
+        run: ./gradlew packageNative --no-daemon --stacktrace
+        shell: bash
+
+      - name: Collect installers
+        run: |
+          mkdir -p dist
+          find build/jpackage/out -maxdepth 1 -type f \
+            \( -name '*.msi' -o -name '*.exe' -o -name '*.deb' -o -name '*.rpm' -o -name '*.dmg' -o -name '*.AppImage' -o -name '*.tar.gz' \) \
+            -exec cp {} dist/ \; || true
+          ls -la dist
+        shell: bash
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: oshi-desktop-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: warn
+
+      - name: Attach installers to the Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: false
