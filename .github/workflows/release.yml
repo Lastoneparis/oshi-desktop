@@ -56,12 +56,23 @@ jobs:
         run: ./gradlew packageNative -PappVersion=${{ steps.ver.outputs.appVersion }} --no-daemon --stacktrace
         shell: bash
 
-      - name: Collect installers
+      - name: Collect installers (versioned + stable-named)
+        # Upload BOTH the versioned file (OSHI-1.2.3.msi) AND a stable-named copy
+        # (OSHI-Desktop.msi) so the site can link releases/latest/download/OSHI-Desktop.msi
+        # and never need editing when the version bumps.
         run: |
           mkdir -p dist
-          find build/jpackage/out -maxdepth 1 -type f \
-            \( -name '*.msi' -o -name '*.exe' -o -name '*.deb' -o -name '*.rpm' -o -name '*.dmg' -o -name '*.AppImage' -o -name '*.tar.gz' \) \
-            -exec cp {} dist/ \; || true
+          copy_stable() { # <glob> <stable-name>
+            f=$(find build/jpackage/out -maxdepth 1 -type f -name "$1" | head -1)
+            if [ -n "$f" ]; then cp "$f" "dist/$(basename "$f")"; cp "$f" "dist/$2"; fi
+          }
+          copy_stable '*.msi'     OSHI-Desktop.msi
+          copy_stable '*.exe'     OSHI-Desktop-Setup.exe
+          copy_stable '*.deb'     oshi-desktop-amd64.deb
+          copy_stable '*.rpm'     oshi-desktop.x86_64.rpm
+          copy_stable '*.dmg'     OSHI-Desktop.dmg
+          copy_stable '*.AppImage' OSHI-Desktop.AppImage
+          copy_stable '*.tar.gz'  oshi-desktop-linux-x86_64.tar.gz
           ls -la dist
         shell: bash
 
