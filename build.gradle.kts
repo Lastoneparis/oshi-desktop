@@ -709,8 +709,8 @@ fun requireLegalAppVersion(taskName: String, type: String) {
  */
 val windowsUpgradeUuid = "2BE511C0-BF76-4A32-A057-BF20B2FF7496"
 
-/** Placeholder — a real .deb release MUST override this with a monitored address. */
-val debMaintainer: String = providers.gradleProperty("debMaintainer").orNull ?: "desktop@oshi.invalid"
+/** Public, monitored contact included in the Debian control metadata. */
+val debMaintainer: String = providers.gradleProperty("debMaintainer").orNull ?: "contact@oshi-messenger.com"
 
 val jpackageInputDir = layout.buildDirectory.dir("jpackage/input")
 val jpackageOutputDir = layout.buildDirectory.dir("jpackage/out")
@@ -1118,7 +1118,8 @@ val packageRpm = registerJpackage(
         "--linux-app-category", "Applications/Internet",
         "--linux-menu-group", "Network",
         "--linux-shortcut",
-        "--linux-rpm-license-type", "Proprietary",
+        // Keep package metadata truthful: the shipped repository is MIT licensed.
+        "--linux-rpm-license-type", "MIT",
     ) + resourceDirArgs("linux"),
 )
 
