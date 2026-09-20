@@ -7,6 +7,11 @@ on:
   push:
     tags: [ 'v*' ]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to rebuild (for example v1.2.3)
+        required: true
+        type: string
 
 permissions:
   contents: write      # create/update the Release and upload assets
@@ -28,6 +33,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Set up JDK 17 (Temurin — includes jpackage)
         uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
@@ -48,7 +55,11 @@ jobs:
       - name: Derive app version from the tag (v1.2.3 -> 1.2.3)
         id: ver
         run: |
-          REF="${GITHUB_REF_NAME:-v1.0.0}"
+          REF="${{ inputs.tag || github.ref_name }}"
+          case "$REF" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "Release tag must be vMAJOR.MINOR.PATCH, got: $REF" >&2; exit 1 ;;
+          esac
           echo "appVersion=${REF#v}" >> "$GITHUB_OUTPUT"
         shell: bash
 
@@ -100,5 +111,6 @@ jobs:
       - name: Attach installers to the Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.2.1
         with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
           files: dist/*
           fail_on_unmatched_files: false
