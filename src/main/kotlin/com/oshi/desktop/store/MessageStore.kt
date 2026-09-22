@@ -5,6 +5,11 @@ import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.security.MessageDigest
+import java.security.SecureRandom
+import java.util.Base64
+import javax.crypto.Cipher
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.SecretKeySpec
 
 /**
  * Conversations and messages, durable across a restart — PARITY.md row 0.13.
@@ -103,33 +108,26 @@ import java.security.MessageDigest
  *
  * ============================================================ THREAT MODEL
  *
- * Message content is stored IN PLAINTEXT. This is a deliberate decision, not an
- * oversight, and it is a real regression from iOS (Keychain-adjacent CoreData
- * protection) and Android (Keystore-backed SQLCipher-class protection): a stolen or
- * imaged disk on this machine exposes full conversation history in the clear, with no
- * passphrase to defeat. The only protection is the OS-level file permissions
- * [DesktopPaths] already applies (0700 directory, 0600 files) — real, but it only holds
- * off another account on the SAME machine, exactly the tier [SecretStore]'s own doc
- * comment describes, not a lost laptop.
+ * Production records are AES-256-GCM encrypted individually. The history key is a distinct
+ * 32-byte random value in [KeyVault], whose master key stays in the OS key store (or the
+ * explicit passphrase fallback). A fresh random 96-bit nonce is generated for every record;
+ * the filename is authenticated as additional data so an encrypted line cannot be copied to
+ * another conversation file and still open.
  *
- * What encrypting it would cost: the key material is free — [KeyVault] already holds a
- * master key this store could wrap records with — but [KeyVault]'s own design is "one
- * JSON blob, decrypted whole into memory," which is right for kilobytes of keys and
- * wrong for what could be gigabytes of history. Doing this properly wants per-line
- * AEAD with a nonce that can never repeat across appends — the same discipline
- * `SessionStore`'s doc comment calls "the failures that are permanent," because AES-GCM
- * nonce reuse leaks the XOR of two plaintexts and forges the tag. A nonce derived from
- * `(conversation, localSeq)` is repeat-free ONLY as long as `localSeq` is never reused,
- * which in turn means a deleted-and-recreated conversation must never reuse the same key,
- * or must restart `localSeq` from a persisted high-water mark rather than zero. That is a
- * real design task with its own tests, not a few extra lines bolted onto this one — so it
- * is left undone here deliberately, and PARITY.md row 0.13 should not be read as claiming
- * encrypted-at-rest parity with the phones until it is.
+ * Older plaintext journals are accepted only long enough to migrate them. Once all parseable
+ * rows have been loaded, the migration rewrites that one journal atomically as encrypted
+ * records. An encrypted row with a bad tag is never treated as plaintext or empty.
  */
-class MessageStore(private val baseDir: File = DesktopPaths.file("messages")) {
+class MessageStore(
+    private val baseDir: File = DesktopPaths.file("messages"),
+    private val atRestKey: ByteArray? = null,
+) {
 
     init {
         DesktopPaths.ensurePrivateDir(baseDir)
+        require(atRestKey == null || atRestKey.size == MessageLogCipher.KEY_BYTES) {
+            "message history key must be ${MessageLogCipher.KEY_BYTES} bytes"
+        }
     }
 
     enum class AppendOutcome { INSERTED, UPDATED, DUPLICATE }
@@ -258,7 +256,9 @@ class MessageStore(private val baseDir: File = DesktopPaths.file("messages")) {
             var line = r.readLine()
             while (line != null) {
                 if (line.isNotBlank()) {
-                    runCatching { JSONObject(line).getString(MessageStoreConst.F_CONVERSATION) }.getOrNull()?.let {
+                    decodeLine(file, line)?.let { decoded ->
+                        runCatching { JSONObject(decoded.plaintext).getString(MessageStoreConst.F_CONVERSATION) }.getOrNull()
+                    }?.let {
                         idByPath[file.absolutePath] = it
                         return it
                     }
@@ -278,7 +278,20 @@ class MessageStore(private val baseDir: File = DesktopPaths.file("messages")) {
 
     companion object {
         private const val SUFFIX = ".jsonl"
+        const val HISTORY_KEY_ACCOUNT = "message-history-key-v1"
     }
+
+    private data class DecodedLine(val plaintext: String, val wasEncrypted: Boolean)
+
+    /** `null` means corrupt/tampered, never "no history". */
+    private fun decodeLine(file: File, line: String): DecodedLine? {
+        if (!MessageLogCipher.isEnvelope(line)) return DecodedLine(line, wasEncrypted = false)
+        val key = atRestKey ?: return null
+        return MessageLogCipher.open(key, file.name, line)?.let { DecodedLine(it, wasEncrypted = true) }
+    }
+
+    private fun encodeLine(file: File, plaintext: String): String =
+        atRestKey?.let { MessageLogCipher.seal(it, file.name, plaintext) } ?: plaintext
 
     // -------------------------------------------------------------------- per-conversation log
 
@@ -291,6 +304,7 @@ class MessageStore(private val baseDir: File = DesktopPaths.file("messages")) {
         fun loadFromDisk() {
             byId.clear(); nextSeq = 0L
             if (!file.isFile) return
+            var legacyRowsSeen = false
             file.bufferedReader(Charsets.UTF_8).useLines { lines ->
                 for (line in lines) {
                     if (line.isBlank()) continue
@@ -299,10 +313,13 @@ class MessageStore(private val baseDir: File = DesktopPaths.file("messages")) {
                     // genuine corruption of one record. Either way: drop that one record,
                     // keep everything else. See the class doc for why this differs from
                     // KeyVault's "throw, never silently read as empty."
-                    val record = runCatching { Message.fromJson(JSONObject(line)) }.getOrNull() ?: continue
+                    val decoded = decodeLine(file, line) ?: continue
+                    if (!decoded.wasEncrypted) legacyRowsSeen = true
+                    val record = runCatching { Message.fromJson(JSONObject(decoded.plaintext)) }.getOrNull() ?: continue
                     apply(record)
                 }
             }
+            if (legacyRowsSeen && atRestKey != null) rewriteEncrypted()
         }
 
         private fun apply(m: Message) {
@@ -320,7 +337,7 @@ class MessageStore(private val baseDir: File = DesktopPaths.file("messages")) {
 
             val stamped = message.copy(localSeq = nextSeq)
             val line = stamped.toJson().toString()
-            appendLineDurable(file, line)
+            appendLineDurable(file, encodeLine(file, line))
             apply(stamped)
             return if (existing == null) AppendOutcome.INSERTED else AppendOutcome.UPDATED
         }
@@ -338,7 +355,55 @@ class MessageStore(private val baseDir: File = DesktopPaths.file("messages")) {
                 lastActivityMs = ordered.lastOrNull()?.sentAtMs ?: 0L,
             )
         }
+
+        /** One-time plaintext upgrade. Atomic replacement is appropriate for migration only. */
+        private fun rewriteEncrypted() {
+            val encrypted = buildString {
+                for (record in byId.values) {
+                    append(encodeLine(file, record.toJson().toString())).append('\n')
+                }
+            }.toByteArray(Charsets.UTF_8)
+            AtomicFile.write(file, encrypted)
+        }
     }
+}
+
+/** Small, line-oriented AEAD envelope for [MessageStore]; not a wire protocol. */
+private object MessageLogCipher {
+    const val KEY_BYTES = 32
+    private const val VERSION = 1
+    private const val NONCE_BYTES = 12
+
+    fun isEnvelope(line: String): Boolean = runCatching {
+        val o = JSONObject(line)
+        o.optInt("v", -1) == VERSION && o.has("nonce") && o.has("ct")
+    }.getOrDefault(false)
+
+    fun seal(key: ByteArray, fileName: String, plaintext: String): String {
+        val nonce = ByteArray(NONCE_BYTES).also(SecureRandom()::nextBytes)
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, nonce))
+        cipher.updateAAD(aad(fileName))
+        val ct = cipher.doFinal(plaintext.toByteArray(Charsets.UTF_8))
+        return JSONObject().put("v", VERSION)
+            .put("nonce", Base64.getEncoder().encodeToString(nonce))
+            .put("ct", Base64.getEncoder().encodeToString(ct)).toString()
+    }
+
+    fun open(key: ByteArray, fileName: String, envelope: String): String? = runCatching {
+        val o = JSONObject(envelope)
+        if (o.optInt("v", -1) != VERSION) return null
+        val nonce = Base64.getDecoder().decode(o.getString("nonce"))
+        require(nonce.size == NONCE_BYTES) { "invalid message-history nonce" }
+        val ct = Base64.getDecoder().decode(o.getString("ct"))
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, nonce))
+        cipher.updateAAD(aad(fileName))
+        String(cipher.doFinal(ct), Charsets.UTF_8)
+    }.getOrNull()
+
+    private fun aad(fileName: String): ByteArray =
+        "oshi-message-history-v1:$fileName".toByteArray(Charsets.UTF_8)
 }
 
 /**

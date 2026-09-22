@@ -65,6 +65,7 @@ import com.oshi.desktop.sync.V2SyncClient
 import com.oshi.messenger.network.v2.OSHICryptoV2
 import com.oshi.messenger.network.v2.V2FileKeyMessage
 import java.io.File
+import java.security.SecureRandom
 import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
@@ -144,7 +145,10 @@ class OshiClient(
     val address: String get() = identity.userKey
 
     val contacts = ContactStore(File(home, "contacts.json"))
-    val messages = MessageStore(File(home, "messages"))
+    private val messageHistoryKey: ByteArray = vault.getOrCreate(MessageStore.HISTORY_KEY_ACCOUNT) {
+        ByteArray(32).also(SecureRandom()::nextBytes)
+    }
+    val messages = MessageStore(File(home, "messages"), messageHistoryKey)
 
     private val prekeys = PrekeyStore(vault)
     private val sessions = SessionStore(vault)
