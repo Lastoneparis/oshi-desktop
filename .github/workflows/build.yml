@@ -20,8 +20,8 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
         with: { distribution: temurin, java-version: '17' }
 
       # THE SEVEN COMPILED FILES AND THE TWO REFERENCES ARE DIFFERENT THINGS, and this
@@ -103,8 +103,8 @@ jobs:
     name: build the .deb and install it
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
         with: { distribution: temurin, java-version: '17' }
       - name: Tools jpackage drives
         run: sudo apt-get update -qq && sudo apt-get install -y fakeroot binutils
