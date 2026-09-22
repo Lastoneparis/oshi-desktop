@@ -184,7 +184,7 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           ( cd build/portable && sha256sum *.tar.gz | tee SHA256SUMS-portable.txt )
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         with:
           name: oshi-desktop-deb
           path: |
