@@ -119,6 +119,11 @@ class CallVideoSession(
      * Offer one media datagram. Returns true when it was video or video control (consumed),
      * false for everything else (audio, in-band hang-up) so the caller routes it on.
      */
+    /** One line of receive-side counters, for logs and benches. */
+    fun rxStats(): String =
+        "vIn=$videoPacketsIn delivered=${receiver.delivered} rejected=${receiver.rejected} " +
+            "replayed=${receiver.replayed} preIdr=${receiver.droppedBeforeIdr} decoded=$remoteFrameCount"
+
     fun onMedia(bytes: ByteArray): Boolean {
         if (bytes.isEmpty() || closed.get()) return false
         val type = bytes[0].toInt() and 0xFF

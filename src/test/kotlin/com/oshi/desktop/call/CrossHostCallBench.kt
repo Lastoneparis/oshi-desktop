@@ -169,7 +169,7 @@ class CrossHostCallBench {
                         "sock rx=${s.packetsReceived.get()} rxErr=${s.receiveErrors.get()} pingsAns=${s.pingsAnswered.get()} " +
                         "pongs=${s.pongsCorrelated.get()} dropped=${s.packetsDropped.get()} | accepted=${m.framesAccepted.get()} " +
                         "refused=${m.framesRefused.get()} | 8089 rx=${m.relayReceived.get()} tx=${m.relaySent.get()} ws tx=${m.wsSent.get()} " +
-                        "| audio sent=${m.audio?.framesSent?.get()} video sent=${m.video?.sender?.framesSent} pics=${m.video?.remoteFrameCount}")
+                        "| audio sent=${m.audio?.framesSent?.get()} video sent=${m.video?.sender?.framesSent} | video rx ${m.video?.rxStats()}")
                 }
             }, 0, CallLane.POLL_INTERVAL_MS, TimeUnit.MILLISECONDS)
         }

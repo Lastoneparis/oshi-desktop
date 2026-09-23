@@ -23,9 +23,15 @@ concurrency:
 
 jobs:
   windows:
-    name: windows / build, call suite, codec, same-host live call, MSI
-    runs-on: windows-latest
+    # Windows AND Linux: the same call suite, phone-oracle wire tests and same-host live
+    # call on both desktop platforms we ship an installer for; the MSI only on Windows.
+    name: ${{ matrix.os }} / build, call suite, phone oracles, same-host live call${{ matrix.os == 'windows-latest' && ', MSI' || '' }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -43,15 +49,30 @@ jobs:
             --tests 'com.oshi.desktop.ui.BackgroundPresenceTest' \
             --tests 'com.oshi.desktop.ui.state.CallScreenModelTest'
 
+      - name: Phone-compatibility evidence (oracle tests that ran here, encoder vs iOS/Android)
+        if: always()
+        shell: bash
+        run: |
+          echo "Tests that re-implement the iOS / Android receive steps, as run on ${{ runner.os }}:"
+          for f in build/test-results/test/TEST-*.xml; do
+            c=$(basename "$f" .xml | sed 's/^TEST-//')
+            case "$c" in
+              *VideoSendSessionTest|*VideoWireTest|*VideoReceiveTest|*VideoControlTest|*CallWireFormatTest|*InBandCallEndTest|*SiblingDevicesStopRingingTest|*CallMediaTest|*PhoneCompatCodecTest|*VideoCodecTest|*IceCandidate*|*Turn*|*UdpRelay*|*CallMediaRelayAuthContractTest)
+                head -c 400 "$f" | grep -o 'tests="[0-9]*" skipped="[0-9]*" failures="[0-9]*" errors="[0-9]*"' | sed "s|^|  $c: |" ;;
+            esac
+          done
+          grep -h -o '\[phone-compat\][^<]*' build/test-results/test/TEST-*PhoneCompatCodecTest.xml || { echo "::error::PhoneCompatCodecTest did not run"; exit 1; }
+
       - name: Live call through the production server (two lanes on this runner)
         shell: bash
         env:
           OSHI_CROSS_ROLE: both
-          OSHI_CROSS_SEED: ${{ github.run_id }}-${{ github.run_attempt }}-same
+          OSHI_CROSS_SEED: ${{ github.run_id }}-${{ github.run_attempt }}-same-${{ matrix.os }}
           OSHI_CROSS_HOLD_S: '15'
         run: ./gradlew test --no-daemon --console=plain --rerun --tests 'com.oshi.desktop.call.CrossHostCallBench' -i | grep -E '\[cross|\[windows|\[audio|FAILED|PASSED|Exception' || true; test -f build/test-results/test/TEST-com.oshi.desktop.call.CrossHostCallBench.xml && ! grep -q '<failure' build/test-results/test/TEST-com.oshi.desktop.call.CrossHostCallBench.xml && grep -q 'tests="1" skipped="0"' build/test-results/test/TEST-com.oshi.desktop.call.CrossHostCallBench.xml
 
       - name: WiX v3 for jpackage
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $candle = Get-ChildItem -Path 'C:\Program Files (x86)','C:\Program Files' -Filter candle.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -63,6 +84,7 @@ jobs:
           echo $candle.DirectoryName >> $env:GITHUB_PATH
 
       - name: Build the MSI and check the video natives are inside it
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           ./gradlew packageMsi "-PappVersion=1.0.0" --no-daemon --console=plain  # quoted: PowerShell splits -Pa=1.0.0 at the first dot
@@ -80,7 +102,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: windows-calls-msi-and-reports
+          name: calls-${{ matrix.os }}-msi-and-reports
           path: |
             build/jpackage/out/*.msi
             build/reports/tests/test/

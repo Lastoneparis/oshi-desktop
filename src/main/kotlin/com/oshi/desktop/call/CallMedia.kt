@@ -1,5 +1,6 @@
 package com.oshi.desktop.call
 
+import com.oshi.desktop.call.media.VideoMediaFrame
 import com.oshi.desktop.call.media.CallAudio
 import com.oshi.desktop.call.media.CallAudioSession
 import com.oshi.desktop.call.media.CallMediaFrame
@@ -186,7 +187,7 @@ class CallMediaLeg internal constructor(
 
             override fun onSealedMedia(sealed: ByteArray, from: InetSocketAddress): Boolean {
                 lastP2pRxMs = System.currentTimeMillis()
-                return deliver(sealed)
+                return deliver(sealed, viaP2p = true)
             }
 
             override fun onReflexiveAddress(mapped: StunBinding.Mapped) {
@@ -224,6 +225,15 @@ class CallMediaLeg internal constructor(
 
     /** When P2P (direct or TURN) last delivered media, and when a pair was first selected. */
     @Volatile private var lastP2pRxMs = 0L
+
+    /**
+     * When P2P last delivered an AUDIO frame that authenticated. Measured on CI between two
+     * cloud hosts: 1 957-byte PCM datagrams are IP-fragmented and the path dropped every
+     * fragmented datagram while 1 100-byte video fragments crossed fine — so "P2P delivers
+     * media" was true and both people heard nothing for the whole call, with the relay
+     * registered and idle. Audio's carrier ladder is judged on audio arriving.
+     */
+    @Volatile private var lastP2pAudioRxMs = 0L
     @Volatile private var selectedSinceMs = 0L
 
     /** Media handed to the :8089 relay / received from it. */
@@ -257,7 +267,7 @@ class CallMediaLeg internal constructor(
      * Hand one authenticated-or-not sealed packet to the video or audio half, whichever
      * transport carried it. See the listener's comment for the order.
      */
-    private fun deliver(sealed: ByteArray): Boolean {
+    private fun deliver(sealed: ByteArray, viaP2p: Boolean = false): Boolean {
         tap?.invoke(sealed)
         // The phones' in-band hang-up (sealed `0x0D`) before anything else: it is neither
         // video control (whose `0x0D` is the nine-byte cleartext toggle, never this size)
@@ -271,8 +281,10 @@ class CallMediaLeg internal constructor(
         // audio session would burn its sequence number in the audio replay window.
         if (videoSession?.onMedia(sealed) == true) return true
         val audio = audioSession ?: return false
-        if (audio.onFrame(sealed)) framesAccepted.incrementAndGet()
-        else framesRefused.incrementAndGet()
+        if (audio.onFrame(sealed)) {
+            framesAccepted.incrementAndGet()
+            if (viaP2p) lastP2pAudioRxMs = System.currentTimeMillis()
+        } else framesRefused.incrementAndGet()
         return true
     }
 
@@ -344,7 +356,8 @@ class CallMediaLeg internal constructor(
         val sel = selected
         var sent = false
         if (sel != null) sent = socket.sendSealed(sealed)
-        if (p2pHealthy(now)) return sent
+        val isVideo = sealed.isNotEmpty() && (sealed[0].toInt() and 0xFF) == VideoMediaFrame.TYPE_VIDEO
+        if (if (isVideo || audioSession == null) p2pHealthy(now) else p2pAudioHealthy(now)) return sent
         val relay = udpRelay
         if (relay != null && relay.usable(now)) {
             if (relay.send(sealed)) { relaySent.incrementAndGet(); sent = true }
@@ -355,6 +368,13 @@ class CallMediaLeg internal constructor(
             if (ws.send(sealed)) { wsSent.incrementAndGet(); sent = true }
         }
         return sent
+    }
+
+    /** [p2pHealthy] for audio: the pair must be carrying AUDIO, not just any media. */
+    private fun p2pAudioHealthy(now: Long): Boolean {
+        if (selected == null) return false
+        if (now - selectedSinceMs < P2P_GRACE_MS) return true
+        return lastP2pAudioRxMs > 0 && now - lastP2pAudioRxMs < P2P_STALE_MS
     }
 
     private fun p2pHealthy(now: Long): Boolean {
