@@ -115,6 +115,11 @@ class CrossHostCallBench {
                     Thread.sleep(500)
                 }
                 val verdict = runCatching { me.measureAndAssert() }
+                // The callee's window opens a little after ours (it waits for its own first
+                // picture/path), so hanging up the moment ours closes cut the END of its window:
+                // CI 35899430240 read a stopped camera and negative counters on the callee side.
+                // Keep the call up long enough for it to finish measuring.
+                Thread.sleep((System.getenv("OSHI_CROSS_CALLER_GRACE_MS") ?: "25000").toLong())
                 me.model.hangUp()
                 verdict.getOrThrow()
             }
@@ -228,7 +233,8 @@ class CrossHostCallBench {
                     "${v.sender.framesSent} video frames | refused ${d.framesRefused - r0} frames, " +
                     "via :8089 ${lane.media?.relayReceived?.get()} rx / ${lane.media?.relaySent?.get()} tx, ws tx ${lane.media?.wsSent?.get()}",
             )
-            check(v.cameraRunning) { "$name: our synthetic camera/encoder did not run: ${v.cameraProblem}" }
+            // Frames actually encoded, not the live flag: the peer may already be hanging up.
+            check(v.cameraRunning || v.sender.framesSent > 0) { "$name: our synthetic camera/encoder did not run: ${v.cameraProblem}" }
             check(pics >= secs * 10) { "$name: fewer than 10 fps of the peer's video decoded ($pics in ${secs}s)" }
             check(audio >= secs * 25) { "$name: fewer than half the peer's audio frames arrived ($audio in ${secs}s)" }
             check(tone >= audio / 2) { "$name: audio arrived but decoded to silence ($tone of $audio)" }
