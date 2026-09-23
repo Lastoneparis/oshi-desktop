@@ -65,7 +65,7 @@ jobs:
       - name: Build the MSI and check the video natives are inside it
         shell: pwsh
         run: |
-          ./gradlew packageMsi -PappVersion=1.0.0 --no-daemon --console=plain
+          ./gradlew packageMsi "-PappVersion=1.0.0" --no-daemon --console=plain  # quoted: PowerShell splits -Pa=1.0.0 at the first dot
           $msi = Get-ChildItem build/jpackage/out/*.msi | Select-Object -First 1
           if (-not $msi) { Write-Error "no .msi produced"; exit 1 }
           $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @('/i', "`"$($msi.FullName)`"", '/qn', '/norestart')

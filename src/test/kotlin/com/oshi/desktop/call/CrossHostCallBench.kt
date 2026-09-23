@@ -153,6 +153,7 @@ class CrossHostCallBench {
         )
         val model = CallScreenModel(lane, labelFor = { "peer" })
         private val poller = Executors.newSingleThreadScheduledExecutor()
+        private var ticks = 0L
 
         init { lane.onEvent = { model.onEvent(it) } }
 
@@ -160,6 +161,16 @@ class CrossHostCallBench {
             poller.scheduleWithFixedDelay({
                 runCatching { lane.pollOnce(); lane.tick(); model.tick() }
                     .onFailure { say("[cross] $name poll failed: $it") }
+                // Every 2 s: what the socket and the relays actually saw, so a one-way path
+                // on CI is diagnosable from the log alone.
+                if (++ticks % 2 == 0L) lane.media?.let { m ->
+                    val s = m.socket
+                    say("[cross-stats] $name t=${ticks}s sel=${m.selected?.type}:${m.selected?.ip}:${m.selected?.port} " +
+                        "sock rx=${s.packetsReceived.get()} rxErr=${s.receiveErrors.get()} pingsAns=${s.pingsAnswered.get()} " +
+                        "pongs=${s.pongsCorrelated.get()} dropped=${s.packetsDropped.get()} | accepted=${m.framesAccepted.get()} " +
+                        "refused=${m.framesRefused.get()} | 8089 rx=${m.relayReceived.get()} tx=${m.relaySent.get()} ws tx=${m.wsSent.get()} " +
+                        "| audio sent=${m.audio?.framesSent?.get()} video sent=${m.video?.sender?.framesSent} pics=${m.video?.remoteFrameCount}")
+                }
             }, 0, CallLane.POLL_INTERVAL_MS, TimeUnit.MILLISECONDS)
         }
 

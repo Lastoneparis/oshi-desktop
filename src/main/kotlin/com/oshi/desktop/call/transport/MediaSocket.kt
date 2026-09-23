@@ -225,6 +225,10 @@ class MediaSocket(
     val pingsAnswered = AtomicLong()
     val pongsCorrelated = AtomicLong()
     val packetsDropped = AtomicLong()
+    /** Every datagram the socket delivered, before any classification. Diagnostics. */
+    val packetsReceived = AtomicLong()
+    /** Receive calls that threw (e.g. Windows reporting an ICMP unreachable). Diagnostics. */
+    val receiveErrors = AtomicLong()
 
     /** The port audio leaves from. What host candidates must advertise. */
     val localPort: Int get() = socket.localPort
@@ -424,8 +428,10 @@ class MediaSocket(
                 socket.receive(pkt)
             } catch (_: Exception) {
                 if (!running.get()) return
+                receiveErrors.incrementAndGet()
                 continue
             }
+            packetsReceived.incrementAndGet()
             val from = InetSocketAddress(pkt.address, pkt.port)
             runCatching { handle(buf, pkt.length, from) }
         }
