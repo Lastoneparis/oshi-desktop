@@ -113,10 +113,11 @@ import java.util.Base64
  *
  * ============================================================ DESKTOP SCOPE — NO CAMERA
  *
- * **This client has no camera and does not decode images.** Nothing here reads a PNG, a
- * screenshot or a webcam frame; there is no ZXing, no `AVCaptureMetadataOutput`
- * equivalent, and adding one would be a new dependency plus a platform abstraction over
- * V4L2 / Media Foundation / AVFoundation for three OSes — far past this row.
+ * **This client has no live camera.** [QrImageDecoder] reads a user-selected PNG/JPEG
+ * screenshot or photo through ZXing, with an explicit pixel bound; the New conversation
+ * screen exposes that path. There is still no `AVCaptureMetadataOutput` equivalent or live
+ * webcam integration over V4L2 / Media Foundation / AVFoundation, which would require a
+ * separate native capability on each desktop OS.
  *
  * The desktop-side contract is therefore two halves of the exchange, not three:
  *
@@ -124,12 +125,11 @@ import java.util.Base64
  *     into modules a phone camera can read (terminal text or PNG). This is the direction
  *     that matters, because it is the one where a wrong byte is invisible until someone
  *     points a phone at the screen.
- *   - **PARSE**: [parse] takes an ALREADY-DECODED string — pasted from a phone's "Copy
- *     key" button, typed in, dropped in from a share sheet, or handed over by some future
- *     image decoder — and returns either a canonical address or a named reason it was
- *     refused. Both phones offer exactly this manual-entry path next to their scanner
- *     (`QRScannerView.swift:76-99`, `NewMessageScreen.kt` "Paste Key"), so this is a
- *     shipped affordance being ported, not a workaround for the missing camera.
+ *   - **PARSE**: [parse] takes an already-decoded string — pasted from a phone's "Copy key"
+ *     button, typed in, dropped in from a share sheet, or returned by [QrImageDecoder] — and
+ *     returns either a canonical address or a named reason it was refused. Both phones offer
+ *     this manual-entry path next to their scanner (`QRScannerView.swift:76-99`,
+ *     `NewMessageScreen.kt` "Paste Key").
  */
 object ContactQr {
 

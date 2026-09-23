@@ -16,13 +16,19 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -39,6 +45,8 @@ import com.oshi.desktop.i18n.t
 import com.oshi.desktop.ui.OshiTheme
 import com.oshi.desktop.ui.state.ConversationKind
 import com.oshi.desktop.ui.state.ConversationRow
+import com.oshi.desktop.ui.state.IncomingShare
+import com.oshi.desktop.ui.state.NetworkBadge
 import com.oshi.desktop.ui.state.Pane
 import com.oshi.desktop.ui.state.ShellState
 import java.time.LocalDate
@@ -61,7 +69,7 @@ import java.time.LocalDate
  *
  * ============================================================ WHAT IS NOT HERE
  *
- * No "New message" destination: there is no contact picker in this window and no camera to
+ * No "New message" destination: there is no contact picker in this window and no live camera to
  * scan a code with (`DesktopLimits.MISSING`), so a button leading to neither would be an
  * invitation to a dead end. No compose FAB for the same reason. The account pane names
  * `/qr` and `/send`, which are the paths that exist.
@@ -75,7 +83,10 @@ fun ConversationListPane(
     onHalf: (ConversationFilter.Half) -> Unit,
     onSelect: (String) -> Unit,
     onShow: (Pane) -> Unit,
+    onCreateGroup: (String, List<String>) -> Unit = { _, _ -> },
     today: LocalDate,
+    badge: NetworkBadge = NetworkBadge.OFFLINE,
+    incomingShares: List<IncomingShare> = emptyList(),
     modifier: Modifier = Modifier,
 ) {
     // The two filters compose in ONE order and it matters: the kind split first, the typed
@@ -85,6 +96,27 @@ fun ConversationListPane(
     val inHalf = remember(state.conversations, half) { ConversationFilter.ofKind(state.conversations, half) }
     val rows = remember(inHalf, query) { ConversationFilter.apply(inHalf, query) }
     val emptyReason = ConversationFilter.emptyReason(inHalf.size, rows.size, query)
+
+    // __LIST_TOP_2026_09_22__ The list is keyed (`key = { it.id }`) and sorted newest-first
+    // (`ChatShellModel.build`, `sortedByDescending { it.lastActivityMs }`). A keyed LazyColumn
+    // keeps the FIRST VISIBLE KEY in place when items move, so when a message lands in any
+    // conversation other than the top one, that conversation jumps to index 0 ABOVE the
+    // viewport and the list silently shifts one row: the newest conversation — the one that
+    // just changed — is the one you cannot see. If the list was at the very top before the
+    // reorder, it stays at the top. `atTop` is read during composition, i.e. BEFORE the new
+    // rows are measured, so it describes where the user was, not where the reorder put them.
+    val listState = rememberLazyListState()
+    val atTop by remember(listState) {
+        derivedStateOf { listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0 }
+    }
+    val wasAtTop = atTop
+    val firstKey = rows.firstOrNull()?.id
+    LaunchedEffect(firstKey) {
+        // Unconditional on purpose: this may run before OR after the reordered rows are
+        // measured, and `scrollToItem` forgets the remembered key either way, so the next
+        // measure places index 0 — not the old first key — at the top.
+        if (wasAtTop && firstKey != null) listState.scrollToItem(0)
+    }
 
     Column(modifier.width(Metrics.sidebar).fillMaxHeight().background(OshiTheme.background)) {
 
@@ -101,19 +133,37 @@ fun ConversationListPane(
             modifier = Modifier.fillMaxWidth().padding(horizontal = OshiTheme.lg, vertical = OshiTheme.md),
         )
 
-        Text(
-            // The heading and the segment above it are the same two words in English, but they
-            // are NOT the same keys: `tab.*` is what a five-across control has room for and
-            // `*.title` is what a screen title reads like, and the catalogs spell them apart in
-            // several locales. Reusing one for the other is a guess that happens to be right here.
-            if (half == ConversationFilter.Half.GROUPS) t("groups.title") else t("messages.title"),
-            style = OshiTheme.typography.headlineLarge,
-            color = Ink.strong,
-            modifier = Modifier.padding(start = OshiTheme.lg, end = OshiTheme.lg, bottom = OshiTheme.md),
-        )
+        Row(
+            Modifier.fillMaxWidth().padding(start = OshiTheme.lg, end = OshiTheme.lg, bottom = OshiTheme.md),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm),
+        ) {
+            Text(
+                // The heading and the segment above it are the same two words in English, but they
+                // are NOT the same keys: `tab.*` is what a five-across control has room for and
+                // `*.title` is what a screen title reads like, and the catalogs spell them apart in
+                // several locales. Reusing one for the other is a guess that happens to be right here.
+                if (half == ConversationFilter.Half.GROUPS) t("groups.title") else t("messages.title"),
+                style = OshiTheme.typography.headlineLarge,
+                color = Ink.strong,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            // __LIVE_SHARE_COUNTER_2026_09_22__ / __TOOLBAR_DRIFT_2026_09_22__ — see
+            // HeaderIndicators.kt. The reach badge is always here; only the share counter
+            // comes and goes, and only when a share starts or ends.
+            IncomingSharesChip(incomingShares, onSelect)
+            NetworkBadgeChip(badge)
+        }
 
         FilterField(query, onQuery, Modifier.padding(horizontal = OshiTheme.lg))
         Spacer(Modifier.height(OshiTheme.md))
+
+        if (half == ConversationFilter.Half.GROUPS) {
+            GroupCreateCard(state.contacts, onCreateGroup, Modifier.padding(horizontal = OshiTheme.lg))
+            Spacer(Modifier.height(OshiTheme.md))
+        }
 
         when (emptyReason) {
             ConversationFilter.EmptyReason.NO_CONVERSATIONS ->
@@ -122,7 +172,7 @@ fun ConversationListPane(
                 }
             ConversationFilter.EmptyReason.NO_MATCHES ->
                 Box(Modifier.weight(1f)) { NoMatches(query) }
-            null -> LazyColumn(Modifier.weight(1f)) {
+            null -> LazyColumn(Modifier.weight(1f), state = listState) {
                 items(rows, key = { it.id }) { row ->
                     ConversationListRow(row, row.id == state.selectedId, today) { onSelect(row.id) }
                     Hairline(inset = OshiTheme.lg + Metrics.separatorInset)
@@ -134,6 +184,49 @@ fun ConversationListPane(
         SidebarNav(dt("desktop.nav.account"), Glyph.LOCK, state.pane == Pane.ACCOUNT) { onShow(Pane.ACCOUNT) }
         SidebarNav(dt("desktop.nav.limits"), Glyph.ALERT, state.pane == Pane.LIMITS) { onShow(Pane.LIMITS) }
         Spacer(Modifier.height(OshiTheme.sm))
+    }
+}
+
+/** A group starts from contacts, never arbitrary pasted key text or an invisible roster. */
+@Composable
+private fun GroupCreateCard(
+    contacts: List<com.oshi.desktop.ui.state.ContactRow>,
+    onCreate: (String, List<String>) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var name by remember { mutableStateOf("") }
+    var selected by remember(contacts) { mutableStateOf(emptySet<String>()) }
+    val eligible = contacts.filterNot { it.blocked }
+    Column(modifier.fillMaxWidth().clip(OshiTheme.radiusMd).background(OshiTheme.surface).padding(OshiTheme.md)) {
+        Text(dt("desktop.group.create.title"), style = OshiTheme.typography.titleSmall, color = Ink.strong)
+        Spacer(Modifier.height(OshiTheme.xxs))
+        Text(dt("desktop.group.create.hint"), style = OshiTheme.typography.bodySmall, color = Ink.soft)
+        Spacer(Modifier.height(OshiTheme.sm))
+        BasicTextField(
+            value = name,
+            onValueChange = { name = it },
+            singleLine = true,
+            textStyle = OshiTheme.typography.bodySmall.copy(color = Ink.strong),
+            cursorBrush = SolidColor(OshiTheme.brand),
+            modifier = Modifier.fillMaxWidth().padding(vertical = OshiTheme.xxs),
+            decorationBox = { inner ->
+                if (name.isBlank()) Text(dt("desktop.group.create.name"), style = OshiTheme.typography.bodySmall, color = Ink.soft)
+                inner()
+            },
+        )
+        if (eligible.isEmpty()) {
+            Text(dt("desktop.group.create.noContacts"), style = OshiTheme.typography.bodySmall, color = Ink.soft)
+        } else {
+            for (contact in eligible) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(contact.label, style = OshiTheme.typography.bodySmall, color = Ink.strong, modifier = Modifier.weight(1f))
+                    TextAction(if (contact.address in selected) dt("desktop.group.create.remove") else dt("desktop.group.create.add")) {
+                        selected = if (contact.address in selected) selected - contact.address else selected + contact.address
+                    }
+                }
+            }
+            TextAction(dt("desktop.group.create.action")) { onCreate(name, selected.toList()) }
+        }
     }
 }
 
@@ -294,7 +387,7 @@ private fun ConversationListRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(OshiTheme.md),
     ) {
-        Monogram(row.label, row.id, Metrics.avatarList)
+        GroupAvatar(row.pictureBase64, row.label, row.id, Metrics.avatarList)
 
         Column(Modifier.weight(1f)) {
             Text(
@@ -331,7 +424,11 @@ private fun ConversationListRow(
                 // 7.74:1, so it carries a timestamp safely.
                 color = if (row.unread > 0) OshiTheme.brand else Ink.soft,
             )
-            UnreadBadge(row.unread)
+            Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.xs), verticalAlignment = Alignment.CenterVertically) {
+                // __MENTIONS_2026_09_23__ "@" pill: an unseen message here mentions you.
+                if (row.mentionedYou) MentionBadge()
+                UnreadBadge(row.unread)
+            }
         }
     }
 }

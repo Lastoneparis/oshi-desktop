@@ -274,9 +274,14 @@ class ClientWiringTest {
             val row = b.messages.messages(a.address).single()
             assertEquals("note.txt", row.content)
             assertNotNull("the key message was stored without ever fetching the blob", row.mediaRef)
+            // __LOCAL_DATA_AT_REST_2026_09_22__ sealed on arrival: the plaintext never lands.
+            assertTrue(
+                "an inbound attachment was written to disk in plaintext",
+                com.oshi.desktop.store.MediaVault.isSealed(File(row.mediaRef!!)),
+            )
             assertTrue(
                 "the decrypted bytes differ from what was sent",
-                File(row.mediaRef!!).readBytes().contentEquals(source.readBytes()),
+                b.mediaVault.readBytes(File(row.mediaRef!!), Long.MAX_VALUE).contentEquals(source.readBytes()),
             )
         } finally {
             dir.deleteRecursively()
@@ -567,7 +572,9 @@ class ClientWiringTest {
         val me = fx.client("me")
         com.oshi.desktop.lora.FakeMeshtasticNode().use { node ->
             val heard = java.util.concurrent.CountDownLatch(1)
+            val published = java.util.concurrent.CountDownLatch(1)
             me.onLoRa = { if (it.contains("interop text")) heard.countDown() }
+            me.onMessage = { if (it.transport == "lora") published.countDown() }
 
             fx.repl(me, "/lora attach ${node.host} ${node.port}")
             assertTrue("the link never handshaked", node.handshake.await(10, java.util.concurrent.TimeUnit.SECONDS))
@@ -575,6 +582,10 @@ class ClientWiringTest {
             node.push(interopTextFrom(nodeNum = 0x1234u, text = "hello from a stock radio"))
 
             assertTrue("the interop text never reached the client", heard.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            assertTrue(
+                "a stored radio row never reached the UI/notification callback",
+                published.await(10, java.util.concurrent.TimeUnit.SECONDS),
+            )
             val convos = me.conversationsIncludingBlocked().map { it.conversationId }
             assertTrue(
                 "interop text must be quarantined under its own key, never a peer thread: $convos",

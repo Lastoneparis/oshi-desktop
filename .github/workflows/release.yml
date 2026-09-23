@@ -28,8 +28,8 @@ jobs:
             name: linux
           - os: windows-latest
             name: windows
-          - os: macos-latest
-            name: macos
+          # No macOS job: the Mac app ships through the Mac App Store, and the
+          # website points Mac users there. Do not publish a .dmg here.
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -83,18 +83,20 @@ jobs:
           copy_stable '*.exe'     OSHI-Desktop-Setup.exe
           copy_stable '*.deb'     oshi-desktop-amd64.deb
           copy_stable '*.rpm'     oshi-desktop.x86_64.rpm
-          copy_stable '*.dmg'     OSHI-Desktop.dmg
           copy_stable '*.AppImage' OSHI-Desktop.AppImage
           copy_stable '*.tar.gz'  oshi-desktop-linux-x86_64.tar.gz
           python - <<'PY'
+          import os
           from hashlib import sha256
           from pathlib import Path
           files = sorted(path for path in Path("dist").iterdir() if path.is_file())
           lines = [f"{sha256(path.read_bytes()).hexdigest()}  {path.name}" for path in files]
-          Path("dist/SHA256SUMS.txt").write_text("\\n".join(lines) + "\\n", encoding="ascii")
+          Path(f"dist/SHA256SUMS-{os.environ['MATRIX_NAME']}.txt").write_text("\n".join(lines) + "\n", encoding="ascii")
           PY
           ls -la dist
         shell: bash
+        env:
+          MATRIX_NAME: ${{ matrix.name }}
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

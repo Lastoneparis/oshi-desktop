@@ -82,6 +82,24 @@ object LoRaAttach {
     /** Meshtastic's TCP port. A plain `java.net.Socket` reaches it; no dependency needed. */
     const val TCP_PORT = 4403
 
+    /**
+     * A TCP endpoint the desktop client is willing to hand to [java.net.Socket].
+     *
+     * This is deliberately a small validation boundary, not a claim that a host is a
+     * Meshtastic node: that can only be learned after the node answers the config request.
+     * It keeps malformed CLI input out of the reconnect loop and, importantly, keeps
+     * control characters out of the diagnostic sink used by the terminal UI.
+     */
+    data class TcpEndpoint(val host: String, val port: Int)
+
+    fun tcpEndpoint(host: String, port: Int = TCP_PORT): TcpEndpoint? {
+        val normalizedHost = host.trim()
+        if (normalizedHost.isEmpty() || normalizedHost.length > 253) return null
+        if (normalizedHost != host || normalizedHost.any { it.isISOControl() || it.isWhitespace() }) return null
+        if (port !in 1..65_535) return null
+        return TcpEndpoint(normalizedHost, port)
+    }
+
     /** GATT service UUID (`MeshtasticManager.swift:163`, `MeshtasticManager.kt:76`). */
     const val BLE_SERVICE_UUID = "6BA1B218-15A8-461F-9FA8-5DCAE273EAFD"
 

@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "about": "__MENTIONS_2026_09_23__ golden vector shared by OSHI-Desktop MentionWireTest and OSHI-Android MentionWireTest. `rendered` is the exact bytes of the optional `mentions` key; `groupMessageJson` is the desktop encoder's full GroupMessage for `body` (timestamp Apple seconds 780000000 = unix ms 1758307200000).",
+  "senderPublicKey": "SenderKey+Alpha/Bravo0123456789CharlieDelta=",
+  "groupId": "6F9619FF-8B86-D011-B42D-00C04FC964FF",
+  "messageId": "3F2504E0-4F89-11D3-9A0C-0305E82C3301",
+  "unixMillis": 1758307200000,
+  "mentions": [
+    {
+      "publicKey": "A1ice+PubKey/0123456789abcdefghijklmnopqrstu=",
+      "name": "Alice"
+    },
+    {
+      "publicKey": "JeanLuc/Key+9876543210ZYXWVUTSRQPONMLKJIHGFE=",
+      "name": "Jean-Luc \"JL\""
+    }
+  ],
+  "rendered": "[{\"publicKey\":\"A1ice+PubKey/0123456789abcdefghijklmnopqrstu=\",\"name\":\"Alice\"},{\"publicKey\":\"JeanLuc/Key+9876543210ZYXWVUTSRQPONMLKJIHGFE=\",\"name\":\"Jean-Luc \\\"JL\\\"\"}]",
+  "body": "@Alice and @Jean-Luc \"JL\", check @AAPL. Not mentions: bob@Alice.com or @Alicette",
+  "spans": [
+    [
+      0,
+      6,
+      "A1ice+PubKey/0123456789abcdefghijklmnopqrstu="
+    ],
+    [
+      11,
+      25,
+      "JeanLuc/Key+9876543210ZYXWVUTSRQPONMLKJIHGFE="
+    ]
+  ],
+  "groupMessageJson": "{\"id\":\"3F2504E0-4F89-11D3-9A0C-0305E82C3301\",\"groupId\":\"6F9619FF-8B86-D011-B42D-00C04FC964FF\",\"senderPublicKey\":\"SenderKey+Alpha/Bravo0123456789CharlieDelta=\",\"encryptedContent\":\"QEFsaWNlIGFuZCBASmVhbi1MdWMgIkpMIiwgY2hlY2sgQEFBUEwuIE5vdCBtZW50aW9uczogYm9iQEFsaWNlLmNvbSBvciBAQWxpY2V0dGU=\",\"timestamp\":780000000,\"isRead\":false,\"messageChainIndex\":0,\"messageId\":\"3F2504E0-4F89-11D3-9A0C-0305E82C3301\",\"content\":\"@Alice and @Jean-Luc \\\"JL\\\", check @AAPL. Not mentions: bob@Alice.com or @Alicette\",\"senderName\":\"\",\"mentions\":[{\"publicKey\":\"A1ice+PubKey/0123456789abcdefghijklmnopqrstu=\",\"name\":\"Alice\"},{\"publicKey\":\"JeanLuc/Key+9876543210ZYXWVUTSRQPONMLKJIHGFE=\",\"name\":\"Jean-Luc \\\"JL\\\"\"}]}",
+  "iosCodingKeys_1_0_43": [
+    "id",
+    "groupId",
+    "senderPublicKey",
+    "encryptedContent",
+    "timestamp",
+    "isRead",
+    "messageChainIndex",
+    "mediaType",
+    "mediaFileName",
+    "plaintextContent",
+    "systemMessageType",
+    "systemMessageData",
+    "editedAt",
+    "editedContent",
+    "deliveryStatus"
+  ]
+}

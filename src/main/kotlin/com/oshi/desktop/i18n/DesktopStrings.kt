@@ -6,13 +6,13 @@ package com.oshi.desktop.i18n
  * ============================================================ WHY THIS EXISTS AT ALL
  *
  * The window's chrome reuses iOS keys wherever the phone already has the sentence — that is
- * the whole point of extracting 3840 keys × 34 locales instead of writing new copy. But a
+ * the whole point of extracting thousands of keys × 34 locales instead of writing new copy. But a
  * desktop client says things a phone cannot:
  *
  *  * REPL instructions (`/qr`, `/send`, `./oshi.sh run --args="--client"`);
  *  * the "what this client will not do" screen, which is a list of PARITY.md rows;
  *  * "delivery stops when this window closes" — there is no push on desktop (row 2.3);
- *  * "history on this disk is PLAINTEXT" — a documented regression from both phones.
+ *  * the desktop's at-rest message-history posture.
  *
  * None of those has an iOS counterpart, because none of them is true of iOS.
  *
@@ -55,8 +55,8 @@ package com.oshi.desktop.i18n
  *
  * That is a hole in the audit, not a fact about the code, so the seams a test needs are
  * public and named: [overlayKeys], [misfiledKeys], [shadowedKeys] here, and
- * `SourceKeys.usedDesktop` next door. **No test calls them yet** — writing one means
- * touching `src/test/`, which this change did not own.
+ * `SourceKeys.usedDesktop` next door. `CatalogAuditTest` compares their exact sets, so a
+ * window-only marker, an unnecessary English override, and stale desktop copy all fail CI.
  */
 object DesktopStrings {
 
@@ -150,7 +150,8 @@ object DesktopStrings {
  * shared asset into a permanently red one about a deliberate choice.
  *
  * The cost is real and is recorded in [DesktopStrings]' doc: these keys are audited by
- * nothing today. `SourceKeys.usedDesktop` is the seam that closes it.
+ * nothing on the shared-catalog path. `CatalogAuditTest` audits it through
+ * `SourceKeys.usedDesktop` instead.
  *
  * Choose [dt] ONLY when the shared catalogs have no sentence for this. If they do, use `t` —
  * a `desktop.` key where an iOS key existed ships English to 33 locales for nothing.

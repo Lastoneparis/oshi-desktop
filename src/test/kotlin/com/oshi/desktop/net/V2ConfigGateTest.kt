@@ -26,6 +26,30 @@ class V2ConfigGateTest {
     private fun gate(build: Int = 1, ttl: Long = 60_000, clock: () -> Long = System::currentTimeMillis) =
         V2ConfigGate(baseUrl = relay.baseUrl, buildNumber = build, ttlMillis = ttl, clock = clock)
 
+    // __LEGACY_COMPAT_2026_09_23__ -------------------------------------------------------
+    @Test
+    fun `group_legacy_compat defaults to false and only a JSON true turns it on`() {
+        relay.responder = { 200 to """{"v2_enabled":true,"rollout_percent":100,"min_build":0}""" }
+        gate().also { it.isEnabled(USER_A); assertTrue("missing key => false", !it.groupLegacyCompat) }
+        for (v in listOf("\"true\"", "1", "null", "false")) {
+            relay.responder = { 200 to """{"v2_enabled":true,"rollout_percent":100,"min_build":0,"group_legacy_compat":$v}""" }
+            gate().also { it.isEnabled(USER_A); assertTrue("$v must not enable compat", !it.groupLegacyCompat) }
+        }
+        relay.responder = { 200 to """{"v2_enabled":true,"rollout_percent":100,"min_build":0,"group_legacy_compat":true}""" }
+        gate().also { it.isEnabled(USER_A); assertTrue(it.groupLegacyCompat) }
+    }
+
+    @Test
+    fun `group_legacy_compat is ignored after the 2026-10-14 sunset`() {
+        val sunset = V2ConfigGate.GROUP_LEGACY_COMPAT_SUNSET_MS
+        assertEquals(java.time.Instant.parse("2026-10-14T07:00:00Z").toEpochMilli(), sunset)
+        assertTrue(V2ConfigGate.isGroupLegacyCompatActive(true, sunset - 1))
+        assertTrue(!V2ConfigGate.isGroupLegacyCompatActive(true, sunset))
+        assertTrue(!V2ConfigGate.isGroupLegacyCompatActive(false, sunset - 1))
+        assertTrue(!V2ConfigGate.isGroupLegacyCompatActive(null, sunset - 1))
+        assertEquals(2, V2ConfigGate.CAP_GROUP_V2)
+    }
+
     @Test
     fun `an enabled rollout that covers this identity opens the gate`() {
         relay.responder = { 200 to """{"v2_enabled":true,"rollout_percent":100,"min_build":0}""" }

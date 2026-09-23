@@ -149,6 +149,9 @@ object GroupUpdateWire {
             // Pinned false: iOS overwrites it locally anyway (swift:1028) and Android
             // pins it too. Muting is a personal preference, not group state.
             .bool("isMuted", false)
+        // __GROUP_E2E_V2_2026_09_23__ spec §5.1.
+        json.optional("description", group.description?.takeIf { it.isNotEmpty() })
+        if (group.evictedMemberKeys.isNotEmpty()) json.strArr("evictedMemberKeys", group.evictedMemberKeys)
         group.groupPictureBase64?.takeIf { it.isNotEmpty() }?.let {
             json.str("groupPictureData", it)
             json.optional("groupPictureUpdatedBy", group.groupPictureUpdatedBy?.takeIf(String::isNotEmpty))
@@ -353,6 +356,8 @@ object GroupUpdateWire {
                 pinnedBy = o.opt("pinnedBy") as? String,
                 avatar = o.opt("avatar") as? String,
                 stateVersion = (o.opt("stateVersion") as? Number)?.toInt(),
+                description = (o.opt("description") as? String)?.takeIf { it.isNotEmpty() },
+                evictedMemberKeys = stringArray(o.opt("evictedMemberKeys")),
             ),
         )
     }
@@ -430,6 +435,27 @@ object GroupUpdateWire {
     /** The minimal `{"type":…}` shapes, on a body that may or may not carry the sentinel. */
     fun decodeMinimalFramed(content: String): MinimalGroupUpdate? =
         decodeMinimal(content.removePrefix(PREFIX))
+
+    /**
+     * __GROUP_COMPAT_IGNORE_2026_09_23__ The `type` of a well-formed state frame that
+     * [decodeMinimalFramed] does not model — `updated` (Android's legacy rename/description
+     * companion), `read_receipt_batch` (spec §5.2, optional), `deleted`, `key_rotation`… — or null
+     * when the body is not a JSON object with a non-empty string `type` (that stays malformed).
+     * Spec header: new `type` values are ones old receivers IGNORE, not reject.
+     */
+    fun ignorableMinimalType(content: String): String? {
+        val o = runCatching { JSONObject(content.removePrefix(PREFIX)) }.getOrNull() ?: return null
+        val type = (o.opt("type") as? String)?.takeIf { it.isNotBlank() } ?: return null
+        // A group-type word here means a definition that failed decoding — not ignorable.
+        if (GroupType.fromRaw(type) != null) return null
+        // A modelled type that failed decoding (missing groupId, name…) IS malformed.
+        if (type in MODELLED_MINIMAL_TYPES) return null
+        return type
+    }
+
+    private val MODELLED_MINIMAL_TYPES = setOf(
+        "member_added", "member_removed", "group_renamed", "member_sync_request", "sync_request", "created",
+    )
 
     /** iOS's fallback switch (`swift:1071-1157`), plus the `created` shape it emits. */
     fun decodeMinimal(body: String): MinimalGroupUpdate? {

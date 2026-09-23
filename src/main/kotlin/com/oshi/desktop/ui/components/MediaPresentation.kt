@@ -117,7 +117,9 @@ data class MediaPresentation(
             attachment: String?,
             viewOnce: Boolean = false,
             revealed: Boolean = false,
-            probe: (String) -> Long? = { File(it).takeIf { f -> f.isFile }?.length() },
+            // __LOCAL_DATA_AT_REST_2026_09_22__ the PLAINTEXT size, from the header of a
+            // sealed attachment, so the inline cap is the same cap it was before sealing.
+            probe: (String) -> Long? = { com.oshi.desktop.store.MediaVault.lengthOf(File(it)) },
         ): MediaPresentation? {
             val raw = attachment?.trim().orEmpty()
             if (raw.isEmpty()) return null
@@ -165,7 +167,7 @@ data class MediaPresentation(
         fun cardLabel(kind: MediaType): String = when (kind) {
             MediaType.IMAGE -> "Image"
             MediaType.VIDEO -> "Video — no player in this window"
-            MediaType.AUDIO -> "Voice note — no player in this window"
+            MediaType.AUDIO -> "Voice note — click to play"
             MediaType.DOCUMENT -> "File"
             MediaType.CONTACT -> "Contact card"
             MediaType.LOCATION -> "Location"

@@ -135,7 +135,11 @@ class BotQueueClient(
      */
     fun pending(): Result<List<QueueEntry>> {
         val url = "$baseUrl/api/pending/$pathKey?deviceId=${enc(deviceId)}"
-        val req = HttpRequest.newBuilder(URI.create(url)).timeout(readTimeout).GET().build()
+        val req = HttpRequest.newBuilder(URI.create(url)).timeout(readTimeout)
+            // __BOT_E2E_2026_09_23__ BOT_SEAL_SPEC.md §3: lets the server's `compat` mode seal
+            // bot posts to this build, which can open them (BotSealedEnvelope).
+            .header(CAPS_HEADER, CAPS_VALUE)
+            .GET().build()
         return try {
             val resp = http.send(req, HttpResponse.BodyHandlers.ofString())
             if (resp.statusCode() !in 200..299) {
@@ -146,6 +150,28 @@ class BotQueueClient(
         } catch (e: Exception) {
             Result.failure(e)
         }
+    }
+
+    /**
+     * __BOT_E2E_2026_09_23__ Poll, decode every bot entry (legacy or `bot-seal-v1`, opened with
+     * the identity X25519 pair [ownPriv]/[ownPub]), hand each to [handle], then ack it by its
+     * envelope id — a [BotEnvelope.Decoded.Dropped] one too, so an envelope this build cannot
+     * open does not re-stream on every poll (spec §2: "drop + ack"). Non-bot entries are left
+     * alone, as before.
+     *
+     * @return how many bot entries were handed to [handle], or the poll's failure.
+     */
+    fun drainBots(ownPriv: ByteArray, ownPub: ByteArray, handle: (BotEnvelope.Decoded) -> Unit): Result<Int> {
+        val entries = pending().getOrElse { return Result.failure(it) }
+        var n = 0
+        for (entry in entries) {
+            if (entry !is QueueEntry.Bot) continue
+            val decoded = BotEnvelope.decode(entry.raw, ownPriv, ownPub)
+            handle(decoded)
+            n++
+            decoded.envelopeMessageId?.let { ackBot(it) }
+        }
+        return Result.success(n)
     }
 
     /**
@@ -224,4 +250,10 @@ class BotQueueClient(
         java.net.URLEncoder.encode(s, Charsets.UTF_8).replace("+", "%20")
 
     private fun esc(s: String): String = com.oshi.messenger.network.v2.OSHICryptoV2.jsonEscape(s)
+
+    companion object {
+        /** BOT_SEAL_SPEC.md §3 capability header on `GET /api/pending`. */
+        const val CAPS_HEADER = "X-OSHI-Caps"
+        const val CAPS_VALUE = BotSealedEnvelope.SEAL_VERSION
+    }
 }

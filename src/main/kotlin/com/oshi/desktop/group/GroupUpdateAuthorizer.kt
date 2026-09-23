@@ -184,7 +184,18 @@ object GroupUpdateAuthorizer {
                 groupWallpaperUpdatedBy = current.groupWallpaperUpdatedBy,
             )
         }
-        return merged.copy(isMuted = current.isMuted)
+        // __GROUP_E2E_V2_2026_09_23__ spec §5.1/§5.3: evictedMemberKeys is a UNION that never
+        // shrinks (only an admin's list is taken at all); local stateVersion = max(local, incoming);
+        // an absent description is "not in this broadcast".
+        val evicted = if (decision.keepMembership || decision.keepAdminSet) current.evictedMemberKeys
+            else (current.evictedMemberKeys + merged.evictedMemberKeys)
+        val version = listOfNotNull(current.stateVersion, incoming.stateVersion).maxOrNull()
+        return merged.copy(
+            isMuted = current.isMuted,
+            evictedMemberKeys = evicted.distinctBy(GroupIdentity::canonicalIdentity),
+            stateVersion = version,
+            description = merged.description ?: current.description,
+        )
     }
 
     /**

@@ -53,6 +53,9 @@ class BotQueueServer : AutoCloseable {
     /** Every RAW path this server was asked for — bytes on the wire, not a decoding. */
     val requestedPaths: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf<String>())
 
+    /** `X-OSHI-Caps` of every `/api/pending` request, in order (null when absent). */
+    val pendingCaps: MutableList<String?> = java.util.Collections.synchronizedList(mutableListOf<String?>())
+
     /** Set to make the next N `/api/pending` calls answer 500. */
     var failPendingRemaining: Int = 0
 
@@ -125,6 +128,7 @@ class BotQueueServer : AutoCloseable {
     }
 
     private fun pending(ex: HttpExchange, path: String, query: String) {
+        pendingCaps.add(ex.requestHeaders.getFirst("X-OSHI-Caps"))
         if (failPendingRemaining > 0) {
             failPendingRemaining--
             send(ex, 500, "{\"error\":\"induced\"}")

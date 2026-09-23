@@ -117,6 +117,8 @@ object ControlPrefix {
     const val PROFILE_UPDATE = "📸PROFILE_UPDATE📸"
     const val WALLPAPER_UPDATE = "🎨WALLPAPER_UPDATE🎨"
     const val KEY_ROTATION = "🔑KEY_ROTATION🔑"
+    /** A rate-limited delivery refusal, rendered in the receiving device's language. */
+    const val BLOCKED_NOTICE = "🚫BLOCKED🚫"
     const val MEDIA_MARKER = "MEDIA|||"
 
     const val REPLY = "💬REPLY💬"
@@ -151,6 +153,7 @@ object ControlPrefix {
         Entry(REACTION, Kind.RENDERED),
         Entry(REACTION_LEGACY, Kind.RENDERED),
         Entry(KEY_ROTATION, Kind.RENDERED),
+        Entry(BLOCKED_NOTICE, Kind.RENDERED),
         Entry(MEDIA_MARKER, Kind.RENDERED),
 
         Entry(REPLY, Kind.ENVELOPE),

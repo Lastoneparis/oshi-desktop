@@ -51,17 +51,26 @@ object DesktopPaths {
      * and by nothing else this code does.
      *
      * **THIS COMMENT USED TO SAY "the FILES inside are encrypted anyway" AND THAT WAS
-     * FALSE.** [KeyVault] encrypts the vault. It does not encrypt what sits beside it:
-     * the message log, the contact store, the group store, scheduled messages, and every
-     * attachment this client decrypts to disk are PLAINTEXT FILES. A reader who trusted
-     * that sentence would have concluded that a copied profile directory gives up
-     * nothing, and it gives up the entire conversation history.
+     * FALSE** — contacts, groups, scheduled messages and every received attachment sat in
+     * plaintext beside the encrypted vault. Since __LOCAL_DATA_AT_REST_2026_09_22__ it is true,
+     * and here is exactly what is and is not covered:
      *
-     * The real posture, stated so nobody has to infer it: on this client, at rest, the
-     * KEYS are encrypted and the MESSAGES are not. Anyone who can read the user's profile
-     * directory can read their history — which on a single-user desktop means the user
-     * and anyone who has already taken over that account. Full-disk encryption is the
-     * layer that answers this, and it is the operating system's to provide.
+     *  - `keyvault.json` — [KeyVault], under the OS-held master key ([SecretStore]).
+     *  - `messages/` — [MessageStore], per-record AES-GCM under a vault entry.
+     *  - `contacts.json`, `groups.json`, `scheduled-messages.json` — [SealedJsonFile]
+     *    envelopes under HKDF subkeys of the vault entry [LocalDataKeys.ACCOUNT].
+     *  - `media/` — [MediaVault] "OSHIMED1" chunked AES-GCM, sealed on arrival; older
+     *    plaintext files are sealed in place at client start.
+     *  - `media-tmp/` — DECRYPTED scratch copies (voice-note playback, "open in another
+     *    app") and audio recording/transcoding work files. Plaintext by necessity; deleted
+     *    after use where possible, at exit, and swept at every start.
+     *  - NOT encrypted: small non-content state — `receipt-preferences.json`,
+     *    `router-state.json` (relay cursor + recently seen message ids), `sync-cursor.json`,
+     *    `call-rating.json`, `ui-wallpapers.json`, `maps/`, the welcome marker — and anything
+     *    the user explicitly exports or saves elsewhere.
+     *
+     * Full-disk encryption remains the layer that protects the scratch window and the
+     * metadata (file sizes, counts, timestamps) this layout still exposes.
      *
      * Never rely on directory permissions alone for secrets.
      */

@@ -55,6 +55,22 @@ class KeyVault private constructor(
         persist()
     }
 
+    /**
+     * Persist a logically-related set of secrets in one encrypted, atomic vault write.
+     *
+     * Identity keys must never be written one at a time: a power loss between individual
+     * writes used to leave a partial account which looked empty to callers.  The map is
+     * copied before it is installed, so callers cannot mutate material retained by the
+     * vault after this method returns.
+     */
+    @Synchronized
+    fun putAll(values: Map<String, ByteArray>) {
+        require(values.isNotEmpty()) { "putAll requires at least one vault entry" }
+        val replacement = values.mapValues { (_, value) -> value.copyOf() }
+        entries.putAll(replacement)
+        persist()
+    }
+
     /** Read-or-create in one step, so two callers cannot each generate a different value. */
     @Synchronized
     fun getOrCreate(account: String, create: () -> ByteArray): ByteArray {
@@ -68,6 +84,15 @@ class KeyVault private constructor(
     @Synchronized
     fun delete(account: String) {
         if (entries.remove(account) != null) persist()
+    }
+
+    /** Remove related secrets in one vault generation rather than leaving partial state. */
+    @Synchronized
+    fun deleteAll(accounts: Collection<String>) {
+        if (accounts.any { entries.containsKey(it) }) {
+            accounts.forEach(entries::remove)
+            persist()
+        }
     }
 
     @Synchronized

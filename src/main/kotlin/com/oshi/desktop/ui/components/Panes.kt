@@ -77,12 +77,18 @@ fun NoConversationPane(state: ShellState) {
  *
  * Two of the paragraphs at the bottom exist because they are what a user would otherwise
  * discover the hard way: delivery stops when the window closes (there is no push on desktop,
- * PARITY.md row 2.3), and the message log on this disk is PLAINTEXT, which is a documented
- * regression from both phones rather than an oversight. Neither belongs only in a code
- * comment.
+ * PARITY.md row 2.3), and the message journal is encrypted at rest. Neither belongs only in a
+ * code comment.
  */
 @Composable
-fun AccountPane(state: ShellState, onCopyAddress: (String) -> Unit) {
+fun AccountPane(
+    state: ShellState,
+    onCopyAddress: (String) -> Unit,
+    onDeliveryReceipts: (Boolean) -> Unit,
+    onReadReceipts: (Boolean) -> Unit,
+    onSyncPush: () -> Unit,
+    onSyncPull: () -> Unit,
+) {
     Column(
         Modifier.fillMaxSize().background(OshiTheme.surface).verticalScroll(rememberScrollState()).padding(OshiTheme.xxl),
     ) {
@@ -118,8 +124,36 @@ fun AccountPane(state: ShellState, onCopyAddress: (String) -> Unit) {
             }
 
             Spacer(Modifier.height(OshiTheme.xl))
-            // All three of these are desktop facts — no push, a plaintext log, a separate
-            // account — and none of them is true of either phone, so none has a key upstream.
+
+            Card {
+                FieldRow("Delivery receipts", if (state.deliveryReceiptsEnabled) "On" else "Off", action = Glyph.CHECK to { onDeliveryReceipts(!state.deliveryReceiptsEnabled) })
+                Hairline()
+                FieldRow("Read receipts", if (state.readReceiptsEnabled) "On" else "Off", action = Glyph.CHECK to { onReadReceipts(!state.readReceiptsEnabled) })
+            }
+
+            Spacer(Modifier.height(OshiTheme.xl))
+            Card {
+                Column(Modifier.padding(OshiTheme.lg), verticalArrangement = Arrangement.spacedBy(OshiTheme.sm)) {
+                    Text("Device sync", style = OshiTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, color = Ink.strong)
+                    Text(
+                        "Push or pull this identity's encrypted contact archive. Pull never deletes server records; checkpointing remains REPL-only.",
+                        fontSize = 11.sp,
+                        color = Ink.soft,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.md)) {
+                        PrimaryButton("Push contacts", enabled = !state.busy, onClick = onSyncPush)
+                        PrimaryButton("Pull archive", enabled = !state.busy, onClick = onSyncPull)
+                    }
+                }
+            }
+            state.syncNotice?.let { outcome ->
+                Spacer(Modifier.height(OshiTheme.md))
+                FactCard(if (outcome.severity == com.oshi.desktop.ui.state.Severity.ERROR) Glyph.ALERT else Glyph.CHECK, "Device sync", outcome.text)
+            }
+
+            Spacer(Modifier.height(OshiTheme.xl))
+            // These are desktop facts — no push and the at-rest history posture — and neither
+            // has a shared upstream localisation key.
             FactCard(
                 Glyph.ALERT,
                 dt("desktop.account.fact.noPush.title"),
@@ -130,12 +164,6 @@ fun AccountPane(state: ShellState, onCopyAddress: (String) -> Unit) {
                 Glyph.LOCK,
                 dt("desktop.account.fact.plaintext.title"),
                 dt("desktop.account.fact.plaintext.body"),
-            )
-            Spacer(Modifier.height(OshiTheme.md))
-            FactCard(
-                Glyph.ALERT,
-                dt("desktop.account.fact.separate.title"),
-                dt("desktop.account.fact.separate.body"),
             )
             Spacer(Modifier.height(OshiTheme.xl))
         }

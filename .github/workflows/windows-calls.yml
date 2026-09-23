@@ -1,0 +1,143 @@
+# Windows calls and video calls, on the only Windows this project can test on.
+#
+# Lives at the root of the PUBLIC repository (Lastoneparis/oshi-desktop), where the desktop
+# project IS the repository root. In the monorepo it sits under OSHI-Desktop/ and GitHub
+# does not read it there — it is carried along so the two copies cannot drift.
+#
+# What is REAL here: the production call server, STUN, the UDP hole punch, AES-GCM media,
+# the H.264 encoder/decoder from the Windows FFmpeg natives, the MSI.
+# What is SUBSTITUTED: the runner has no webcam, microphone or speaker, so the call bench
+# sends a generated tone and moving colour bars (CrossHostCallBench). DirectShow capture
+# and WASAPI/DirectSound devices are therefore only enumerated, never streamed.
+name: windows-calls
+
+on:
+  push:
+    branches: ['feat/windows-**', 'main']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: windows-calls-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    # Windows AND Linux: the same call suite, phone-oracle wire tests and same-host live
+    # call on both desktop platforms we ship an installer for; the MSI only on Windows.
+    name: ${{ matrix.os }} / build, call suite, phone oracles, same-host live call${{ matrix.os == 'windows-latest' && ', MSI' || '' }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+
+      - name: Build
+        shell: bash
+        run: ./gradlew compileKotlin compileTestKotlin --no-daemon --console=plain --stacktrace
+
+      - name: Call suite + Windows platform probes (natives, encoders, dshow, audio mixers)
+        shell: bash
+        run: |
+          ./gradlew test --no-daemon --console=plain \
+            --tests 'com.oshi.desktop.call.*' \
+            --tests 'com.oshi.desktop.ui.BackgroundPresenceTest' \
+            --tests 'com.oshi.desktop.ui.state.CallScreenModelTest'
+
+      - name: Phone-compatibility evidence (oracle tests that ran here, encoder vs iOS/Android)
+        if: always()
+        shell: bash
+        run: |
+          echo "Tests that re-implement the iOS / Android receive steps, as run on ${{ runner.os }}:"
+          for f in build/test-results/test/TEST-*.xml; do
+            c=$(basename "$f" .xml | sed 's/^TEST-//')
+            case "$c" in
+              *VideoSendSessionTest|*VideoWireTest|*VideoReceiveTest|*VideoControlTest|*CallWireFormatTest|*InBandCallEndTest|*SiblingDevicesStopRingingTest|*CallMediaTest|*PhoneCompatCodecTest|*VideoCodecTest|*IceCandidate*|*Turn*|*UdpRelay*|*CallMediaRelayAuthContractTest)
+                head -c 400 "$f" | grep -o 'tests="[0-9]*" skipped="[0-9]*" failures="[0-9]*" errors="[0-9]*"' | sed "s|^|  $c: |" ;;
+            esac
+          done
+          grep -h -o '\[phone-compat\][^<]*' build/test-results/test/TEST-*PhoneCompatCodecTest.xml || { echo "::error::PhoneCompatCodecTest did not run"; exit 1; }
+
+      - name: Live call through the production server (two lanes on this runner)
+        shell: bash
+        env:
+          OSHI_CROSS_ROLE: both
+          OSHI_CROSS_SEED: ${{ github.run_id }}-${{ github.run_attempt }}-same-${{ matrix.os }}
+          OSHI_CROSS_HOLD_S: '15'
+        run: ./gradlew test --no-daemon --console=plain --rerun --tests 'com.oshi.desktop.call.CrossHostCallBench' -i | grep -E '\[cross|\[windows|\[audio|FAILED|PASSED|Exception' || true; test -f build/test-results/test/TEST-com.oshi.desktop.call.CrossHostCallBench.xml && ! grep -q '<failure' build/test-results/test/TEST-com.oshi.desktop.call.CrossHostCallBench.xml && grep -q 'tests="1" skipped="0"' build/test-results/test/TEST-com.oshi.desktop.call.CrossHostCallBench.xml
+
+      - name: WiX v3 for jpackage
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $candle = Get-ChildItem -Path 'C:\Program Files (x86)','C:\Program Files' -Filter candle.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $candle) {
+            choco install wixtoolset --version=3.14.0 -y --no-progress
+            $candle = Get-ChildItem -Path 'C:\Program Files (x86)','C:\Program Files' -Filter candle.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          }
+          if (-not $candle) { Write-Error "WiX v3 not found"; exit 1 }
+          echo $candle.DirectoryName >> $env:GITHUB_PATH
+
+      - name: Build the MSI and check the video natives are inside it
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./gradlew packageMsi "-PappVersion=1.0.0" --no-daemon --console=plain  # quoted: PowerShell splits -Pa=1.0.0 at the first dot
+          $msi = Get-ChildItem build/jpackage/out/*.msi | Select-Object -First 1
+          if (-not $msi) { Write-Error "no .msi produced"; exit 1 }
+          $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @('/i', "`"$($msi.FullName)`"", '/qn', '/norestart')
+          if ($p.ExitCode -ne 0) { Write-Error "msiexec /i exited $($p.ExitCode)"; exit 1 }
+          $app = Get-ChildItem "$env:LOCALAPPDATA" -Recurse -Filter OSHI.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $app) { Write-Error "the MSI installed no OSHI.exe"; exit 1 }
+          $jars = Get-ChildItem (Join-Path $app.DirectoryName 'app') -Filter '*windows-x86_64*.jar' | ForEach-Object Name
+          Write-Output "installed: $($app.FullName)"; Write-Output "windows natives in the image: $jars"
+          if (-not ($jars -match 'ffmpeg')) { Write-Error "the installed app has no FFmpeg windows-x86_64 natives — video would be off"; exit 1 }
+          Start-Process msiexec.exe -Wait -ArgumentList @('/x', "`"$($msi.FullName)`"", '/qn', '/norestart') | Out-Null
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: calls-${{ matrix.os }}-msi-and-reports
+          path: |
+            build/jpackage/out/*.msi
+            build/reports/tests/test/
+          if-no-files-found: ignore
+
+  # Two machines, two NATs: the Windows runner calls the Linux runner through the
+  # production server. Each side asserts what IT received, so both directions are checked.
+  # The turn-only pair asserts the selected path is a coturn RELAY candidate on both ends
+  # and that nothing went through the :8089 fallback.
+  cross:
+    name: cross-host / ${{ matrix.relay }} / ${{ matrix.role }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # production = what the app does (direct first, TURN and :8089 as fallbacks);
+        # turn-only    = media MUST cross coturn — a real cross-NAT TURN call from Windows.
+        include:
+          - { os: windows-latest, role: caller, relay: production }
+          - { os: ubuntu-latest,  role: callee, relay: production }
+          - { os: windows-latest, role: caller, relay: turn-only }
+          - { os: ubuntu-latest,  role: callee, relay: turn-only }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+      - name: Compile
+        shell: bash
+        run: ./gradlew compileTestKotlin --no-daemon --console=plain
+      - name: Live ${{ matrix.role }}
+        shell: bash
+        env:
+          OSHI_CROSS_ROLE: ${{ matrix.role }}
+          OSHI_CROSS_SEED: ${{ github.run_id }}-${{ github.run_attempt }}-cross-${{ matrix.relay }}
+          OSHI_CROSS_RELAY: ${{ matrix.relay }}
+          OSHI_CROSS_HOLD_S: '20'
+        run: ./gradlew test --no-daemon --console=plain --rerun --tests 'com.oshi.desktop.call.CrossHostCallBench' -i | grep -E '\[cross|FAILED|PASSED|Exception' || true; test -f build/test-results/test/TEST-com.oshi.desktop.call.CrossHostCallBench.xml && ! grep -q '<failure' build/test-results/test/TEST-com.oshi.desktop.call.CrossHostCallBench.xml && grep -q 'tests="1" skipped="0"' build/test-results/test/TEST-com.oshi.desktop.call.CrossHostCallBench.xml

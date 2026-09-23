@@ -220,7 +220,7 @@ class SystemAudioTranscoder(
     private val tools: List<TranscodeTool> = TranscodeTool.DEFAULTS,
     private val runner: ProcessRunner = DefaultRunner,
     private val resolve: (String) -> String? = AudioProc::which,
-    private val workDir: File = DesktopPaths.file("media"),
+    private val workDir: File = DesktopPaths.file(com.oshi.desktop.store.MediaVault.SCRATCH_DIR_NAME),
     private val timeoutSeconds: Long = DEFAULT_TIMEOUT_SECONDS,
 ) : AudioTranscoder {
 

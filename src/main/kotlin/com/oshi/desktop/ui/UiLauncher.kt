@@ -3,6 +3,8 @@ package com.oshi.desktop.ui
 import com.oshi.desktop.app.OshiClient
 import com.oshi.desktop.net.V2Http
 import com.oshi.desktop.store.DesktopPaths
+import com.oshi.desktop.store.IdentityStore
+import com.oshi.desktop.store.KeyVault
 import com.oshi.desktop.store.SecretStore
 import java.io.File
 
@@ -23,8 +25,8 @@ import java.io.File
  * Exactly what the REPL does: opens the vault (refusing loudly on a wrong or missing master
  * key rather than minting a fresh identity over the old one), then starts the poll loop —
  * which is what publishes a prekey bundle once the rollout gate has been read, and what makes
- * inbound messages arrive at all. There is no push on desktop (PARITY.md row 2.3), so
- * **closing this window stops delivery**; the account pane says so on screen.
+ * inbound messages arrive at all. There is no push on desktop (PARITY.md row 2.3), so closing
+ * the window now HIDES it to the tray/menu bar and delivery continues; only Quit stops it.
  *
  * THE MESH IS OFF HERE, and that is a decision rather than an omission. `--client` takes the
  * mesh up because its `/peers` command and its `[mesh, unreadable]` diagnostics have somewhere
@@ -42,6 +44,37 @@ fun runUiCli(args: Array<String>) {
     val passphrase = System.getenv("OSHI_PASSPHRASE")?.toCharArray()
 
     val store = SecretStore.detect()
+    // Recovery happens before OshiClient's loadOrCreate. An existing profile is NEVER
+    // overwritten; on an empty profile the first window lets the person explicitly choose
+    // between a fresh identity and importing the mobile recovery key. `--restore-identity`
+    // remains useful to open the import-only screen directly.
+    val restored = if (args.contains("--restore-identity")) {
+        val vault = try {
+            KeyVault.open(File(home, KeyVault.FILE_NAME), store, passphrase)
+        } catch (e: Exception) {
+            System.err.println("Cannot open this account for restore:\n${e.message}")
+            return
+        }
+        if (IdentityStore.hasAnyAccountMaterial(vault)) {
+            System.err.println("This desktop profile already contains identity material; restoration will not overwrite it.")
+            return
+        }
+        if (!restoreIdentityWindow(vault)) return
+        true
+    } else {
+        val vault = try {
+            KeyVault.open(File(home, KeyVault.FILE_NAME), store, passphrase)
+        } catch (e: Exception) {
+            System.err.println("Cannot open this account:\n${e.message}")
+            return
+        }
+        if (IdentityStore.hasAnyAccountMaterial(vault)) false
+        else when (firstRunIdentityWindow(vault)) {
+            FirstRunIdentityChoice.RESTORED -> true
+            FirstRunIdentityChoice.CREATE_NEW -> false
+            FirstRunIdentityChoice.CANCELLED -> return
+        }
+    }
     val client = try {
         OshiClient(
             home = home,
@@ -72,7 +105,7 @@ fun runUiCli(args: Array<String>) {
     // anybody. The phones answer that by seeding one conversation with the account that
     // built OSHI; this is the same seed, the same address and the same words, and it runs
     // BEFORE the window so the first frame already has something in it.
-    if (com.oshi.desktop.app.WelcomeSeeder.seedIfNeeded(
+    if (!restored && com.oshi.desktop.app.WelcomeSeeder.seedIfNeeded(
             home = home,
             selfAddress = client.address,
             contacts = client.contacts,
@@ -82,9 +115,13 @@ fun runUiCli(args: Array<String>) {
         println("  welcome : seeded a first conversation with ${com.oshi.desktop.app.WelcomeSeeder.AUTHOR_ALIAS}")
     }
 
-    client.start(withMesh = withMesh)
+    // __DESKTOP_CALL_UI_2026_09_23__ The WINDOW always listens for calls (PARITY.md row 2.1): a
+    // window that can show an incoming-call screen but never polls would ring nobody. The REPL
+    // keeps its explicit `--calls` opt-in unchanged.
+    client.start(withMesh = withMesh, callPollIntervalMs = com.oshi.desktop.call.CallLane.POLL_INTERVAL_MS)
     try {
-        runDesktopUi(client)
+        // `--hidden` is what "Open OSHI at login" registers (LoginItem): start in the tray.
+        runDesktopUi(client, startHidden = args.contains(LoginItem.HIDDEN_FLAG))
     } finally {
         client.stop()
     }

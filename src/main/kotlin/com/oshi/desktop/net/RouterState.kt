@@ -30,6 +30,12 @@ import org.json.JSONObject
 class RouterState(private val file: File) {
 
     private var lastSeq: Long = 0
+    /**
+     * __PER_DEVICE_MAILBOX_2026_09_23__ The DEVICE view's cursor, kept apart from the legacy
+     * one (CLIENT_SPEC.md §3.3): `seq` is global so `after` means the same thing in both, but
+     * each view acks different items, so one cursor would skip what the other never acked.
+     */
+    private var deviceLastSeq: Long = 0
     private val seen = LinkedHashSet<String>()
     private val retries = LinkedHashMap<String, Int>()
     private var dirty = false
@@ -44,6 +50,14 @@ class RouterState(private val file: File) {
     @Synchronized
     fun setLastSeq(v: Long) {
         if (v > lastSeq) { lastSeq = v; dirty = true }
+    }
+
+    @Synchronized
+    fun deviceLastSeq(): Long = deviceLastSeq
+
+    @Synchronized
+    fun setDeviceLastSeq(v: Long) {
+        if (v > deviceLastSeq) { deviceLastSeq = v; dirty = true }
     }
 
     /** @return true if this id is new (and now recorded); false if it was already delivered. */
@@ -81,6 +95,7 @@ class RouterState(private val file: File) {
         if (!dirty) return
         val json = JSONObject()
             .put("lastSeq", lastSeq)
+            .apply { if (deviceLastSeq > 0) put("deviceLastSeq", deviceLastSeq) }
             // Only the newest ids are persisted: the in-memory set bounds duplicates for
             // this run, the file only has to bound them across a restart. Both mobile
             // clients persist 500.
@@ -94,7 +109,7 @@ class RouterState(private val file: File) {
 
     @Synchronized
     fun clear() {
-        lastSeq = 0; seen.clear(); retries.clear(); dirty = true
+        lastSeq = 0; deviceLastSeq = 0; seen.clear(); retries.clear(); dirty = true
         flush()
     }
 
@@ -103,6 +118,7 @@ class RouterState(private val file: File) {
         try {
             val o = JSONObject(file.readText(Charsets.UTF_8))
             lastSeq = o.optLong("lastSeq", 0)
+            deviceLastSeq = o.optLong("deviceLastSeq", 0)
             o.optJSONArray("seen")?.let { arr ->
                 for (i in 0 until arr.length()) arr.optString(i).takeIf { it.isNotEmpty() }?.let(seen::add)
             }

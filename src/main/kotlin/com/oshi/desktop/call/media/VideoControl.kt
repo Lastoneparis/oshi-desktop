@@ -77,9 +77,23 @@ object VideoControl {
     const val VUPG_CAMERA_ON = 0x06
     const val VUPG_CAMERA_OFF = 0x07
 
-    /** One token per 350 ms, burst 3 — iOS's bucket verbatim (`swift:10344-10373`). */
-    const val KEYFRAME_MIN_INTERVAL_MS = 350L
-    const val KEYFRAME_BURST = 3
+    /**
+     * OUTBOUND requests on the MEDIA channel: one token per 500 ms, burst 2 (≤ 2/s — the
+     * rate a peer's encoder acts on). The sealed SIGNAL-lane copy is held to ≤ 1/s on top
+     * ([com.oshi.desktop.call.video.CallVideoSession]), as on iOS and Android
+     * (__CALL_VIDEO_SIGNAL_2026_09_23__; was iOS's 350 ms / burst 3, ≈ 170/min). One IDR
+     * answers every request raised while it is in flight.
+     */
+    const val KEYFRAME_MIN_INTERVAL_MS = 500L
+    const val KEYFRAME_BURST = 2
+
+    /**
+     * __VIDEO_ABR_2026_09_23__ INBOUND `0x0B` acted on at most once per 500 ms (~2/s), no
+     * burst: one IDR serves every request raised while it is in flight, and a cleartext
+     * flood can no longer hold the encoder at keyframes. The same rate on all three clients.
+     */
+    const val INBOUND_KEYFRAME_MIN_INTERVAL_MS = 500L
+    const val INBOUND_KEYFRAME_BURST = 1
 
     /** True for the three types whose body is `[type][timestamp 8 BE]` in the clear. */
     fun isCleartextToggle(type: Int): Boolean =
@@ -187,13 +201,13 @@ class VideoControlSession(private val nowMs: () -> Long) {
     var inboundKeyframeFloodDrops = 0L
         private set
 
-    /** Inbound `0x0B` accepted. This client can do nothing with one — see [VideoControl]. */
+    /** Inbound `0x0B` accepted (≤ 1 per 500 ms). [CallVideoSession] forces an IDR for each. */
     var inboundKeyframeRequests = 0L
         private set
 
     private var outboundTokens = VideoControl.KEYFRAME_BURST.toDouble()
     private var lastOutboundRequestMs = 0L
-    private var inboundTokens = VideoControl.KEYFRAME_BURST.toDouble()
+    private var inboundTokens = VideoControl.INBOUND_KEYFRAME_BURST.toDouble()
     private var lastInboundRequestMs = 0L
 
     /** Requests the caller was told to send but which the bucket swallowed. */
@@ -214,8 +228,8 @@ class VideoControlSession(private val nowMs: () -> Long) {
             requestKeyframe()
         }
         VideoControl.KEYFRAME_REQUEST -> {
+            // Counted here; the caller forces the IDR ([CallVideoSession]) when the count moved.
             if (!admitInboundKeyframe()) inboundKeyframeFloodDrops++ else inboundKeyframeRequests++
-            // Nothing to answer with: there is no encoder on this platform.
             emptyList()
         }
         else -> emptyList()
@@ -311,8 +325,8 @@ class VideoControlSession(private val nowMs: () -> Long) {
         val elapsed = now - lastInboundRequestMs
         if (elapsed > 0) {
             inboundTokens = minOf(
-                VideoControl.KEYFRAME_BURST.toDouble(),
-                inboundTokens + elapsed.toDouble() / VideoControl.KEYFRAME_MIN_INTERVAL_MS,
+                VideoControl.INBOUND_KEYFRAME_BURST.toDouble(),
+                inboundTokens + elapsed.toDouble() / VideoControl.INBOUND_KEYFRAME_MIN_INTERVAL_MS,
             )
         }
         if (inboundTokens < 1.0) return false

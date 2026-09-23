@@ -162,7 +162,31 @@ class StringsFileTest {
         // Bumping it without regenerating silences the alarm and ships stale catalogs.
         // 3824 → 3840 on 2026-09-11: sixteen keys added upstream, chat.load_earlier_messages
         // among them.
-        assertEquals("en Localizable key count", 3840, en.localizable.size)
+        // 3840 → 3960 on 2026-09-17, regenerated in this same change: 82 mail.*, 21
+        // premium.* (the new StoreKit paywall), 10 about.*, 8 bot.*, 5 settings.*, and a
+        // handful more. The about.* ones are a correction, not an addition — iOS stopped
+        // describing the encryption as "military-grade" and now names Double Ratchet, and
+        // the checked-in catalogs were still shipping the old claim in all 34 languages.
+        // 3960 → 3983 on 2026-09-20: GIF, short-video, LoRa-media and offline
+        // navigation copy was added in the iOS source and the checked-in desktop mirror
+        // was regenerated in the same change.
+        // 3983 → 3987 on 2026-09-22: nickname-edit copy was added in the iOS source and
+        // the checked-in desktop fallback catalog was regenerated in the same change.
+        // 3987 → 4003 on 2026-09-22: __CALL_RATING_2026_09_22__, the post-call quality
+        // rating, added 16 keys to the iOS source in all 34 languages — the sheet on the
+        // phones and the `/rate` prompt here — and the catalogs were regenerated with
+        // `./gradlew i18nExtract` in the same change.
+        // 4003 → 4011 on 2026-09-22: __ENCRYPTED_EXPORT_2026_09_22__, the encrypted
+        // message export/import, added 8 keys (settings.data.importMessages[.done] and six
+        // export.error.*) to the iOS source in all 34 languages, and the catalogs were
+        // regenerated with `./gradlew i18nExtract` in the same change.
+        // 4011 → 4012 on 2026-09-22: __SHARED_NICKNAME_2026_09_22__, `contact.shared_nickname`
+        // ("Nickname: %@", the peer's own name shown under a local alias) was added to the
+        // iOS source in all 34 languages and the catalogs were regenerated in the same change.
+        // 4012 → 4046 on 2026-09-23: __GROUP_E2E_V2_2026_09_23__ re-extraction for
+        // `group.member_must_update` (GROUP_E2E_V2_SPEC §6), which also brought in the other keys
+        // the iOS source gained since the last extraction.
+        assertEquals("en Localizable key count", 4046, en.localizable.size)
         assertEquals("en InfoPlist key count", 16, en.infoPlist.size)
         assertEquals("Messages", en.localizable["tab.messages"])
         // Spot-check a value with an escape and one with a bare percent.

@@ -53,7 +53,7 @@ import java.util.UUID
  * records, which is the better place to say it.
  */
 class VoiceNotes(
-    private val workDir: File = DesktopPaths.file("media"),
+    private val workDir: File = DesktopPaths.file(com.oshi.desktop.store.MediaVault.SCRATCH_DIR_NAME),
     private val devices: AudioDevices = AudioDevices.JavaSound,
     private val transcoder: AudioTranscoder = SystemAudioTranscoder(workDir = workDir),
     private val recorder: AudioRecorder = AudioRecorder(devices = devices, workDir = workDir),
@@ -167,10 +167,19 @@ class VoiceNotes(
      * read the samples, does not load the file into RAM. Null when the container is not
      * one of the two this client understands, or its header does not state a duration.
      */
-    fun durationMs(file: File): Long? = AudioDurationProbe.of(file)?.durationMs
+    fun durationMs(file: File): Long? = probe(file)?.durationMs
 
-    /** The full probe: container, duration, and rate/channels where the header says. */
-    fun probe(file: File): AudioDurationProbe.Info? = AudioDurationProbe.of(file)
+    /**
+     * The full probe: container, duration, and rate/channels where the header says.
+     * A sealed attachment (`MediaVault`) is probed through a scratch copy that is deleted
+     * before this returns — the header of the ciphertext says nothing.
+     */
+    fun probe(file: File): AudioDurationProbe.Info? {
+        if (!com.oshi.desktop.store.MediaVault.isSealed(file)) return AudioDurationProbe.of(file)
+        val vault = com.oshi.desktop.store.MediaVault.current() ?: return null
+        val plain = runCatching { vault.decryptToScratch(file) }.getOrNull() ?: return null
+        return try { AudioDurationProbe.of(plain) } finally { plain.delete() }
+    }
 
     /** `0:07`, the shape both phones print (`AudioMessageView.formatTime`). */
     fun formatDuration(millis: Long): String {

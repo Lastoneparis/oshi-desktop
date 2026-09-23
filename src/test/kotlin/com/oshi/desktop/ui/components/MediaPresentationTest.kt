@@ -123,7 +123,7 @@ class MediaPresentationTest {
     @Test
     fun `a card never calls a non-image a photo`() {
         assertFalse(MediaPresentation.cardLabel(MediaType.DOCUMENT).lowercase().contains("image"))
-        assertTrue(MediaPresentation.cardLabel(MediaType.AUDIO).contains("no player"))
+        assertTrue(MediaPresentation.cardLabel(MediaType.AUDIO).contains("click to play"))
         assertTrue(MediaPresentation.cardLabel(MediaType.VIDEO).contains("no player"))
     }
 

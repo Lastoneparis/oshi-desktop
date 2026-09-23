@@ -3,8 +3,9 @@ package com.oshi.desktop.app
 import com.oshi.desktop.group.GroupDefinition
 import com.oshi.desktop.group.GroupIdentity
 import com.oshi.desktop.group.GroupUpdateWire
-import com.oshi.desktop.store.AtomicFile
 import com.oshi.desktop.store.DesktopPaths
+import com.oshi.desktop.store.LocalDataKeys
+import com.oshi.desktop.store.SealedJsonFile
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -31,10 +32,15 @@ import java.io.File
  * the way [com.oshi.desktop.store.ContactStore] handles a damaged file — by raising rather
  * than by reading as empty, because "you are in no groups" is a lie a user acts on.
  *
- * Not encrypted, same posture as the message log and the contact list: see
- * [com.oshi.desktop.store.MessageStore]'s threat-model note.
+ * __LOCAL_DATA_AT_REST_2026_09_22__ Encrypted at rest when [atRestKey] is given (always, from
+ * `OshiClient`): a [SealedJsonFile] envelope under HKDF subkey [LocalDataKeys.GROUPS]. A legacy
+ * plaintext file is migrated through the verified write and left untouched if that fails; a
+ * sealed file that cannot be opened raises [GroupStoreException] and is never read as empty.
  */
-class GroupStore(private val file: File = DesktopPaths.file("groups.json")) {
+class GroupStore(
+    private val file: File = DesktopPaths.file("groups.json"),
+    private val atRestKey: ByteArray? = null,
+) {
 
     @Volatile
     private var cache: MutableMap<String, GroupDefinition>? = null
@@ -57,6 +63,23 @@ class GroupStore(private val file: File = DesktopPaths.file("groups.json")) {
         return group
     }
 
+    /**
+     * __GROUP_PARITY_2026_09_23__ Groups blocked on this device (iOS `blockedGroups`). Kept by id
+     * and outliving the definition, like iOS's list: a blocked group that is deleted and comes
+     * back is still blocked.
+     */
+    private var blocked: MutableSet<String> = mutableSetOf()
+
+    @Synchronized
+    fun isBlocked(groupId: String): Boolean { load(); return GroupIdentity.canonicalGroupId(groupId) in blocked }
+
+    @Synchronized
+    fun setBlocked(groupId: String, isBlocked: Boolean) {
+        val map = load()
+        val gid = GroupIdentity.canonicalGroupId(groupId)
+        if (if (isBlocked) blocked.add(gid) else blocked.remove(gid)) persist(map)
+    }
+
     /** Forget a group entirely — what leaving one does locally. */
     @Synchronized
     fun delete(groupId: String): Boolean {
@@ -74,20 +97,32 @@ class GroupStore(private val file: File = DesktopPaths.file("groups.json")) {
     private fun load(): MutableMap<String, GroupDefinition> {
         cache?.let { return it }
         val map = LinkedHashMap<String, GroupDefinition>()
-        if (file.isFile) {
+        val read = try {
+            SealedJsonFile.read(file, atRestKey, LocalDataKeys.GROUPS)
+        } catch (e: Exception) {
+            throw GroupStoreException("groups file at ${file.absolutePath} is unreadable", e)
+        }
+        if (read != null) {
             val o = try {
-                JSONObject(file.readText(Charsets.UTF_8))
+                JSONObject(read.json)
             } catch (e: Exception) {
                 // Same refusal as ContactStore: a damaged file must not read as "no groups".
                 throw GroupStoreException("groups file at ${file.absolutePath} is unreadable", e)
             }
             val arr = o.optJSONArray("groups") ?: JSONArray()
+            // __GROUP_PARITY_2026_09_23__ `isMuted` is local-only and the wire codec always
+            // writes false (Android's pin, iOS re-imposes its own), so it is kept beside the
+            // definitions rather than inside them.
+            val muted = o.optJSONArray("muted")?.let { m -> (0 until m.length()).map { m.optString(it) }.toSet() }.orEmpty()
+            blocked = o.optJSONArray("blocked")?.let { b -> (0 until b.length()).map { b.optString(it) }.toMutableSet() } ?: mutableSetOf()
             for (i in 0 until arr.length()) {
                 val body = arr.optString(i, "")
                 if (body.isEmpty()) continue
                 when (val decoded = GroupUpdateWire.decodeDefinition(body)) {
-                    is GroupUpdateWire.GroupUpdateDecode.Ok ->
-                        map[GroupIdentity.canonicalGroupId(decoded.definition.groupId)] = decoded.definition
+                    is GroupUpdateWire.GroupUpdateDecode.Ok -> {
+                        val gid = GroupIdentity.canonicalGroupId(decoded.definition.groupId)
+                        map[gid] = decoded.definition.copy(isMuted = gid in muted)
+                    }
                     else -> throw GroupStoreException(
                         "a stored group definition no longer decodes (${decoded.javaClass.simpleName}). " +
                             "The store holds the same JSON an iPhone accepts, so this means the codec " +
@@ -97,14 +132,23 @@ class GroupStore(private val file: File = DesktopPaths.file("groups.json")) {
             }
         }
         cache = map
-        return map
+        // Every definition decoded (a bad one throws above), so the sealed copy loses nothing.
+        if (read != null && !read.sealed && atRestKey != null) {
+            runCatching { persist(map) } // failure leaves the plaintext file; retried next open
+        }
+        return cache ?: map
     }
 
     private fun persist(map: Map<String, GroupDefinition>) {
         val arr = JSONArray()
         for (g in map.values) arr.put(GroupUpdateWire.encodeDefinition(g))
-        val json = JSONObject().put("v", 1).put("groups", arr).toString()
-        AtomicFile.write(file, json.toByteArray(Charsets.UTF_8))
+        val muted = JSONArray()
+        for ((gid, g) in map) if (g.isMuted) muted.put(gid)
+        val json = JSONObject().put("v", 1).put("groups", arr).put("muted", muted)
+            .put("blocked", JSONArray(blocked.sorted())).toString()
+        SealedJsonFile.write(file, atRestKey, LocalDataKeys.GROUPS, json) { back ->
+            JSONObject(back).getJSONArray("groups").length() == map.size
+        }
         cache = LinkedHashMap(map)
     }
 }

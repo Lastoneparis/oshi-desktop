@@ -42,15 +42,13 @@ object DesktopLimits {
      */
     val MISSING: List<Limit> = listOf(
         Limit(
-            "Voice and video calls — NO AUDIO EVER FLOWS",
-            "PARITY.md row 2.1. Signalling now works and is reachable from the REPL " +
-                "(/call, /answer, /decline, /hangup, behind --calls) — a ring really does " +
-                "cross a machine boundary. What does NOT exist is media: no capture, no " +
-                "playback, no UDP socket, no codec running. CallAudioSession is referenced " +
-                "by nothing in the repository. A connected call is two devices agreeing and " +
-                "SILENCE. Video additionally has no send half (no javax.video) and no display " +
-                "half (no H.264 decoder on the JVM). A call button here would be the worst " +
-                "thing this window could draw, which is why there is not one.",
+            "Video calls; call controls in this window",
+            "PARITY.md row 2.1. The REPL has an experimental audio lane behind --calls: it " +
+                "opens Java Sound capture/playback and UDP/ICE and ends a call if it cannot " +
+                "open a media path. It has only loopback test evidence, no TURN fallback, and " +
+                "has not been validated between real desktop devices or phones. This window " +
+                "does not yet render call controls, so it cannot safely advertise calling. " +
+                "Video has no camera capture, encoder, decoder or renderer on this desktop.",
         ),
         Limit(
             "Finding yourself on a map, navigation, live location, check-ins",
@@ -82,18 +80,17 @@ object DesktopLimits {
                 "wearable story at all.",
         ),
         Limit(
-            "Camera capture and QR scanning",
-            "VIEWS.md §6. No desktop machine is guaranteed a webcam. Pairing is paste-the-key; " +
-                "`/qr` in the REPL prints this account's own code as text or a PNG.",
+            "Live camera QR capture",
+            "VIEWS.md §6. No desktop machine is guaranteed a webcam. The New conversation screen " +
+                "does scan a selected screenshot or photo of a phone QR code, and still accepts " +
+                "pasted keys; only live webcam capture is unavailable.",
         ),
         Limit(
             "\"Sync with your phone\"",
-            "PARITY.md row 0.24, and this is a hard NO rather than a not-yet. Multi-device sync is " +
-                "same-key by definition, and IdentityStore has exactly one writer of the account " +
-                "private key: loadOrCreate, which GENERATES. There is no import and no restore, so " +
-                "this client is always a SEPARATE OSHI account with its own archive slot. The row " +
-                "says it outright: until an identity-import flow is designed, no UI copy may offer " +
-                "to sync with your phone.",
+            "PARITY.md row 0.24. An empty desktop profile can restore the same identity from an " +
+                "iOS/Android recovery key, but history and group synchronisation remain unavailable: " +
+                "phones do not yet write the owner-authenticated V2 archive this client requires. " +
+                "The unauthenticated legacy archive is deliberately not enabled here.",
         ),
         Limit(
             "Reading anything the LAN mesh or a LoRa radio carries",
@@ -122,7 +119,7 @@ object DesktopLimits {
      */
     val NOT_IN_THIS_WINDOW: List<Limit> = listOf(
         Limit(
-            "Playing a video or a voice note that arrived",
+            "Playing a video that arrived",
             "PARITY.md rows 0.15 and 1.4. Pictures now OPEN here: an inbound photo is a thumbnail " +
                 "in the bubble and a full-size view when you click it, decoded from the file the " +
                 "blob path decrypted to this disk, with the format, the dimensions and the size " +
@@ -130,26 +127,22 @@ object DesktopLimits {
                 "ceilings, each stated on screen when it bites — 64 MiB of file and 32 megapixels " +
                 "of image — so that a file a stranger chose cannot decide how much memory this " +
                 "window allocates; and a file that does not end the way its format requires is " +
-                "still shown and is SAID to be incomplete. What is NOT here is playback: a video " +
-                "and a voice note are named and located and explicitly not played, because a play " +
-                "button that produced silence is the one thing worse than no button. The client " +
-                "grew an audio path of its own (`media/AudioPlayer`, which transcodes the m4a the " +
-                "JDK cannot open) and it is wired to nothing outside its tests and has never been " +
-                "heard on any machine — so this is a window gap for audio and, for video, no " +
-                "decoder anywhere in this project outside the call lane.",
+                "still shown and is SAID to be incomplete. Voice notes have a play/stop control " +
+                "here and use `media/AudioPlayer`, which transcodes the m4a the JDK cannot open " +
+                "and reports device/decoder failures in the viewer. Its test device is fake, so " +
+                "a real speaker remains unverified. What is NOT here is video playback: the video " +
+                "is named and located, explicitly not played, and no video decoder exists outside " +
+                "the call lane.",
         ),
         Limit(
-            "Creating and administering groups",
+            "Advanced group administration",
             "PARITY.md row 0.17, partial, three sub-rows blocked. SENDING into a group works here " +
                 "now (a fan-out over one ratchet session per member, with the outcome line naming " +
-                "how many took it) and groups have their own half of the list. Creating one, " +
-                "adding and removing members, and renaming are REPL-only: /group.",
-        ),
-        Limit(
-            "Voice notes",
-            "PARITY.md row 0.12. Recorded and encoded by this client in the container the phones " +
-                "record, and watched crossing to a handset. The window has no microphone control " +
-                "and no waveform. REPL: /sendfile with a recorded file.",
+                "how many took it), groups have their own half of the list, and a new group can " +
+                "be created there from known unblocked contacts. Group admins can rename from the " +
+                "thread header; the roster lets an admin add known unblocked contacts, remove " +
+                "other members, and promote or demote other members. The creator role is permanent. " +
+                "Leaving a group and other advanced operations remain REPL-only: /group.",
         ),
         Limit(
             "Bot channels",
@@ -158,30 +151,30 @@ object DesktopLimits {
                 "every send.",
         ),
         Limit(
-            "Reactions, edits, deletes, typing and read receipts",
+            "None for direct-message controls",
             "PARITY.md row 0.18. All four epochs are converted in one place and the SEND half " +
                 "works; receive-from-Android is structurally dead per that row. This window " +
-                "DISPLAYS reactions, edits and deletes that arrived, and has no controls to " +
-                "create them. REPL: /react, /edit, /delete, /typing, /read.",
+                "displays reactions, edits and deletes that arrived, and direct-message bubbles " +
+                "can add reactions or edit/delete their own messages. Opening a direct thread " +
+                "sends the privacy-gated read receipt, and composing sends debounced typing " +
+                "start/stop pings. Inbound direct typing appears transiently and auto-clears. " +
+                "REPL: /typing, /read.",
         ),
         Limit(
-            "Marking a safety number verified",
-            "PARITY.md rows 0.14, 0.20, 0.21. Contacts, blocking and unblocking, and every " +
-                "contact's safety number are all under More in this window. What is NOT here is " +
-                "the act of recording that you compared one out loud — REPL: /verify — because " +
-                "verification is a claim about something that happened away from the screen and " +
-                "this window has no way to witness it.",
-        ),
-        Limit(
-            "Scheduled messages, sync, LoRa attach, account deletion",
-            "PARITY.md rows 0.25, 0.24, 0.27, 0.11. All reachable from the REPL: /schedule, " +
-                "/sync, /lora, /deleteaccount.",
+            "LoRa attach, account deletion and sync checkpointing",
+            "PARITY.md rows 0.25, 0.24, 0.27, 0.11. Account now exposes the non-destructive " +
+                "V2 contact-archive push and pull actions, with the result stated there. A sync " +
+                "checkpoint remains REPL-only because it deletes server archive items other devices " +
+                "may not have consumed. The local scheduled-delivery queue is visible under More, " +
+                "including its due time and status. It can schedule, edit and cancel known unblocked " +
+                "direct contacts and groups this account belongs to. The others are REPL-only: " +
+                "/sync checkpoint, /lora, /deleteaccount.",
         ),
         Limit(
             "Localisation",
-            "PARITY.md row 1.5. 34 catalogs ship and the REPL uses 12 keys from them. This " +
-                "window's strings are English literals apart from one shared key, so adding it " +
-                "did not move that number and this pane must not be read as 34-locale coverage.",
+            "PARITY.md row 1.5. 34 catalogs ship and the window reaches 41 shared keys from " +
+                "them. Desktop-only copy remains English by design, so that measured coverage " +
+                "does not mean every sentence in this pane is translated.",
         ),
     )
 }

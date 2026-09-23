@@ -43,8 +43,42 @@ class SessionStore(private val vault: KeyVault) {
     )
 
     @Synchronized
-    fun load(peerUserKey: String): Record? {
-        val raw = vault.get(key(peerUserKey)) ?: return null
+    fun load(peerUserKey: String): Record? = loadKey(key(peerUserKey), peerUserKey)
+
+    // __PER_DEVICE_MAILBOX_2026_09_23__ Sessions keyed by (peer, peerDeviceId?)
+    // (CLIENT_SPEC.md §3.4). `deviceId == null` IS the legacy session — the same vault entry
+    // as [load] — so nothing that existed before this change moves. A device session lives
+    // under its own prefix, which [peers] does not list: a safety-number or contact view
+    // keeps seeing one entry per contact, not one per contact's device.
+
+    @Synchronized
+    fun load(peerUserKey: String, deviceId: String?): Record? =
+        if (deviceId == null) load(peerUserKey) else loadKey(deviceKey(peerUserKey, deviceId), peerUserKey)
+
+    @Synchronized
+    fun save(rec: Record, deviceId: String?) {
+        if (deviceId == null) save(rec)
+        else vault.put(deviceKey(rec.peerUserKey, deviceId), serialize(rec).toString().toByteArray(Charsets.UTF_8))
+    }
+
+    @Synchronized
+    fun has(peerUserKey: String, deviceId: String?): Boolean =
+        if (deviceId == null) has(peerUserKey) else vault.get(deviceKey(peerUserKey, deviceId)) != null
+
+    @Synchronized
+    fun delete(peerUserKey: String, deviceId: String?) =
+        if (deviceId == null) delete(peerUserKey) else vault.delete(deviceKey(peerUserKey, deviceId))
+
+    /** The device ids we hold a session with for [peerUserKey]. */
+    @Synchronized
+    fun deviceSessions(peerUserKey: String): List<String> =
+        vault.accounts().filter { it.startsWith(DEVICE_PREFIX) && it.endsWith(".$peerUserKey") }
+            .map { it.removePrefix(DEVICE_PREFIX).substringBefore('.') }
+
+    private fun deviceKey(peer: String, deviceId: String) = "$DEVICE_PREFIX$deviceId.$peer"
+
+    private fun loadKey(vaultKey: String, peerUserKey: String): Record? {
+        val raw = vault.get(vaultKey) ?: return null
         return try {
             deserialize(JSONObject(String(raw, Charsets.UTF_8)))
         } catch (e: Exception) {
@@ -68,9 +102,12 @@ class SessionStore(private val vault: KeyVault) {
     @Synchronized
     fun delete(peerUserKey: String) = vault.delete(key(peerUserKey))
 
-    /** Account deletion. Every session, gone. */
+    /** Account deletion. Every session, gone — the per-device ones included. */
     @Synchronized
-    fun clear() = peers().forEach { delete(it) }
+    fun clear() {
+        peers().forEach { delete(it) }
+        vault.accounts().filter { it.startsWith(DEVICE_PREFIX) }.forEach { vault.delete(it) }
+    }
 
     private fun key(peer: String) = PREFIX + peer
 
@@ -139,7 +176,10 @@ class SessionStore(private val vault: KeyVault) {
     private fun b64(b: ByteArray) = Base64.getEncoder().encodeToString(b)
     private fun unb64(s: String) = Base64.getDecoder().decode(s)
 
-    companion object { const val PREFIX = "v2.session." }
+    companion object {
+        const val PREFIX = "v2.session."
+        const val DEVICE_PREFIX = "v2.devsession."
+    }
 }
 
 class SessionStoreException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)

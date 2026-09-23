@@ -43,6 +43,14 @@ data class DesktopEnvelope(
     val ciphertext: ByteArray,  // ct‖tag
     val ts: Long,               // epoch MILLISECONDS
     val seq: Long = -1,         // server-assigned on pull only; never serialized
+    /**
+     * __PER_DEVICE_MAILBOX_2026_09_23__ Per-device routing (CLIENT_SPEC.md §3.5): 32
+     * lowercase hex each. OMITTED when null, and emitted LAST, so an envelope without them is
+     * byte-identical to what every build sent before — the relay's idempotency hash and
+     * WireFormatTest both depend on that.
+     */
+    val toDevice: String? = null,
+    val fromDevice: String? = null,
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("v", 4)
@@ -62,6 +70,8 @@ data class DesktopEnvelope(
         put("header", b64(header))
         put("ciphertext", b64(ciphertext))
         put("ts", ts)
+        toDevice?.let { put("toDevice", it) }
+        fromDevice?.let { put("fromDevice", it) }
     }
 
     /**
@@ -99,6 +109,8 @@ data class DesktopEnvelope(
         comma(); field("header", b64(header))
         comma(); field("ciphertext", b64(ciphertext))
         comma(); field("ts", ts)
+        toDevice?.let { comma(); field("toDevice", it) }
+        fromDevice?.let { comma(); field("fromDevice", it) }
         append("}")
     }.toByteArray(Charsets.UTF_8)
 
@@ -147,6 +159,8 @@ data class DesktopEnvelope(
                 ciphertext = unb64(o.getString("ciphertext")),
                 ts = o.optLong("ts", 0),
                 seq = o.optLong("seq", -1),
+                toDevice = if (o.has("toDevice") && !o.isNull("toDevice")) o.optString("toDevice") else null,
+                fromDevice = if (o.has("fromDevice") && !o.isNull("fromDevice")) o.optString("fromDevice") else null,
             )
         }
     }

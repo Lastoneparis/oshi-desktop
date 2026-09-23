@@ -159,7 +159,11 @@ object HolePunch {
     fun pongFor(ping: ByteArray): ByteArray? {
         if (ping.size < PACKET_SIZE) return null
         if (ping[0] != TYPE_PING) return null
-        val out = ping.copyOf(PACKET_SIZE)
+        // __RELAY_FIRST_UPGRADE_2026_09_23__ a pong is a byte copy of the WHOLE ping, like
+        // iOS/Android: phones verify a direct pair with a media-sized (1200/2000 B) padded
+        // ping and only count a pong of that size. Truncating to 29 B made every desktop pair
+        // look fragment-dropping, so a phone never used direct with a desktop.
+        val out = ping.copyOf()
         out[0] = TYPE_PONG
         return out
     }

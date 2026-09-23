@@ -33,7 +33,16 @@ import java.util.UUID
  * protection as the identity instead of sitting in a plain file the way Android's did
  * until its migration.
  */
-class PrekeyStore(private val vault: KeyVault) {
+class PrekeyStore(
+    private val vault: KeyVault,
+    /**
+     * __PER_DEVICE_MAILBOX_2026_09_23__ Which vault entry holds this pool. The ACCOUNT bundle
+     * uses [VAULT_ACCOUNT]; this install's PER-DEVICE bundle uses [DEVICE_VAULT_ACCOUNT] — a
+     * separate signed pre-key and a separate one-time pool, because a sender's X3DH against
+     * the device bundle must never be answerable with (or burn) an account pre-key.
+     */
+    private val vaultAccount: String = VAULT_ACCOUNT,
+) {
 
     data class SignedPreKey(val keyId: String, val pair: OSHICryptoV2.X25519Pair)
 
@@ -119,18 +128,19 @@ class PrekeyStore(private val vault: KeyVault) {
     fun markPublished() { write(read().put(PUBLISHED, true)) }
 
     @Synchronized
-    fun clear() = vault.delete(VAULT_ACCOUNT)
+    fun clear() = vault.delete(vaultAccount)
 
     private fun read(): JSONObject =
-        vault.get(VAULT_ACCOUNT)?.let { JSONObject(String(it, Charsets.UTF_8)) } ?: JSONObject()
+        vault.get(vaultAccount)?.let { JSONObject(String(it, Charsets.UTF_8)) } ?: JSONObject()
 
-    private fun write(o: JSONObject) = vault.put(VAULT_ACCOUNT, o.toString().toByteArray(Charsets.UTF_8))
+    private fun write(o: JSONObject) = vault.put(vaultAccount, o.toString().toByteArray(Charsets.UTF_8))
 
     private fun b64(b: ByteArray) = Base64.getEncoder().encodeToString(b)
     private fun unb64(s: String) = Base64.getDecoder().decode(s)
 
     companion object {
         const val VAULT_ACCOUNT = "v2.prekeys"
+        const val DEVICE_VAULT_ACCOUNT = "v2.device-prekeys"
         const val SPK = "spk"
         const val OPK = "opk"
         const val PUBLISHED = "published"
