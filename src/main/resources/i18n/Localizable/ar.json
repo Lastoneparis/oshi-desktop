@@ -1290,6 +1290,7 @@
   "group.member.send_message": "إرسال رسالة",
   "group.member.view_profile": "عرض الملف الشخصي",
   "group.member.you_admin": "أنت (مسؤول)",
+  "group.member_must_update": "يجب على %@ تحديث OSHI لتلقي رسائل هذه المجموعة",
   "group.mute": "كتم الإشعارات",
   "group.mute_group": "كتم صوت المجموعة",
   "group.no_contacts": "لا توجد جهات اتصال متاحة",

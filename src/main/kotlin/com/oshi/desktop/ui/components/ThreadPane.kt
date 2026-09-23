@@ -15,7 +15,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -33,6 +35,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isShiftPressed
@@ -56,6 +59,7 @@ import com.oshi.desktop.ui.state.ConversationKind
 import com.oshi.desktop.ui.state.DesktopLimits
 import com.oshi.desktop.ui.state.MessageRow
 import com.oshi.desktop.ui.state.Notice
+import com.oshi.desktop.ui.state.QuoteRow
 import com.oshi.desktop.ui.state.Severity
 import com.oshi.desktop.ui.state.ThreadView
 import java.time.LocalDate
@@ -96,6 +100,7 @@ fun ThreadPane(
     onAttach: () -> Unit,
     onVoiceNote: (VoiceNote) -> Unit,
     onRenameGroup: (String) -> Unit,
+    onGif: ((java.io.File) -> Unit)? = null,   // __GIF_PACK_2026_09_23__
     onReact: (String, String) -> Unit,
     onEditMessage: (String, String) -> Unit,
     onDeleteMessage: (String) -> Unit,
@@ -111,6 +116,24 @@ fun ThreadPane(
     onCall: ((video: Boolean) -> Unit)? = null,
     /** __GROUP_E2E_V2_2026_09_23__ Leave the open group (confirmed in the header). */
     onLeaveGroup: () -> Unit = {},
+    /** __GROUP_PARITY_2026_09_23__ reply to a message, and the draft's current reply target. */
+    onReply: (String) -> Unit = {},
+    replyingTo: QuoteRow? = null,
+    onCancelReply: () -> Unit = {},
+    /** __GROUP_PARITY_2026_09_23__ group picture and local mute. */
+    onSetGroupPicture: () -> Unit = {},
+    onRemoveGroupPicture: () -> Unit = {},
+    onSetGroupMuted: (Boolean) -> Unit = {},
+    /** __GROUP_PARITY_2026_09_23__ the rest of iOS's group sheet. */
+    onSetGroupDescription: (String) -> Unit = {},
+    onSetGroupBlocked: (Boolean) -> Unit = {},
+    onDeleteGroup: () -> Unit = {},
+    onPin: (String?) -> Unit = {},
+    onDeleteForMe: (String) -> Unit = {},
+    onForward: (messageId: String, toAddress: String) -> Unit = { _, _ -> },
+    onCopy: (String) -> Unit = {},
+    /** __MENTIONS_2026_09_23__ a member picked from the `@` picker (groups only). */
+    onPickMention: (com.oshi.desktop.group.MentionWire.Mention) -> Unit = {},
 ) {
     var pickerOpen by remember(thread.conversationId) { mutableStateOf(false) }
 
@@ -126,17 +149,26 @@ fun ThreadPane(
                 ThreadHeader(
                     thread, wallpaper, pickerOpen, onRenameGroup, onAddGroupMember, onRemoveGroupMember, onSetGroupMemberAdmin,
                     onLeaveGroup = onLeaveGroup,
+                    onSetGroupPicture = onSetGroupPicture,
+                    onRemoveGroupPicture = onRemoveGroupPicture,
+                    onSetGroupMuted = onSetGroupMuted,
+                    onSetGroupDescription = onSetGroupDescription,
+                    onSetGroupBlocked = onSetGroupBlocked,
+                    onDeleteGroup = onDeleteGroup,
+                    onCopy = onCopy,
                     // __DESKTOP_CALL_UI_2026_09_23__ 1:1 only — like iOS, which offers no call in a
                     // group, and never in a bot or radio thread: neither has a peer that can answer.
                     onCall = onCall?.takeIf { thread.kind == ConversationKind.DIRECT },
                 ) { pickerOpen = !pickerOpen }
                 Hairline()
+                thread.groupPinned?.let { PinnedBar(it, canUnpin = thread.groupCanEditInfo) { onPin(null) } }
+                thread.botSealing?.let { BotSealLabel(it) }
 
                 Box(Modifier.weight(1f).fillMaxWidth()) {
                     if (thread.messages.isEmpty()) {
                         EmptyThread(thread.kind)
                     } else {
-                        MessageLog(thread, wallpaper, viewOnce, revealed, onReveal, onReact, onEditMessage, onDeleteMessage, today)
+                        MessageLog(thread, wallpaper, viewOnce, revealed, onReveal, onReact, onEditMessage, onDeleteMessage, today, onReply, onPin, onDeleteForMe, onForward)
                     }
                     if (pickerOpen) {
                         Box(Modifier.fillMaxSize().padding(OshiTheme.lg), contentAlignment = Alignment.TopEnd) {
@@ -151,7 +183,16 @@ fun ThreadPane(
 
                 notice?.let { NoticeBar(it) }
                 Hairline()
-                    Composer(thread.conversationId, thread.composer, busy, draft, onDraft, onSend, onAttach, onVoiceNote)
+                if (thread.groupBlocked) BlockedGroupBanner { onSetGroupBlocked(false) }
+                if (replyingTo != null && thread.composer.enabled) ReplyBanner(replyingTo, onCancelReply)
+                Composer(thread.conversationId, thread.composer, busy, draft, onDraft, onSend, onAttach, onVoiceNote,
+                    // Neither phone offers the GIF picker in a group chat (iOS ChatView only; Android the same).
+                    onGif.takeIf { thread.kind != com.oshi.desktop.ui.state.ConversationKind.GROUP },
+                    // __MENTIONS_2026_09_23__ `@` picker: group members other than ourselves.
+                    mentionMembers = if (thread.kind == com.oshi.desktop.ui.state.ConversationKind.GROUP)
+                        thread.groupMembers.filter { !it.self }.map { com.oshi.desktop.group.MentionWire.Mention(it.address, it.label.trim()) }
+                    else emptyList(),
+                    onPickMention = onPickMention)
             }
         }
     }
@@ -170,8 +211,19 @@ private fun ThreadHeader(
     onSetGroupMemberAdmin: (String, Boolean) -> Unit,
     onCall: ((video: Boolean) -> Unit)? = null,
     onLeaveGroup: () -> Unit = {},
+    onSetGroupPicture: () -> Unit = {},
+    onRemoveGroupPicture: () -> Unit = {},
+    onSetGroupMuted: (Boolean) -> Unit = {},
+    onSetGroupDescription: (String) -> Unit = {},
+    onSetGroupBlocked: (Boolean) -> Unit = {},
+    onDeleteGroup: () -> Unit = {},
+    onCopy: (String) -> Unit = {},
     onWallpaper: () -> Unit,
 ) {
+    var editingDescription by remember(thread.conversationId) { mutableStateOf(false) }
+    var typedDescription by remember(thread.conversationId, thread.groupDescription) { mutableStateOf(thread.groupDescription.orEmpty()) }
+    var showInvite by remember(thread.conversationId) { mutableStateOf(false) }
+    var confirmDelete by remember(thread.conversationId) { mutableStateOf(false) }
     var confirmLeave by remember(thread.conversationId) { mutableStateOf(false) }
     var editingName by remember(thread.conversationId) { mutableStateOf(false) }
     var typedName by remember(thread.conversationId) { mutableStateOf(thread.title) }
@@ -185,7 +237,7 @@ private fun ThreadHeader(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(OshiTheme.md),
     ) {
-        Monogram(thread.title, thread.address, Metrics.avatarHeader)
+        GroupAvatar(thread.groupPictureBase64, thread.title, thread.address, Metrics.avatarHeader)
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm)) {
                 if (editingName) {
@@ -228,6 +280,10 @@ private fun ThreadHeader(
                 Spacer(Modifier.height(OshiTheme.xxs))
                 Text(t("typing.indicator", thread.title), fontSize = 11.sp, color = OshiTheme.brand)
             }
+            if (thread.typingNames.isNotEmpty()) {
+                Spacer(Modifier.height(OshiTheme.xxs))
+                Text(t("typing.indicator", thread.typingNames.joinToString(", ")), fontSize = 11.sp, color = OshiTheme.brand)
+            }
             if (thread.kind == ConversationKind.GROUP) {
                 Spacer(Modifier.height(OshiTheme.xxs))
                 Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm), verticalAlignment = Alignment.CenterVertically) {
@@ -236,6 +292,60 @@ private fun ThreadHeader(
                     TextAction(if (showRoster) dt("desktop.group.members.hide") else dt("desktop.group.members.show")) { showRoster = !showRoster }
                     // __GROUP_E2E_V2_2026_09_23__ leave, with the phones' confirmation wording.
                     if (!confirmLeave) TextAction(t("groups.leave")) { confirmLeave = true }
+                }
+                // __GROUP_PARITY_2026_09_23__ picture (iOS GroupInfoSheet) and local mute.
+                Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm), verticalAlignment = Alignment.CenterVertically) {
+                    if (thread.groupCanEditInfo) {
+                        TextAction(t("group.change_picture")) { onSetGroupPicture() }
+                        if (thread.groupPictureBase64 != null) TextAction(t("group.remove_picture")) { onRemoveGroupPicture() }
+                    }
+                    TextAction(if (thread.groupMuted) t("chat.unmute") else t("chat.mute")) { onSetGroupMuted(!thread.groupMuted) }
+                    TextAction(if (thread.groupBlocked) t("group.unblock") else t("group.block")) { onSetGroupBlocked(!thread.groupBlocked) }
+                    if (thread.groupInviteLink != null) TextAction(t("group.invite_link")) { showInvite = !showInvite }
+                    // iOS: an admin's destructive action is "Delete Group" (this device only); a member's is Leave.
+                    if (thread.groupAdmin && !confirmDelete) TextAction(t("button_delete_group")) { confirmDelete = true }
+                }
+                if (confirmDelete) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm), verticalAlignment = Alignment.CenterVertically) {
+                        Text(t("confirm_delete_group"), fontSize = 11.sp, color = Ink.soft)
+                        TextAction(t("button_delete_group")) { confirmDelete = false; onDeleteGroup() }
+                        TextAction(t("common.cancel")) { confirmDelete = false }
+                    }
+                }
+                // __GROUP_PARITY_2026_09_23__ description (iOS GroupInfoSheet), editable with the name's permission.
+                if (editingDescription) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm)) {
+                        BasicTextField(
+                            value = typedDescription,
+                            onValueChange = { typedDescription = it.take(500) },
+                            textStyle = OshiTheme.typography.bodySmall.copy(color = Ink.strong),
+                            cursorBrush = SolidColor(OshiTheme.brand),
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextAction(dt("desktop.group.rename.save")) { onSetGroupDescription(typedDescription); editingDescription = false }
+                        TextAction(t("common.cancel")) { editingDescription = false }
+                    }
+                } else if (!thread.groupDescription.isNullOrBlank() || thread.groupCanEditInfo) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm)) {
+                        Text(
+                            thread.groupDescription?.takeIf { it.isNotBlank() } ?: t("group.description"),
+                            style = OshiTheme.typography.bodySmall,
+                            color = if (thread.groupDescription.isNullOrBlank()) Ink.soft else Ink.strong,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        if (thread.groupCanEditInfo) TextAction(dt("desktop.group.rename.action")) { editingDescription = true }
+                    }
+                }
+                if (showInvite && thread.groupInviteLink != null) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(OshiTheme.md)) {
+                        QrCode(thread.groupInviteLink, size = 120.dp)
+                        Column(Modifier.weight(1f)) {
+                            Text(t("group_invite_scan_hint"), style = OshiTheme.typography.bodySmall, color = Ink.soft)
+                            Text(thread.groupInviteLink, fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = Ink.strong, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                            TextAction(t("common.copy")) { onCopy(thread.groupInviteLink) }
+                        }
+                    }
                 }
                 if (confirmLeave) {
                     Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm), verticalAlignment = Alignment.CenterVertically) {
@@ -332,21 +442,23 @@ private fun MessageLog(
     onEditMessage: (String, String) -> Unit,
     onDeleteMessage: (String) -> Unit,
     today: LocalDate,
+    onReply: (String) -> Unit = {},
+    onPin: (String?) -> Unit = {},
+    onDeleteForMe: (String) -> Unit = {},
+    onForward: (String, String) -> Unit = { _, _ -> },
 ) {
     val listState = rememberLazyListState()
+    val targets = thread.forwardTargets.map { it.address to it.label }
 
-    // Smooth scroll to newest on a new message; a JUMP on a conversation switch, because
-    // animating through a stranger's whole history is a second of scrolling nobody asked for.
-    var lastConversation by remember { mutableStateOf(thread.conversationId) }
+    // __GROUP_OPEN_ANCHOR_2026_09_23__ Land on — and stay on — the newest message.
+    // The old effect animated to `lastIndex` on EVERY new message (yanking a reader
+    // who had scrolled up into history), `scrollToItem` top-aligned a last row
+    // taller than the pane, and nothing followed rows that grew after layout.
+    // `followNewest` pins while the reader is at the end and stops when they
+    // scroll away; a conversation switch or my own send re-arms it.
+    val followNewest = rememberFollowNewest(listState, key = thread.conversationId)
     LaunchedEffect(thread.conversationId, thread.messages.size) {
-        if (thread.messages.isEmpty()) return@LaunchedEffect
-        val target = thread.messages.lastIndex
-        if (lastConversation != thread.conversationId) {
-            lastConversation = thread.conversationId
-            listState.scrollToItem(target)
-        } else {
-            listState.animateScrollToItem(target)
-        }
+        if (thread.messages.lastOrNull()?.fromMe == true) followNewest.value = true
     }
 
     LazyColumn(
@@ -382,6 +494,15 @@ private fun MessageLog(
                 onEdit = if ((thread.kind == ConversationKind.DIRECT || thread.kind == ConversationKind.GROUP) && row.fromMe) { body -> onEditMessage(row.id, body) } else null,
                 onDelete = if ((thread.kind == ConversationKind.DIRECT && row.fromMe) ||
                     (thread.kind == ConversationKind.GROUP && (row.fromMe || thread.groupAdmin))) { { onDeleteMessage(row.id) } } else null,
+                // __GROUP_PARITY_2026_09_23__ reply in 1:1 and groups; sender names in groups.
+                onReply = if (thread.composer.enabled && (thread.kind == ConversationKind.DIRECT || thread.kind == ConversationKind.GROUP)) { { onReply(row.id) } } else null,
+                onPin = if (thread.kind == ConversationKind.GROUP && thread.groupCanEditInfo && !row.deleted) { pin -> onPin(if (pin) row.id else null) } else null,
+                pinned = thread.groupPinned?.messageId == row.id,
+                onDeleteForMe = if (thread.kind == ConversationKind.DIRECT || thread.kind == ConversationKind.GROUP) { { onDeleteForMe(row.id) } } else null,
+                forwardTargets = targets,
+                onForward = if (thread.kind == ConversationKind.DIRECT || thread.kind == ConversationKind.GROUP) { to -> onForward(row.id, to) } else null,
+                showSender = thread.kind == ConversationKind.GROUP &&
+                    (separator != null || previous == null || previous.fromMe || previous.who != row.who),
             )
         }
     }
@@ -450,6 +571,24 @@ private fun EmptyThread(kind: ConversationKind) {
 
 // ---------------------------------------------------------------------------- notice
 
+/**
+ * __BOT_E2E_2026_09_23__ The honest label BOT_SEAL_SPEC.md §3 requires in a bot thread: who can
+ * read these posts. Server-sealed is NOT end-to-end — the bot's operator writes them.
+ */
+@Composable
+private fun BotSealLabel(sealing: com.oshi.desktop.bot.BotEnvelope.Sealing) {
+    Text(
+        when (sealing) {
+            com.oshi.desktop.bot.BotEnvelope.Sealing.SERVER -> dt("desktop.bot.seal.server")
+            com.oshi.desktop.bot.BotEnvelope.Sealing.BOT -> dt("desktop.bot.seal.bot")
+            com.oshi.desktop.bot.BotEnvelope.Sealing.NONE -> dt("desktop.bot.seal.none")
+        },
+        fontSize = 11.sp,
+        color = Ink.soft,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = OshiTheme.lg, vertical = OshiTheme.sm),
+    )
+}
+
 @Composable
 private fun NoticeBar(notice: Notice) {
     val tint = when (notice.severity) {
@@ -510,6 +649,9 @@ private fun Composer(
     onSend: () -> Unit,
     onAttach: () -> Unit,
     onVoiceNote: (VoiceNote) -> Unit,
+    onGif: ((java.io.File) -> Unit)? = null,
+    mentionMembers: List<com.oshi.desktop.group.MentionWire.Mention> = emptyList(),
+    onPickMention: (com.oshi.desktop.group.MentionWire.Mention) -> Unit = {},
 ) {
     if (!composer.enabled && !busy) {
         DisabledComposer(composer)
@@ -524,8 +666,29 @@ private fun Composer(
         onDispose { if (voice.isRecording) voice.cancelRecording() }
     }
     val canSend = draft.isNotBlank() && !busy
+    var gifOpen by remember(conversationId) { mutableStateOf(false) }   // __GIF_PACK_2026_09_23__
+    // __MENTIONS_2026_09_23__ the typed `@query` (cursor = end of draft) and the members picked.
+    var picked by remember(conversationId) { mutableStateOf(listOf<com.oshi.desktop.group.MentionWire.Mention>()) }
+    LaunchedEffect(draft.isEmpty()) { if (draft.isEmpty()) picked = emptyList() }
+    val query = if (mentionMembers.isEmpty()) null else com.oshi.desktop.group.MentionWire.activeQuery(draft, draft.length)
+    val candidates = query?.let { mentionCandidates(mentionMembers, it.second) }.orEmpty()
+    val pick: (com.oshi.desktop.group.MentionWire.Mention) -> Unit = { m ->
+        val at = query?.first
+        if (at != null) {
+            picked = picked + m
+            onPickMention(m)
+            onDraft(insertMention(draft, at, m))
+        }
+    }
 
     Column(Modifier.fillMaxWidth().background(OshiTheme.background)) {
+        if (gifOpen && onGif != null) {
+            GifPicker(
+                onPick = { bytes, name -> gifOpen = false; onGif(GifOutbox.write(bytes, name)) },
+                onClose = { gifOpen = false },
+            )
+        }
+        if (candidates.isNotEmpty() && !busy) MentionPicker(candidates, pick)
         if (voiceProblem != null) {
             Text(voiceProblem!!, fontSize = 11.sp, color = OshiTheme.warning, modifier = Modifier.padding(horizontal = OshiTheme.lg, vertical = OshiTheme.xs))
         }
@@ -560,6 +723,10 @@ private fun Composer(
                 },
             )
 
+            if (onGif != null && composer.attachEnabled) {
+                TextAction(dt("desktop.gif.button")) { if (!busy) gifOpen = !gifOpen }
+            }
+
             TextAction(if (recording) "Stop" else "Record") {
                 if (recording) {
                     recording = false
@@ -582,8 +749,10 @@ private fun Composer(
                 draft = draft,
                 busy = busy,
                 onDraft = onDraft,
-                onEnter = { if (canSend) onSend() },
+                // With the `@` picker open, Enter picks the first member instead of sending.
+                onEnter = { if (candidates.isNotEmpty()) pick(candidates.first()) else if (canSend) onSend() },
                 modifier = Modifier.weight(1f),
+                highlight = if (picked.isEmpty()) null else MentionHighlight(picked, OshiTheme.brand),
             )
 
             SendButton(canSend, busy, onSend)
@@ -627,6 +796,7 @@ private fun DraftField(
     onDraft: (String) -> Unit,
     onEnter: () -> Unit,
     modifier: Modifier = Modifier,
+    highlight: androidx.compose.ui.text.input.VisualTransformation? = null,
 ) {
     val (source, hovered) = rememberRowInteraction()
     Box(
@@ -651,6 +821,7 @@ private fun DraftField(
             interactionSource = source,
             textStyle = OshiTheme.typography.bodyLarge.copy(color = Ink.strong),
             cursorBrush = SolidColor(OshiTheme.brand),
+            visualTransformation = highlight ?: androidx.compose.ui.text.input.VisualTransformation.None,
             // `lineLimit(1...5)` on the phone: grow to five lines, then scroll inside.
             maxLines = 5,
             modifier = Modifier
@@ -726,4 +897,139 @@ private fun DisabledComposer(composer: ComposerState) {
             Text(composer.disabledReason.orEmpty(), fontSize = 11.sp, color = Ink.soft)
         }
     }
+}
+
+/** __GROUP_PARITY_2026_09_23__ "Replying to …" above the composer, with a way out. */
+@Composable
+private fun ReplyBanner(quote: QuoteRow, onCancel: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().background(OshiTheme.surfaceElevated)
+            .padding(horizontal = OshiTheme.xl, vertical = OshiTheme.sm),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                t("message.replying_to", quote.who.ifBlank { "…" }),
+                style = OshiTheme.typography.labelMedium,
+                color = OshiTheme.brand,
+            )
+            Text(quote.text, style = OshiTheme.typography.bodySmall, color = Ink.soft, maxLines = 1)
+        }
+        Text(
+            t("common.cancel"),
+            style = OshiTheme.typography.labelMedium,
+            color = OshiTheme.brand,
+            modifier = Modifier.clickable { onCancel() }.padding(OshiTheme.xs),
+        )
+    }
+}
+
+/** __GROUP_PARITY_2026_09_23__ the group picture when there is one, the monogram otherwise. */
+@Composable
+internal fun GroupAvatar(pictureBase64: String?, label: String, id: String, size: androidx.compose.ui.unit.Dp) {
+    val picture = remember(pictureBase64) { groupPictureBitmap(pictureBase64) }
+    if (picture != null) {
+        androidx.compose.foundation.Image(
+            bitmap = picture,
+            contentDescription = label,
+            contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+            modifier = Modifier.size(size).clip(androidx.compose.foundation.shape.CircleShape),
+        )
+    } else {
+        Monogram(label, id, size)
+    }
+}
+
+/** A group picture from its definition, or null if absent or unreadable. */
+private fun groupPictureBitmap(b64: String?): androidx.compose.ui.graphics.ImageBitmap? =
+    com.oshi.desktop.group.GroupPicture.decodeBase64(b64)?.let { bytes ->
+        runCatching {
+            org.jetbrains.skia.Image.makeFromEncoded(bytes).toComposeImageBitmap()
+        }.getOrNull()
+    }
+
+/** __GROUP_PARITY_2026_09_23__ the pinned message, under the header (iOS pinned banner). */
+@Composable
+private fun PinnedBar(pinned: QuoteRow, canUnpin: Boolean, onUnpin: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().background(OshiTheme.surfaceElevated)
+            .padding(horizontal = OshiTheme.xl, vertical = OshiTheme.sm),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("📌", fontSize = 13.sp)
+        Spacer(Modifier.width(OshiTheme.sm))
+        Column(Modifier.weight(1f)) {
+            Text(pinned.who, style = OshiTheme.typography.labelMedium, color = OshiTheme.brand)
+            Text(pinned.text, style = OshiTheme.typography.bodySmall, color = Ink.strong, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        if (canUnpin) TextAction(t("message.unpin")) { onUnpin() }
+    }
+}
+
+/** iOS's blocked-group banner above the (closed) composer, with its unblock button. */
+@Composable
+private fun BlockedGroupBanner(onUnblock: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().background(OshiTheme.danger.copy(alpha = 0.12f))
+            .padding(horizontal = OshiTheme.xl, vertical = OshiTheme.sm),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(t("group.blocked_title"), style = OshiTheme.typography.labelMedium, color = OshiTheme.danger)
+            Text(t("group.blocked_message"), style = OshiTheme.typography.bodySmall, color = Ink.soft)
+        }
+        TextAction(t("group.unblock")) { onUnblock() }
+    }
+}
+
+/**
+ * __GROUP_OPEN_ANCHOR_2026_09_23__ Keep a forward-layout chat LazyColumn pinned to its
+ * newest row while the reader has not scrolled away (same rule as Android's
+ * GroupChatScreen and iOS's `.defaultScrollAnchor(.bottom, for: .sizeChanges)`):
+ * starts following, so opening a thread lands at the bottom on the first measured
+ * layout and after every late batch or grown row; a drag, or any scroll (wheel,
+ * scrollbar) that settles away from the end, stops it; one that settles at the end
+ * re-arms it. Our own pinning scrolls never count, and a user scroll in progress is
+ * never interrupted.
+ */
+@Composable
+private fun rememberFollowNewest(
+    listState: androidx.compose.foundation.lazy.LazyListState,
+    key: Any,
+): androidx.compose.runtime.MutableState<Boolean> {
+    val follow = remember(key) { mutableStateOf(true) }
+    // [0] = a pin is running; [1] = end of the grace window after it (nanoTime).
+    val ownScroll = remember(key) { longArrayOf(0L, 0L) }
+    LaunchedEffect(listState, key) {
+        listState.interactionSource.interactions.collect { interaction ->
+            if (interaction is androidx.compose.foundation.interaction.DragInteraction.Start) follow.value = false
+        }
+    }
+    LaunchedEffect(listState, key) {
+        androidx.compose.runtime.snapshotFlow { listState.isScrollInProgress }.collect { scrolling ->
+            val ours = ownScroll[0] != 0L || System.nanoTime() < ownScroll[1]
+            if (!scrolling && !ours) follow.value = !listState.canScrollForward
+        }
+    }
+    LaunchedEffect(listState, key) {
+        androidx.compose.runtime.snapshotFlow {
+            Triple(listState.layoutInfo.totalItemsCount, listState.canScrollForward, follow.value)
+        }.collect { (total, canScrollForward, following) ->
+            if (!following || total == 0 || !canScrollForward) return@collect
+            if (listState.isScrollInProgress && ownScroll[0] == 0L) return@collect
+            ownScroll[0] = 1L
+            try {
+                listState.scrollToItem(total - 1)
+                var guard = 0
+                while (listState.canScrollForward && guard++ < 8) {
+                    val step = listState.layoutInfo.viewportSize.height.coerceAtLeast(1).toFloat()
+                    listState.scrollBy(step)
+                }
+            } finally {
+                ownScroll[0] = 0L
+                ownScroll[1] = System.nanoTime() + 300_000_000L
+            }
+        }
+    }
+    return follow
 }

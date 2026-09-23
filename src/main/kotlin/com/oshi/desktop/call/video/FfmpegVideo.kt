@@ -366,10 +366,15 @@ class CameraCapture(
             throw CameraUnavailable("the camera library did not load on this machine (${it.javaClass.simpleName}: ${it.message})")
         }
         val os = System.getProperty("os.name").orEmpty().lowercase()
+        // __CALL_DEVICES_2026_09_23__ the camera the user picked, while it is still present.
+        val chosen = com.oshi.desktop.call.media.CallDevices.camera
         val (fmtName, device) = when {
             os.contains("mac") -> "avfoundation" to "default:none"
-            os.contains("win") -> "dshow" to "video=${firstDshowCamera() ?: throw CameraUnavailable(NO_CAMERA_WINDOWS)}"
-            else -> "video4linux2" to "/dev/video0"
+            os.contains("win") -> "dshow" to "video=${
+                chosen?.takeIf { c -> dshowCameras().any { it.first == c } }
+                    ?: firstDshowCamera() ?: throw CameraUnavailable(NO_CAMERA_WINDOWS)
+            }"
+            else -> "video4linux2" to (chosen?.takeIf { java.io.File(it).exists() } ?: "/dev/video0")
         }
         deviceName = device
         val input: AVInputFormat = avformat.av_find_input_format(fmtName)

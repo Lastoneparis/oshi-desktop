@@ -39,6 +39,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.oshi.desktop.store.DeliveryStatus
+import com.oshi.desktop.i18n.t
 import com.oshi.desktop.ui.OshiTheme
 import com.oshi.desktop.ui.state.MessageRow
 import java.io.File
@@ -80,7 +81,20 @@ fun MessageBubbleRow(
     onReact: ((String) -> Unit)? = null,
     onEdit: ((String) -> Unit)? = null,
     onDelete: (() -> Unit)? = null,
+    /** __GROUP_PARITY_2026_09_23__ start a reply to this message (iOS swipe-to-reply). */
+    onReply: (() -> Unit)? = null,
+    /** Group threads name the sender above the first bubble of each incoming run, as iOS does. */
+    showSender: Boolean = false,
+    /** __GROUP_PARITY_2026_09_23__ pin/unpin (true = this row is the pinned one). */
+    onPin: ((pin: Boolean) -> Unit)? = null,
+    pinned: Boolean = false,
+    /** Delete on this device only. */
+    onDeleteForMe: (() -> Unit)? = null,
+    /** Contacts a message can be forwarded to (address → label), and the action. */
+    forwardTargets: List<Pair<String, String>> = emptyList(),
+    onForward: ((toAddress: String) -> Unit)? = null,
 ) {
+    var forwarding by remember(row.id) { mutableStateOf(false) }
     var editing by remember(row.id) { mutableStateOf(false) }
     var editedBody by remember(row.id, row.body) { mutableStateOf(row.body) }
     var confirmingDelete by remember(row.id) { mutableStateOf(false) }
@@ -98,6 +112,14 @@ fun MessageBubbleRow(
             Modifier.widthIn(max = Metrics.bubbleMax),
             horizontalAlignment = if (row.fromMe) Alignment.End else Alignment.Start,
         ) {
+            if (showSender && !row.fromMe) {
+                Text(
+                    row.who,
+                    style = OshiTheme.typography.labelMedium,
+                    color = OshiTheme.brand,
+                    modifier = Modifier.padding(start = OshiTheme.sm, bottom = OshiTheme.xxs),
+                )
+            }
             BubbleBody(row, lastInRun, wallpaper, media, onReveal)
 
             if (row.reactions.isNotEmpty()) {
@@ -113,9 +135,14 @@ fun MessageBubbleRow(
                 )
             }
 
-            if (!row.deleted && (onReact != null || onEdit != null || onDelete != null)) {
+            if (!row.deleted && (onReact != null || onEdit != null || onDelete != null || onReply != null)) {
                 Spacer(Modifier.height(OshiTheme.xs))
                 Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm)) {
+                    onReply?.let { reply -> TextAction(t("message.action.reply")) { reply() } }
+                    if (onForward != null && forwardTargets.isNotEmpty() && row.body.isNotBlank()) {
+                        TextAction(t("message.action.forward")) { forwarding = !forwarding }
+                    }
+                    onPin?.let { pin -> TextAction(if (pinned) t("message.unpin") else t("message.pin")) { pin(!pinned) } }
                     onReact?.let { react ->
                         TextAction("♥") { react("♥") }
                         TextAction("👍") { react("👍") }
@@ -128,6 +155,15 @@ fun MessageBubbleRow(
                         }
                         if (confirmingDelete) TextAction("Cancel") { confirmingDelete = false }
                     }
+                    onDeleteForMe?.let { hide -> TextAction(t("group.delete.for_me")) { hide() } }
+                }
+            }
+
+            if (forwarding && onForward != null) {
+                Spacer(Modifier.height(OshiTheme.xs))
+                Text(t("message.forward_to"), style = OshiTheme.typography.labelMedium, color = Ink.soft)
+                for ((address, label) in forwardTargets) {
+                    TextAction(label) { onForward(address); forwarding = false }
                 }
             }
 
@@ -178,17 +214,51 @@ private fun BubbleBody(
             .padding(OshiTheme.md),
         horizontalAlignment = Alignment.Start,
     ) {
+        // __GROUP_PARITY_2026_09_23__ forwarded label and reply quote, as iOS draws them
+        // (`QuotedMessageView` / `groupReplyQuote`): above the body, inside the bubble.
+        if (!row.deleted && row.forwardedFrom != null) {
+            Text(
+                if (row.forwardedFrom.isBlank()) t("message.forwarded") else t("message.forwarded") + " · " + row.forwardedFrom,
+                style = OshiTheme.typography.labelSmall,
+                fontStyle = FontStyle.Italic,
+                color = inkSoft,
+            )
+            Spacer(Modifier.height(OshiTheme.xxs))
+        }
+        if (!row.deleted && row.quote != null) {
+            Row(
+                Modifier
+                    .clip(OshiTheme.pill)
+                    .background(ink.copy(alpha = 0.08f))
+                    .padding(horizontal = OshiTheme.sm, vertical = OshiTheme.xs),
+            ) {
+                Column {
+                    if (row.quote.who.isNotBlank()) {
+                        Text(row.quote.who, style = OshiTheme.typography.labelMedium, color = ink)
+                    }
+                    Text(row.quote.text, style = OshiTheme.typography.bodySmall, color = inkSoft, maxLines = 2)
+                }
+            }
+            Spacer(Modifier.height(OshiTheme.xs))
+        }
         if (media != null) {
             MediaContent(media, row.fromMe, inkSoft, onReveal)
             if (row.body.isNotBlank()) Spacer(Modifier.height(OshiTheme.sm))
         }
         if (row.body.isNotBlank() || media == null) {
-            Text(
+            // __MENTIONS_2026_09_23__ `@name` of a picked member is highlighted (MentionUi.kt).
+            MentionAwareText(
                 row.body,
+                if (row.deleted) emptyList() else row.mentions,
                 style = OshiTheme.typography.bodyLarge,
-                fontStyle = if (row.deleted) FontStyle.Italic else FontStyle.Normal,
                 color = if (row.deleted) inkSoft else ink,
+                fontStyle = if (row.deleted) FontStyle.Italic else FontStyle.Normal,
+                tint = if (row.fromMe) Color.White else OshiTheme.brand,
             )
+            // __TICKER_QUOTES_2026_09_23__ `@AAPL` → price chip, under the text, 1:1 and groups (TickerChip.kt).
+            // A mentioned person's `@name` is never offered to the ticker parser.
+            if (!row.deleted) TickerChipsForText(row.body, row.id, Modifier.padding(top = OshiTheme.xs), tint = if (row.fromMe) Color.White else OshiTheme.brand, ink = ink,
+                exclude = mentionRanges(row.body, row.mentions))
         }
     }
 }
@@ -349,6 +419,8 @@ private fun InlineImage(media: MediaPresentation, inkSoft: Color) {
     // guessed height is not good enough — the thread's LazyColumn anchors its first visible
     // row, so rows that change height after arriving pushed the newest messages off the
     // bottom of a chat that had just opened scrolled to them (seen in the bench's frames).
+    // __GIF_PACK_2026_09_23__ a GIF animates (GifBubble.kt); decided from its bytes, like iOS.
+    if (remember(media.path) { GifBubble.isGifFile(media.path) }) { GifInlineImage(media, inkSoft); return }
     val headerSize = remember(media.path) { InlineBitmaps.size(media.path) }
     val targetPx = with(androidx.compose.ui.platform.LocalDensity.current) { Metrics.mediaBubble.roundToPx() }
     val loaded by androidx.compose.runtime.produceState(

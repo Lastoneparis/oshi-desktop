@@ -1290,6 +1290,7 @@
   "group.member.send_message": "Αποστολή Μηνύματος",
   "group.member.view_profile": "Προβολή Προφίλ",
   "group.member.you_admin": "Εσείς (Διαχειριστής)",
+  "group.member_must_update": "Ο/Η %@ πρέπει να ενημερώσει το OSHI για να λαμβάνει τα μηνύματα αυτής της ομάδας",
   "group.mute": "Σίγαση Ειδοποιήσεων",
   "group.mute_group": "Σίγαση Ομάδας",
   "group.no_contacts": "Δεν υπάρχουν διαθέσιμες επαφές",

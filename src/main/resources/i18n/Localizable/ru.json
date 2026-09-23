@@ -1290,6 +1290,7 @@
   "group.member.send_message": "Отправить сообщение",
   "group.member.view_profile": "Посмотреть профиль",
   "group.member.you_admin": "Вы (администратор)",
+  "group.member_must_update": "%@ нужно обновить OSHI, чтобы получать сообщения этой группы",
   "group.mute": "Отключить уведомления",
   "group.mute_group": "Отключить звук группы",
   "group.no_contacts": "Нет доступных контактов",

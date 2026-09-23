@@ -1290,6 +1290,7 @@
   "group.member.send_message": "Mesaj Gönder",
   "group.member.view_profile": "Profili Görüntüle",
   "group.member.you_admin": "Siz (Yönetici)",
+  "group.member_must_update": "%@ bu grubun mesajlarını almak için OSHI'yi güncellemeli",
   "group.mute": "Bildirimleri Sessize Al",
   "group.mute_group": "Grubu Sessize Al",
   "group.no_contacts": "Kullanılabilir kişi yok",

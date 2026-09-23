@@ -115,6 +115,11 @@ class DesktopDevSync(
         DesktopDevSyncStore.recordLocalLeave(stateStore, groupId, System.currentTimeMillis(), name)
         engine?.onLocalStateChanged()
     }
+    /** __GROUP_PARITY_2026_09_23__ joining by invite link lifts a synced leave. */
+    fun noteLocalJoin(groupId: String) {
+        DesktopDevSyncStore.recordLocalJoin(stateStore, groupId, System.currentTimeMillis())
+        engine?.onLocalStateChanged()
+    }
     private fun changed() = listeners.forEach { runCatching { it() } }
 
     // ------------------------------------------------------------------ gate

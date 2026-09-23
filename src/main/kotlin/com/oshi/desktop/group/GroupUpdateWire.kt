@@ -436,6 +436,27 @@ object GroupUpdateWire {
     fun decodeMinimalFramed(content: String): MinimalGroupUpdate? =
         decodeMinimal(content.removePrefix(PREFIX))
 
+    /**
+     * __GROUP_COMPAT_IGNORE_2026_09_23__ The `type` of a well-formed state frame that
+     * [decodeMinimalFramed] does not model — `updated` (Android's legacy rename/description
+     * companion), `read_receipt_batch` (spec §5.2, optional), `deleted`, `key_rotation`… — or null
+     * when the body is not a JSON object with a non-empty string `type` (that stays malformed).
+     * Spec header: new `type` values are ones old receivers IGNORE, not reject.
+     */
+    fun ignorableMinimalType(content: String): String? {
+        val o = runCatching { JSONObject(content.removePrefix(PREFIX)) }.getOrNull() ?: return null
+        val type = (o.opt("type") as? String)?.takeIf { it.isNotBlank() } ?: return null
+        // A group-type word here means a definition that failed decoding — not ignorable.
+        if (GroupType.fromRaw(type) != null) return null
+        // A modelled type that failed decoding (missing groupId, name…) IS malformed.
+        if (type in MODELLED_MINIMAL_TYPES) return null
+        return type
+    }
+
+    private val MODELLED_MINIMAL_TYPES = setOf(
+        "member_added", "member_removed", "group_renamed", "member_sync_request", "sync_request", "created",
+    )
+
     /** iOS's fallback switch (`swift:1071-1157`), plus the `created` shape it emits. */
     fun decodeMinimal(body: String): MinimalGroupUpdate? {
         val o = runCatching { JSONObject(body) }.getOrNull() ?: return null

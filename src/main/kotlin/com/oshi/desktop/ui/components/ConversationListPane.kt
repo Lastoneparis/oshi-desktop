@@ -387,7 +387,7 @@ private fun ConversationListRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(OshiTheme.md),
     ) {
-        Monogram(row.label, row.id, Metrics.avatarList)
+        GroupAvatar(row.pictureBase64, row.label, row.id, Metrics.avatarList)
 
         Column(Modifier.weight(1f)) {
             Text(
@@ -424,7 +424,11 @@ private fun ConversationListRow(
                 // 7.74:1, so it carries a timestamp safely.
                 color = if (row.unread > 0) OshiTheme.brand else Ink.soft,
             )
-            UnreadBadge(row.unread)
+            Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.xs), verticalAlignment = Alignment.CenterVertically) {
+                // __MENTIONS_2026_09_23__ "@" pill: an unseen message here mentions you.
+                if (row.mentionedYou) MentionBadge()
+                UnreadBadge(row.unread)
+            }
         }
     }
 }

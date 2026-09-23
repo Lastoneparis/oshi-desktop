@@ -12,6 +12,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.width
+import androidx.compose.runtime.key
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Text
@@ -67,9 +70,13 @@ fun CallOverlay(
     video: () -> VideoFrames? = { null },
     onToggleCamera: () -> Unit = {},
     onAnswerVideoRequest: (accept: Boolean, shareCamera: Boolean) -> Unit = { _, _ -> },
+    /** __CALL_PARITY_2026_09_23__ collapse to [CallMiniBar] (iOS `call.minimize`). */
+    onMinimize: () -> Unit = {},
+    /** A camera was picked in the devices menu: reopen it now. */
+    onSwitchCamera: () -> Unit = {},
 ) {
     if (screen.video && screen.phase == Phase.CONNECTED) {
-        VideoStage(screen, onHangUp, onToggleMute, onToggleCamera, onAnswerVideoRequest, nowMs, modifier, video)
+        VideoStage(screen, onHangUp, onToggleMute, onToggleCamera, onAnswerVideoRequest, nowMs, modifier, video, onMinimize, onSwitchCamera)
         return
     }
     Box(
@@ -120,6 +127,133 @@ fun CallOverlay(
             Spacer(Modifier.height(48.dp))
             Buttons(screen, onAnswer, onDecline, onHangUp, onToggleMute, onDismiss, onToggleCamera)
         }
+        if (screen.phase == Phase.CONNECTED || screen.phase == Phase.OUTGOING) {
+            TopActions(screen, onMinimize, onSwitchCamera, Modifier.align(Alignment.TopEnd).padding(OshiTheme.lg))
+        }
+    }
+}
+
+/**
+ * __CALL_PARITY_2026_09_23__ The top-right corner of a live call: the devices menu (the
+ * desktop's speaker/earpiece toggle and camera switch) and minimize.
+ */
+@Composable
+private fun TopActions(screen: CallScreen, onMinimize: () -> Unit, onSwitchCamera: () -> Unit, modifier: Modifier) {
+    Row(modifier, horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        if (screen.phase == Phase.CONNECTED) CallDevicesMenu(onSwitchCamera)
+        PillButton(t("call.minimize"), onMinimize)
+    }
+}
+
+@Composable
+private fun PillButton(label: String, onClick: () -> Unit) {
+    Box(
+        Modifier.clip(androidx.compose.foundation.shape.RoundedCornerShape(16.dp))
+            .background(Color.White.copy(alpha = 0.16f))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 7.dp)
+            .semantics { contentDescription = label },
+    ) { Text(label, fontSize = 13.sp, color = Color.White) }
+}
+
+/**
+ * Microphone, speaker and camera, by name ([com.oshi.desktop.call.media.CallDevices]). Audio
+ * applies from the next call and the menu says so; a camera applies at once.
+ */
+@Composable
+private fun CallDevicesMenu(onSwitchCamera: () -> Unit) {
+    val devices = com.oshi.desktop.call.media.CallDevices
+    var open by remember { mutableStateOf(false) }
+    var mics by remember { mutableStateOf(emptyList<String>()) }
+    var speakers by remember { mutableStateOf(emptyList<String>()) }
+    var cameras by remember { mutableStateOf(emptyList<Pair<String, String>>()) }
+    var tick by remember { mutableStateOf(0) }
+    Box {
+        PillButton(dt("desktop.call.devices")) {
+            // Enumerated on open, off the UI thread's hot path only in the sense that it
+            // is on demand: device lists change when a headset is plugged in.
+            mics = devices.microphones(); speakers = devices.speakers(); cameras = devices.cameras()
+            open = true
+        }
+        androidx.compose.material3.DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            key(tick) {
+                DeviceSection(dt("desktop.call.devices.microphone"), mics.map { it to it }, devices.microphone) {
+                    devices.microphone = it; tick++
+                }
+                DeviceSection(t("call.speaker"), speakers.map { it to it }, devices.speaker) {
+                    devices.speaker = it; tick++
+                }
+                MenuNote(dt("desktop.call.devices.next_call"))
+                if (cameras.isEmpty() && System.getProperty("os.name").orEmpty().lowercase().contains("mac")) {
+                    MenuHeader(dt("desktop.call.devices.camera"))
+                    MenuNote(dt("desktop.call.devices.camera_default_only"))
+                } else {
+                    DeviceSection(dt("desktop.call.devices.camera"), cameras, devices.camera) {
+                        devices.camera = it; tick++; onSwitchCamera()
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DeviceSection(title: String, options: List<Pair<String, String>>, chosen: String?, onPick: (String?) -> Unit) {
+    MenuHeader(title)
+    DeviceItem(dt("desktop.call.devices.default"), chosen == null) { onPick(null) }
+    for ((id, label) in options) DeviceItem(label, chosen == id) { onPick(id) }
+}
+
+@Composable
+private fun MenuHeader(title: String) {
+    Text(title, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = OshiTheme.colors.onSurfaceVariant,
+        modifier = Modifier.padding(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 4.dp))
+}
+
+@Composable
+private fun MenuNote(text: String) {
+    Text(text, fontSize = 11.sp, color = OshiTheme.colors.onSurfaceVariant,
+        modifier = Modifier.widthIn(max = 300.dp).padding(horizontal = 14.dp, vertical = 4.dp))
+}
+
+@Composable
+private fun DeviceItem(label: String, selected: Boolean, onClick: () -> Unit) {
+    androidx.compose.material3.DropdownMenuItem(
+        text = { Text((if (selected) "✓  " else "     ") + label, fontSize = 13.sp, maxLines = 1) },
+        onClick = onClick,
+    )
+}
+
+/**
+ * __CALL_PARITY_2026_09_23__ A minimized call: one bar across the top of the window with who,
+ * how long, and the way back — iOS's minimized call pill. The app stays usable under it.
+ */
+@Composable
+fun CallMiniBar(screen: CallScreen, onRestore: () -> Unit, onHangUp: () -> Unit, nowMs: () -> Long = System::currentTimeMillis, modifier: Modifier = Modifier) {
+    var now by remember { mutableStateOf(nowMs()) }
+    LaunchedEffect(screen.connectedAtMs) { while (true) { now = nowMs(); delay(1_000) } }
+    Row(
+        modifier.fillMaxWidth().background(OshiTheme.success).clickable(onClick = onRestore)
+            .padding(horizontal = OshiTheme.lg, vertical = 8.dp)
+            .semantics { contentDescription = t("call.minimize.restore") },
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            buildString {
+                append(screen.label)
+                if (screen.phase == Phase.CONNECTED) append("  ·  ").append(CallSummary.duration(screen.durationSeconds(now)))
+                if (screen.reconnecting) append("  ·  ").append(t("call.quality.reconnecting"))
+            },
+            fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color.White, maxLines = 1,
+            modifier = Modifier.weight(1f),
+        )
+        Text(t("call.minimize.restore"), fontSize = 13.sp, color = Color.White)
+        Spacer(Modifier.width(OshiTheme.md))
+        Box(
+            Modifier.size(30.dp).clip(CircleShape).background(OshiTheme.danger).clickable(onClick = onHangUp)
+                .semantics { contentDescription = t("accessibility.call.end") },
+            contentAlignment = Alignment.Center,
+        ) { CallGlyphIcon(CallGlyph.HANG_UP, Color.White, 16.dp) }
     }
 }
 
@@ -145,10 +279,11 @@ private fun StatusLine(screen: CallScreen, nowMs: () -> Long) {
         Phase.INCOMING -> if (screen.video) t("call.incoming.video") else t("call.incoming.voice")
         Phase.OUTGOING -> if (screen.ringingBack) t("call.state.ringing") else t("call.state.connecting")
         Phase.ANSWERING -> t("call.state.connecting")
-        Phase.CONNECTED -> when (screen.audio) {
-            Audio.CONNECTING -> dt("desktop.call.audio.connecting")
-            Audio.NONE -> dt("desktop.call.audio.none")
-            Audio.FLOWING -> t("call.state.on_call")
+        Phase.CONNECTED -> when {
+            screen.reconnecting -> t("call.quality.reconnecting")
+            screen.audio == Audio.CONNECTING -> dt("desktop.call.audio.connecting")
+            screen.audio == Audio.NONE -> dt("desktop.call.audio.none")
+            else -> t("call.state.on_call")
         }
         Phase.ENDED -> t(screen.endedKey ?: catalogKey("call.ended.hungup"))
     }
@@ -168,6 +303,14 @@ private fun StatusLine(screen: CallScreen, nowMs: () -> Long) {
             color = Color.White,
             modifier = Modifier.semantics { contentDescription = t("accessibility.call.duration") },
         )
+        // iOS's transport badge: what carries the call (P2P / TURN Relay / UDP Relay / WebSocket).
+        screen.carrier?.let { c ->
+            Spacer(Modifier.height(2.dp))
+            Text(
+                "🔒 ${c.label}", fontSize = 11.sp, color = Color.White.copy(alpha = 0.6f),
+                modifier = Modifier.semantics { contentDescription = "${t("accessibility.call.transport")}: ${c.label}" },
+            )
+        }
     }
 }
 
@@ -401,6 +544,8 @@ private fun VideoStage(
     nowMs: () -> Long,
     modifier: Modifier,
     video: () -> VideoFrames?,
+    onMinimize: () -> Unit = {},
+    onSwitchCamera: () -> Unit = {},
 ) {
     val remote = rememberVideoBitmap({ video()?.remoteCount?.takeIf { it > 0 } }) { video()?.remote() }
     val local = rememberVideoBitmap({ if (screen.cameraOn) video()?.localCount?.takeIf { it > 0 } else null }) { video()?.local() }
@@ -438,9 +583,25 @@ private fun VideoStage(
             StatusLine(screen, nowMs)
         }
 
+        // iOS VideoCallView: the picture stopped, and whether the voice still carries.
+        if (screen.videoStalled && remote != null && !screen.remoteCameraOff) {
+            Column(
+                Modifier.align(Alignment.Center)
+                    .clip(androidx.compose.foundation.shape.RoundedCornerShape(14.dp))
+                    .background(Color.Black.copy(alpha = 0.55f)).padding(horizontal = 16.dp, vertical = 10.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text(t("call.video.rx.stalled"), fontSize = 14.sp, color = Color.White)
+                if (screen.audioFlowing) Text(t("call.video.rx.audio_ok"), fontSize = 12.sp, color = Color.White.copy(alpha = 0.75f))
+            }
+        }
+
+        // Devices + minimize, above the self view.
+        TopActions(screen, onMinimize, onSwitchCamera, Modifier.align(Alignment.TopEnd).padding(top = OshiTheme.lg, end = OshiTheme.lg))
+
         // Self view.
         Box(
-            Modifier.align(Alignment.TopEnd).padding(OshiTheme.lg)
+            Modifier.align(Alignment.TopEnd).padding(start = OshiTheme.lg, end = OshiTheme.lg, top = OshiTheme.lg + 44.dp)
                 .size(width = 224.dp, height = 126.dp)
                 .clip(androidx.compose.foundation.shape.RoundedCornerShape(14.dp))
                 .background(Color(0xFF1E1E2A)),

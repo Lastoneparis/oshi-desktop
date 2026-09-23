@@ -85,6 +85,21 @@ class DesktopNotifier {
         LinuxDesktopNotification.notifyIfAvailable(body, urgency = "critical")
     }
 
+    /**
+     * __CALL_PARITY_2026_09_23__ A call rang out unanswered while nobody was looking — what
+     * CallKit's Recents gives an iPhone. Same privacy rule as [notifyIncomingCall]: the body
+     * is the generic localized "Missed call", never the caller (the chat's history row, inside
+     * the app, says who). Clicking the tray balloon opens the window like any other.
+     */
+    fun notifyMissedCall(body: String) {
+        if (MacNotification.notifyIfAvailable(body)) return
+        icon?.let { trayIcon ->
+            runCatching { trayIcon.displayMessage("OSHI", body, TrayIcon.MessageType.INFO) }
+            return
+        }
+        LinuxDesktopNotification.notifyIfAvailable(body)
+    }
+
     fun close() {
         val current = icon ?: return
         runCatching { SystemTray.getSystemTray().remove(current) }

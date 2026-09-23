@@ -131,6 +131,7 @@ import org.jetbrains.skia.Image as SkiaImage
  */
 fun runDesktopUi(client: OshiClient, startHidden: Boolean = false) {
     val notifier = DesktopNotifier()
+    val sleepInhibitor = SleepInhibitor()
     val model = ChatShellModel(client, onIncomingNotification = notifier::notifyIncomingMessage)
     model.attach()
 
@@ -181,6 +182,14 @@ fun runDesktopUi(client: OshiClient, startHidden: Boolean = false) {
         afterCall = { callId, peer, seconds, normally ->
             client.callRating.callDidEnd(callId, peer, seconds, normally)?.let { ratingAsk.value = it }
         },
+        // __CALL_PARITY_2026_09_23__ missed-call notification when no OSHI window is active,
+        // and the machine held awake for exactly as long as a call is connected.
+        onMissedCall = { _, _ ->
+            if (java.awt.KeyboardFocusManager.getCurrentKeyboardFocusManager().activeWindow == null) {
+                notifier.notifyMissedCall(dt("desktop.call.missed.notification"))
+            }
+        },
+        onCallLive = { live -> if (live) sleepInhibitor.hold() else sleepInhibitor.release() },
     )
     calls.onChange = { callScreen.value = it }
     run {
@@ -318,7 +327,12 @@ fun runDesktopUi(client: OshiClient, startHidden: Boolean = false) {
                     )
                 }
                 callScreen.value?.let { screen ->
-                    CallOverlay(
+                    if (screen.minimized) {
+                        com.oshi.desktop.ui.components.CallMiniBar(
+                            screen, onRestore = { calls.setMinimized(false) }, onHangUp = calls::hangUp,
+                            modifier = Modifier.align(androidx.compose.ui.Alignment.TopCenter),
+                        )
+                    } else CallOverlay(
                         screen = screen,
                         onAnswer = calls::answer,
                         onDecline = calls::decline,
@@ -328,6 +342,8 @@ fun runDesktopUi(client: OshiClient, startHidden: Boolean = false) {
                         video = { client.calls.video()?.let(::CallVideoFrames) },
                         onToggleCamera = calls::toggleCamera,
                         onAnswerVideoRequest = calls::answerVideoRequest,
+                        onMinimize = { calls.setMinimized(true) },
+                        onSwitchCamera = calls::switchCamera,
                     )
                 }
                 if (callScreen.value == null) ratingAsk.value?.let { pending ->
@@ -595,6 +611,7 @@ private fun MessagesDestination(
                             },
                             onAttach = { onPickFile()?.let { model.attach(it) } },
                             onVoiceNote = { model.attach(it.file, it.mediaType, discardAfterSend = true) },
+                            onGif = { model.attach(it, com.oshi.desktop.store.MediaType.IMAGE) },   // __GIF_PACK_2026_09_23__
                             onRenameGroup = { model.renameGroup(thread.conversationId, it) },
                             onReact = model::react,
                             onEditMessage = model::editMessage,
@@ -608,6 +625,20 @@ private fun MessagesDestination(
                             today = today,
                             onCall = onCall?.let { call -> { video -> call(thread.conversationId, video) } },
                             onLeaveGroup = { model.leaveGroup(thread.conversationId) },
+                            onReply = model::beginReply,
+                            replyingTo = state.replyingTo,
+                            onCancelReply = model::cancelReply,
+                            onSetGroupPicture = { onPickFile()?.let { model.setGroupPicture(thread.conversationId, it) } },
+                            onRemoveGroupPicture = { model.removeGroupPicture(thread.conversationId) },
+                            onSetGroupMuted = { model.setGroupMuted(thread.conversationId, it) },
+                            onSetGroupDescription = { model.setGroupDescription(thread.conversationId, it) },
+                            onSetGroupBlocked = { model.setGroupBlocked(thread.conversationId, it) },
+                            onDeleteGroup = { model.deleteGroup(thread.conversationId) },
+                            onPin = model::pinMessage,
+                            onDeleteForMe = model::deleteMessageForMe,
+                            onForward = model::forwardMessage,
+                            onCopy = { copyToClipboard(it) },
+                            onPickMention = model::pickMention,   // __MENTIONS_2026_09_23__
                         )
                     }
                 }

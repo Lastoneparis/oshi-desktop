@@ -132,6 +132,8 @@ object GroupMessageWire {
         val systemMessageType: String? = null,
         /** `actorPublicKey`, `editedMessageId`/`editedContent` or `deletedMessageId`. Strings only. */
         val systemMessageData: Map<String, String>? = null,
+        /** __MENTIONS_2026_09_23__ optional `mentions` key, see [MentionWire]. Unfiltered on decode. */
+        val mentions: List<MentionWire.Mention> = emptyList(),
     ) {
         val isSystem: Boolean get() = systemMessageType != null || senderPublicKey == SYSTEM_SENDER
     }
@@ -192,6 +194,8 @@ object GroupMessageWire {
         json.str("messageId", msg.messageId)
         json.str("content", msg.body)
         json.str("senderName", msg.senderName.orEmpty())
+        // __MENTIONS_2026_09_23__ last, optional, ignored by every shipped decoder (MentionWire).
+        MentionWire.render(msg.mentions)?.let { json.obj(MentionWire.FIELD, it) }
         return json.build()
     }
 
@@ -262,6 +266,7 @@ object GroupMessageWire {
             systemMessageData = (o.opt("systemMessageData") as? JSONObject)?.let { d ->
                 d.keys().asSequence().mapNotNull { k -> (d.opt(k) as? String)?.let { k to it } }.toMap()
             },
+            mentions = MentionWire.parse(o.opt(MentionWire.FIELD)),
         )
     }
 

@@ -1293,6 +1293,7 @@
   "group.member.send_message": "संदेश भेजें",
   "group.member.view_profile": "प्रोफाइल देखें",
   "group.member.you_admin": "आप (एडमिन)",
+  "group.member_must_update": "इस समूह के संदेश पाने के लिए %@ को OSHI अपडेट करना होगा।",
   "group.mute": "सूचनाएं म्यूट करें",
   "group.mute_group": "समूह म्यूट करें",
   "group.no_contacts": "कोई संपर्क उपलब्ध नहीं",

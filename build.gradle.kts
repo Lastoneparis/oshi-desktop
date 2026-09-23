@@ -111,6 +111,22 @@ val sharedServiceSources = "$oshiAndroidRoot/app/src/main/java/com/oshi/messenge
 val sharedEncryptionSources =
     "$oshiAndroidRoot/app/src/main/java/com/oshi/messenger/network/encryption"
 
+/*
+ * __GIF_PACK_2026_09_23__ The offline GIF + sticker library (1,718 GIFs, 1,454 stickers,
+ * 15 categories, 15 languages) that iOS (`OSHI/GifPack`, `OSHI/StickerPack`) and Android
+ * (`assets/GifPack`, `assets/StickerPack`) both ship — byte-identical, manifests included.
+ * Read from the Android tree like the shared sources, never copied: a second copy is a
+ * second thing to forget to update when a pack grows. Packaged under `gifpacks/` on the
+ * classpath. A checkout without the Android tree simply builds without the pack, and the
+ * picker says so rather than failing.
+ */
+tasks.named<ProcessResources>("processResources") {
+    from("$oshiAndroidRoot/app/src/main/assets") {
+        include("GifPack/**", "StickerPack/**")
+        into("gifpacks")
+    }
+}
+
 sourceSets {
     main {
         kotlin.srcDir(sharedV2Sources)

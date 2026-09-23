@@ -1290,6 +1290,7 @@
   "group.member.send_message": "שלח הודעה",
   "group.member.view_profile": "צפה בפרופיל",
   "group.member.you_admin": "אתה (מנהל)",
+  "group.member_must_update": "%@ צריך לעדכן את OSHI כדי לקבל את ההודעות של הקבוצה",
   "group.mute": "השתק התראות",
   "group.mute_group": "השתק קבוצה",
   "group.no_contacts": "אין אנשי קשר זמינים",

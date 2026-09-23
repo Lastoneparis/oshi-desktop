@@ -1290,6 +1290,7 @@
   "group.member.send_message": "Trimite mesaj",
   "group.member.view_profile": "Vezi profilul",
   "group.member.you_admin": "Tu (administrator)",
+  "group.member_must_update": "%@ trebuie să actualizeze OSHI pentru a primi mesajele acestui grup",
   "group.mute": "Dezactivează notificările",
   "group.mute_group": "Dezactivează sunetul grupului",
   "group.no_contacts": "Niciun contact disponibil",

@@ -1290,6 +1290,7 @@
   "group.member.send_message": "Gửi tin nhắn",
   "group.member.view_profile": "Xem hồ sơ",
   "group.member.you_admin": "Bạn (Quản trị viên)",
+  "group.member_must_update": "%@ cần cập nhật OSHI để nhận tin nhắn của nhóm này",
   "group.mute": "Tắt thông báo",
   "group.mute_group": "Tắt thông báo nhóm",
   "group.no_contacts": "Không có liên hệ khả dụng",

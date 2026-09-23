@@ -1290,6 +1290,7 @@
   "group.member.send_message": "Send melding",
   "group.member.view_profile": "Vis profil",
   "group.member.you_admin": "Du (administrator)",
+  "group.member_must_update": "%@ må oppdatere OSHI for å motta meldingene i denne gruppen",
   "group.mute": "Demp varsler",
   "group.mute_group": "Demp gruppe",
   "group.no_contacts": "Ingen kontakter tilgjengelig",

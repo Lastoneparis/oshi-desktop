@@ -1290,6 +1290,7 @@
   "group.member.send_message": "Lähetä viesti",
   "group.member.view_profile": "Näytä profiili",
   "group.member.you_admin": "Sinä (ylläpitäjä)",
+  "group.member_must_update": "%@: päivitä OSHI, jotta saat tämän ryhmän viestit",
   "group.mute": "Mykistä ilmoitukset",
   "group.mute_group": "Mykistä ryhmä",
   "group.no_contacts": "Ei yhteystietoja saatavilla",

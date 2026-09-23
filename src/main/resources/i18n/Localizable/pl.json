@@ -1552,6 +1552,7 @@
   "group.member.send_message": "Wyślij wiadomość",
   "group.member.view_profile": "Zobacz profil",
   "group.member.you_admin": "Ty (Admin)",
+  "group.member_must_update": "%@ musi zaktualizować OSHI, aby otrzymywać wiadomości tej grupy",
   "group.mute": "Wycisz powiadomienia",
   "group.mute_group": "Wycisz grupę",
   "group.no_contacts": "Brak dostępnych kontaktów",

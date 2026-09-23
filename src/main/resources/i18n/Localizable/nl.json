@@ -1290,6 +1290,7 @@
   "group.member.send_message": "Bericht verzenden",
   "group.member.view_profile": "Profiel bekijken",
   "group.member.you_admin": "Jij (beheerder)",
+  "group.member_must_update": "%@ moet OSHI bijwerken om de berichten van deze groep te ontvangen",
   "group.mute": "Meldingen dempen",
   "group.mute_group": "Groep dempen",
   "group.no_contacts": "Geen contacten beschikbaar",

@@ -1290,6 +1290,7 @@
   "group.member.send_message": "메시지 보내기",
   "group.member.view_profile": "프로필 보기",
   "group.member.you_admin": "나 (관리자)",
+  "group.member_must_update": "%@ 님은 이 그룹의 메시지를 받으려면 OSHI를 업데이트해야 합니다",
   "group.mute": "알림 음소거",
   "group.mute_group": "그룹 음소거",
   "group.no_contacts": "사용 가능한 연락처 없음",

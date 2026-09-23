@@ -1440,6 +1440,7 @@
   "group.member.you_admin": "شما (مدیر)",
   "group.member_joined": "%@ به گروه پیوست",
   "group.member_left": "%@ از گروه خارج شد",
+  "group.member_must_update": "%@ باید OSHI را به\u200cروزرسانی کند تا پیام\u200cهای این گروه را دریافت کند",
   "group.member_permissions": "مجوزهای اعضا",
   "group.members": "اعضا",
   "group.members_count": "%d عضو",

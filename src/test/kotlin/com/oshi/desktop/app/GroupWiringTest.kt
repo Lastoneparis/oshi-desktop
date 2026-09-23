@@ -212,21 +212,48 @@ class GroupWiringTest {
     }
 
     @Test
-    fun `a member_sync_request from a non-member is refused, not auto-added`() {
+    fun `a member_sync_request from a non-member is refused unless it is an authenticated invite join to an admin`() {
         val me = fx.client("me")
         val ingest = GroupIngest(me.groups) { me.address }
-        me.groups.put(definition("g8", listOf(me.address to true)))
+        me.groups.put(definition("g8", listOf(me.address to true, "admin2" to true)))
 
-        val result = ingest.ingest(
+        // Naming someone else: nobody can join on another key's behalf.
+        val spoofed = ingest.ingest(
+            ControlPrefix.GROUP_UPDATE + GroupUpdateWire.encodeMemberSyncRequest("g8", "victim"),
+            sender = "stranger",
+        )
+        assertEquals(GroupIngest.Outcome.REJECTED_NOT_PERMITTED, spoofed.outcome)
+        assertFalse(me.groups.get("g8")!!.isMember("victim"))
+
+        // We are not an admin of this one: nothing is written.
+        me.groups.put(definition("g8b", listOf("boss" to true, me.address to false)))
+        val notAdmin = ingest.ingest(
+            ControlPrefix.GROUP_UPDATE + GroupUpdateWire.encodeMemberSyncRequest("g8b", "stranger"),
+            sender = "stranger",
+        )
+        assertEquals(GroupIngest.Outcome.REJECTED_NOT_PERMITTED, notAdmin.outcome)
+        assertFalse(me.groups.get("g8b")!!.isMember("stranger"))
+
+        // A blocked key is never admitted.
+        ingest.isBlocked = { it == "blocked" }
+        val blocked = ingest.ingest(
+            ControlPrefix.GROUP_UPDATE + GroupUpdateWire.encodeMemberSyncRequest("g8", "blocked"),
+            sender = "blocked",
+        )
+        assertEquals(GroupIngest.Outcome.REJECTED_NOT_PERMITTED, blocked.outcome)
+
+        // The invite path (GROUP_E2E_V2_SPEC §5.3): the authenticated requester, to an admin.
+        val joined = ingest.ingest(
             ControlPrefix.GROUP_UPDATE + GroupUpdateWire.encodeMemberSyncRequest("g8", "stranger"),
             sender = "stranger",
         )
-
-        assertEquals(GroupIngest.Outcome.REJECTED_BY_AUTHORIZER, result.outcome)
-        assertFalse(
-            "iOS's unauthenticated membership write was copied",
-            me.groups.get("g8")!!.isMember("stranger"),
-        )
+        assertEquals(GroupIngest.Outcome.UPDATED, joined.outcome)
+        val g = me.groups.get("g8")!!
+        assertTrue(g.isMember("stranger"))
+        assertFalse("a joiner arrived as admin", g.isAdmin("stranger"))
+        assertEquals(2, g.stateVersion)
+        assertNotNull(joined.respondTo)
+        assertNotNull("the other members were not told", joined.broadcast)
     }
 
     @Test

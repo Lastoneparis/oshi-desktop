@@ -1290,6 +1290,7 @@
   "group.member.send_message": "Üzenet küldése",
   "group.member.view_profile": "Profil megtekintése",
   "group.member.you_admin": "Te (adminisztrátor)",
+  "group.member_must_update": "%@ frissítse az OSHI-t, hogy megkapja a csoport üzeneteit",
   "group.mute": "Értesítések némítása",
   "group.mute_group": "Csoport némítása",
   "group.no_contacts": "Nincsenek elérhető névjegyek",

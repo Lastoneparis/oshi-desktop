@@ -271,6 +271,16 @@ class MessageStore(
         return updated
     }
 
+    /** __GROUP_PARITY_2026_09_23__ delete one message on this device only. */
+    @Synchronized
+    fun hideLocally(conversationId: String, id: String): Message? {
+        val current = message(conversationId, id) ?: return null
+        if (current.hiddenLocally) return current
+        val updated = current.copy(content = null, mediaRef = null, hiddenLocally = true)
+        append(updated)
+        return updated
+    }
+
     @Synchronized
     fun setReaction(conversationId: String, id: String, senderAddress: String, emoji: String?): Message? {
         val current = message(conversationId, id) ?: return null
@@ -401,8 +411,12 @@ class MessageStore(
             }
             val existing = byId[message.id]
             if (existing != null && existing.isDuplicateOf(message)) return AppendOutcome.DUPLICATE
+            // __GROUP_PARITY_2026_09_23__ deleted for me: a later copy (redelivery, edit, reaction)
+            // neither resurrects it nor raises a notification.
+            if (existing?.hiddenLocally == true && !message.hiddenLocally) return AppendOutcome.DUPLICATE
 
-            val stamped = message.copy(localSeq = nextSeq)
+            // A row deleted for me stays deleted for me, whatever copy arrives later.
+            val stamped = message.copy(localSeq = nextSeq, hiddenLocally = message.hiddenLocally || existing?.hiddenLocally == true)
             val line = stamped.toJson().toString()
             appendLineDurable(file, encodeLine(file, line))
             apply(stamped)
@@ -573,6 +587,14 @@ data class Message(
     /** emoji -> senders. Empty map, never null, so callers never null-check it. */
     val reactions: Map<String, Set<String>> = emptyMap(),
     /**
+     * __GROUP_PARITY_2026_09_23__ "Delete for me" (iOS `deleteGroupMessage`, local only). The row
+     * is KEPT so a redelivery of the same id is still recognised as a duplicate and does not
+     * come back; readers that draw a conversation skip it.
+     */
+    val hiddenLocally: Boolean = false,
+    /** __MENTIONS_2026_09_23__ admitted `@name` targets of a group message (see `MentionWire`). */
+    val mentions: List<com.oshi.desktop.group.MentionWire.Mention> = emptyList(),
+    /**
      * Append-order sequence within its conversation, assigned by [MessageStore] — the
      * ordering tiebreaker for two messages that claim the identical [sentAtMs]. Not
      * meaningful across conversations, and callers should not set it themselves; [copy]
@@ -611,7 +633,9 @@ data class Message(
             sentAtSource == other.sentAtSource && deliveryStatus == other.deliveryStatus &&
             editedAtMs == other.editedAtMs && editedContent == other.editedContent &&
             isDeletedForEveryone == other.isDeletedForEveryone && isViewOnce == other.isViewOnce &&
-            viewOnceOpened == other.viewOnceOpened && reactions == other.reactions
+            viewOnceOpened == other.viewOnceOpened && reactions == other.reactions &&
+            mentions == other.mentions &&
+            (hiddenLocally || !other.hiddenLocally)
 
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id)
@@ -632,6 +656,8 @@ data class Message(
         if (isDeletedForEveryone) put("isDeletedForEveryone", true)
         if (isViewOnce) put("isViewOnce", true)
         if (viewOnceOpened) put("viewOnceOpened", true)
+        if (hiddenLocally) put("hiddenLocally", true)
+        com.oshi.desktop.group.MentionWire.render(mentions)?.let { put("mentions", JSONArray(it)) }
         if (reactions.isNotEmpty()) {
             put("reactions", JSONObject().apply {
                 for ((emoji, senders) in reactions.toSortedMap()) {
@@ -665,6 +691,8 @@ data class Message(
             isDeletedForEveryone = o.optBoolean("isDeletedForEveryone", false),
             isViewOnce = o.optBoolean("isViewOnce", false),
             viewOnceOpened = o.optBoolean("viewOnceOpened", false),
+            hiddenLocally = o.optBoolean("hiddenLocally", false),
+            mentions = com.oshi.desktop.group.MentionWire.parse(o.opt("mentions")),
             reactions = o.optJSONObject("reactions")?.let { r ->
                 val out = LinkedHashMap<String, Set<String>>()
                 for (emoji in r.keys()) {
@@ -724,7 +752,10 @@ enum class MediaType(val wire: String) {
          * attachment with no renderer.
          */
         fun fromWire(raw: String): MediaType =
-            if (raw == "photo") IMAGE else entries.firstOrNull { it.wire == raw } ?: UNKNOWN
+            // __GIF_PACK_2026_09_23__ `gif` is what iOS (HEAD, `MediaManager.gifWireType`) stamps
+            // on a GIF; Android maps it to IMAGE too (`MediaType.fromWireLabel`). The bubble
+            // animates from the bytes (`GIF8` header), never from this label.
+            if (raw == "photo" || raw == "gif") IMAGE else entries.firstOrNull { it.wire == raw } ?: UNKNOWN
 
         /**
          * The type a MIME string implies, for the two places the wire does not say.

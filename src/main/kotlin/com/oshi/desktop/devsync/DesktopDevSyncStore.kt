@@ -537,6 +537,18 @@ class DesktopDevSyncStore(
             o.put(gid, JSONObject().put("leftAt", at).put("name", prev?.optString("name")?.takeIf { it.isNotEmpty() } ?: name))
             state.write(LEFT_FILE, o.toString())
         }
+        /**
+         * __GROUP_PARITY_2026_09_23__ A (re)join made on THIS desktop — an invite link — lifts a leave,
+         * like iOS `DevSyncIOSStore.recordLocalJoin` does before `joinGroupFromInvite` (C.16).
+         */
+        @Synchronized
+        fun recordLocalJoin(state: DevSyncStateStore, groupId: String, joinedAtMs: Long) {
+            val gid = SyncJson.canonicalGroupId(groupId)
+            val left = runCatching { JSONObject(state.read(LEFT_FILE) ?: "{}") }.getOrDefault(JSONObject())
+            if (left.remove(gid) != null) state.write(LEFT_FILE, left.toString())
+            val joined = runCatching { JSONObject(state.read(JOINED_FILE) ?: "{}") }.getOrDefault(JSONObject())
+            if (joined.optLong(gid, -1L) < joinedAtMs) state.write(JOINED_FILE, joined.put(gid, joinedAtMs).toString())
+        }
         private const val PROFILE_FILE = "devsync-profile"
         private const val MAX_AVATAR_BYTES = 2L * 1024 * 1024
     }

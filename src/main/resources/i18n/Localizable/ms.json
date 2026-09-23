@@ -1290,6 +1290,7 @@
   "group.member.send_message": "Hantar Mesej",
   "group.member.view_profile": "Lihat Profil",
   "group.member.you_admin": "Anda (Pentadbir)",
+  "group.member_must_update": "%@ perlu mengemas kini OSHI untuk menerima mesej kumpulan ini",
   "group.mute": "Senyapkan Pemberitahuan",
   "group.mute_group": "Senyapkan Kumpulan",
   "group.no_contacts": "Tiada kenalan tersedia",

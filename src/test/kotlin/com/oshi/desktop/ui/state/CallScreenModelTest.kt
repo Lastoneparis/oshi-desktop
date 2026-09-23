@@ -61,6 +61,8 @@ class CallScreenModelTest {
         val ringer = FakeRinger()
         val summaries = ArrayList<Triple<String, String, Boolean>>()
         val rated = ArrayList<String>()
+        val missed = ArrayList<String>()
+        val live = ArrayList<Boolean>()
         val model = CallScreenModel(
             lane = lane,
             labelFor = { if (it == address) "me" else "Alice Martin" },
@@ -69,6 +71,8 @@ class CallScreenModelTest {
             afterCall = { callId, _, _, _ -> rated += callId },
             worker = direct,
             clock = { now },
+            onMissedCall = { peer, _ -> missed += peer },
+            onCallLive = { live += it },
         ).also { m -> lane.onEvent = m::onEvent }
 
         fun poll() = lane.pollOnce(now)
@@ -213,5 +217,62 @@ class CallScreenModelTest {
         assertTrue(b.lane.muted)
         b.model.toggleMute()
         assertTrue(!b.lane.muted)
+    }
+
+    // ------------------------------------------------ __CALL_PARITY_2026_09_23__
+
+    @Test
+    fun aMissedCallNotifiesOnceAndADeclinedOrAnsweredOneNever() {
+        // Timed out: missed.
+        run {
+            val a = Party(); val b = Party()
+            a.lane.call(b.address, now)
+            now += 10; b.poll()
+            now += CallTimeouts.CALLEE_RING_MS + 1
+            b.lane.tick(now)
+            assertEquals(listOf(a.address), b.missed)
+            assertTrue("the caller has no missed call", a.missed.isEmpty())
+        }
+        // Caller cancelled while it rang: missed.
+        run {
+            val a = Party(); val b = Party()
+            a.lane.call(b.address, now)
+            now += 10; b.poll()
+            now += CallTimeouts.END_GRACE_AFTER_DIAL_MS + 1_000
+            a.lane.hangUp(nowMs = now)
+            now += 10; b.poll()
+            assertEquals(listOf(a.address), b.missed)
+        }
+        // Declined here: not missed.
+        run {
+            val a = Party(); val b = Party()
+            a.lane.call(b.address, now)
+            now += 10; b.poll()
+            b.model.decline()
+            assertTrue(b.missed.isEmpty())
+        }
+    }
+
+    @Test
+    fun theCallIsLiveExactlyWhileConnectedAndMinimizeRoundTrips() {
+        val a = Party(); val b = Party()
+        a.lane.call(b.address, now)
+        now += 10; b.poll()
+        assertTrue("ringing is not live", b.live.isEmpty())
+        now += 10; b.model.answer()
+        now += 10; a.poll(); b.poll()
+        assertEquals(Phase.CONNECTED, b.screen!!.phase)
+        assertEquals(listOf(true), b.live)
+
+        b.model.setMinimized(true)
+        assertTrue(b.screen!!.minimized)
+        b.model.setMinimized(false)
+        assertTrue(!b.screen!!.minimized)
+
+        now += 65_000; b.model.hangUp()
+        assertEquals(listOf(true, false), b.live)
+        b.model.setMinimized(true)
+        assertTrue("an ended call never minimizes", !b.screen!!.minimized)
+        assertTrue(b.missed.isEmpty())
     }
 }

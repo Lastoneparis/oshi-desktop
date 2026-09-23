@@ -1290,6 +1290,7 @@
   "group.member.send_message": "Odeslat zprávu",
   "group.member.view_profile": "Zobrazit profil",
   "group.member.you_admin": "Vy (Správce)",
+  "group.member_must_update": "%@ musí aktualizovat OSHI, aby dostával(a) zprávy této skupiny",
   "group.mute": "Ztlumit oznámení",
   "group.mute_group": "Ztlumit skupinu",
   "group.no_contacts": "Žádné dostupné kontakty",

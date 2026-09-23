@@ -108,6 +108,25 @@ class SharedNicknameSendTest {
         assertEquals("no extra rows from the exchange", 2, a.history(b.address).size)
     }
 
+    /**
+     * __FIRST_CONTACT_NICKNAME_2026_09_23__ A stranger's FIRST message with no profile attached
+     * (Android 1.6.25 skipped it when the contact row pre-existed): we ask at once, even though
+     * we never wrote to them, and the conversation gets their nickname without us replying.
+     */
+    @Test
+    fun `a stranger's first message without a profile gets them asked and named`() {
+        val a = fx.client("alice")
+        val b = fx.client("bob")
+        b.vault.put(OshiClient.OWN_NICKNAME_ACCOUNT, "Bob".toByteArray())
+        fx.seedOutgoing(b, a.address, "b-1", "hello")        // Bob wrote to Alice…
+        fx.inbound(a, b.address, "hello", msgId = "b-1")     // …with no profile alongside.
+        assertNull(a.contacts.get(b.address)?.sharedNickname)
+        b.router.poll()      // Bob receives Alice's silent PROFILE_REQUEST and answers
+        a.router.poll()
+        assertEquals("Bob", a.contacts.get(b.address)!!.sharedNickname)
+        assertTrue("asking discloses nothing of ours", b.contacts.get(a.address)?.sharedNickname == null)
+    }
+
     @Test
     fun `the nickname survives a restart - it lives in the sealed vault, not a plaintext file`() {
         val a = fx.client("alice")

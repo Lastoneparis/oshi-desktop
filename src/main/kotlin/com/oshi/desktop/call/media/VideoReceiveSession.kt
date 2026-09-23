@@ -136,7 +136,9 @@ class VideoReceiveSession(
         if (annexB.isEmpty()) { rejected++; return Result(false, requestKeyframe = throttle(abandoned)) }
         sink?.writeAccessUnit(annexB)
         delivered++
-        return Result(true, idr, outcome.frameId, throttle(abandoned), annexB)
+        // An IDR that arrives after a hole already IS the recovery: asking for another one
+        // would only spend the peer's uplink on a second keyframe.
+        return Result(true, idr, outcome.frameId, throttle(abandoned && !idr), annexB)
     }
 
     /**

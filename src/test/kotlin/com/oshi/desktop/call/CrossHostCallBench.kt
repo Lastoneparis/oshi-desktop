@@ -91,9 +91,14 @@ class CrossHostCallBench {
                 println("[cross] callee: waiting for the call")
                 waitFor("an incoming call", 8 * 60_000) { me.model.screen?.phase == CallScreenModel.Phase.INCOMING }
                 me.model.answer()
-                me.measureAndAssert()
+                // A failed check here must NOT close the call under the caller, which is still
+                // measuring: CI 35868599749 lost the caller's whole result (every counter read
+                // as null after teardown) to the callee's audio assertion. Hold the call until
+                // the caller hangs up, then report our own verdict.
+                val verdict = runCatching { me.measureAndAssert() }
                 // The caller hangs up after its own measurement; do not cut it short.
                 waitFor("the caller to hang up", holdMs + 60_000) { me.model.screen?.phase == CallScreenModel.Phase.ENDED }
+                verdict.getOrThrow()
             }
             "caller" -> Side("caller", callerId).use { me ->
                 me.startPolling()
@@ -108,8 +113,9 @@ class CrossHostCallBench {
                     if (me.model.screen?.phase == CallScreenModel.Phase.CONNECTED) break
                     Thread.sleep(500)
                 }
-                me.measureAndAssert()
+                val verdict = runCatching { me.measureAndAssert() }
                 me.model.hangUp()
+                verdict.getOrThrow()
             }
         }
     }

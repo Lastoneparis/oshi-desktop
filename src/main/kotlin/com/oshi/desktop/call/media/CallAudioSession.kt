@@ -207,15 +207,14 @@ open class CallAudioSession(
      */
     @Throws(LineUnavailableException::class)
     protected open fun openDevices(): AudioDevices {
-        val inLine = AudioSystem.getLine(
-            DataLine.Info(TargetDataLine::class.java, CallAudio.FORMAT),
-        ) as TargetDataLine
+        // __CALL_DEVICES_2026_09_23__ the user's microphone/speaker, or the default.
+        val inLine = CallDevices.captureLine(CallAudio.FORMAT)
         // Four frames of device buffer. Smaller starves on a scheduling hiccup;
         // larger adds latency the user hears as delay before the jitter buffer ever
         // sees the audio.
         inLine.open(CallAudio.FORMAT, CallAudio.BYTES_PER_FRAME * 4)
         val outLine = try {
-            (AudioSystem.getLine(DataLine.Info(SourceDataLine::class.java, CallAudio.FORMAT)) as SourceDataLine)
+            CallDevices.renderLine(CallAudio.FORMAT)
                 .also { it.open(CallAudio.FORMAT, CallAudio.BYTES_PER_FRAME * 4) }
         } catch (t: Throwable) {
             runCatching { inLine.close() }
@@ -245,6 +244,18 @@ open class CallAudioSession(
      * hole punch opened would age out under a long mute.
      */
     @Volatile var muted: Boolean = false
+
+    /**
+     * __WB_ADPCM_CODEC_2026_09_23__ Send 0x18 (wideband IMA-ADPCM, 200 B/datagram) instead
+     * of 0x15 (1957 B, two IP fragments). Set from the negotiated capability, and flipped on
+     * by the first 0x18 received — only a build that decodes it sends it.
+     */
+    @Volatile var useWbAdpcm: Boolean = false
+    private val wbTxState = WbAdpcmCodec.EncoderState()
+    private val wbTxResampler = WbResampler()
+    private val wbRxResampler = WbResampler()
+    /** __WB_POSTFILTER_2026_09_23__ receiver-side ADPCM hiss removal (see [WbPostFilter]). */
+    private val wbRxPostFilter = WbPostFilter()
 
     /** Sealed frames handed to the socket. The outbound half of "audio is flowing". */
     val framesSent = java.util.concurrent.atomic.AtomicLong()
@@ -321,6 +332,13 @@ open class CallAudioSession(
         if (!replay.accept(decoded.seq)) return false
         // 0x05 AAC-ELD and 0x16 OshiCodec authenticate fine and are not decodable here.
         // Dropping them is correct; playing the compressed bytes as PCM is white noise.
+        if (decoded.audioType == CallMediaFrame.TYPE_WB_ADPCM) {
+            val pcm = WbAdpcmCodec.decodeToPcm48(decoded.pcm, wbRxResampler, wbRxPostFilter)
+            if (pcm.isEmpty()) return false
+            useWbAdpcm = true
+            playback.offer(pcm)
+            return true
+        }
         if (decoded.audioType != CallMediaFrame.TYPE_PCM_48K) return false
         playback.offer(decoded.pcm)
         return true
@@ -340,9 +358,12 @@ open class CallAudioSession(
                 if (buf.all { it == 0.toByte() }) consecutiveSilentFrames.incrementAndGet()
                 else consecutiveSilentFrames.set(0)
             }
+            val pcm = if (muted) ByteArray(buf.size) else buf.copyOf()
+            val wb = useWbAdpcm
             val sealed = CallMediaFrame.encode(
                 sessionKey, baseSalt, isCaller, sequence.next(),
-                CallMediaFrame.TYPE_PCM_48K, if (muted) ByteArray(buf.size) else buf.copyOf(),
+                if (wb) CallMediaFrame.TYPE_WB_ADPCM else CallMediaFrame.TYPE_PCM_48K,
+                if (wb) WbAdpcmCodec.encodePcm48(pcm, wbTxResampler, wbTxState) else pcm,
             )
             if (runCatching { send(sealed) }.isSuccess) framesSent.incrementAndGet()
         }

@@ -201,6 +201,34 @@ class GroupE2EV2VectorsTest {
         }
     }
 
+    /**
+     * __GROUP_COMPAT_IGNORE_2026_09_23__ An Android rename emits definition + `group_renamed` + its
+     * legacy `{"type":"updated"}`; the last one used to come out REJECTED_MALFORMED. Replay the
+     * spec's rename sequence as B and check nothing in it is refused.
+     */
+    @Test
+    fun `rename sequence from Android - definition, rename_minimal and legacy updated are all accepted`() {
+        val me = fx.client("me")
+        val ingest = GroupIngest(me.groups) { B }
+        assertEquals(GroupIngest.Outcome.CREATED, ingest.ingest(vec("state", "create").getString("plaintext"), A).outcome)
+        assertEquals(GroupIngest.Outcome.UPDATED, ingest.ingest(vec("state", "rename").getString("plaintext"), A).outcome)
+        assertEquals("Team 2", me.groups.get(gid)!!.name)
+        // Companion after the definition: already applied ⇒ NO_CHANGE, never malformed.
+        assertEquals(GroupIngest.Outcome.NO_CHANGE, ingest.ingest(vec("state", "rename_minimal").getString("plaintext"), A).outcome)
+        // The exact frame Android 1.6.25 GroupManager.notifyGroupUpdated sent after a rename.
+        val legacy = GroupUpdateWire.PREFIX + JSONObject().put("type", "updated").put("groupId", gid)
+            .put("name", "Team 2").put("description", "").toString()
+        val r = ingest.ingest(legacy, A)
+        assertEquals(r.detail, GroupIngest.Outcome.IGNORED, r.outcome)
+        assertEquals("Team 2", me.groups.get(gid)!!.name)
+        // The spec's optional read receipts: ignored, not malformed.
+        assertEquals(GroupIngest.Outcome.IGNORED, ingest.ingest(vec("state", "read_receipt_batch").getString("plaintext"), B).outcome)
+        // Garbage and a modelled type missing its fields stay malformed.
+        assertEquals(GroupIngest.Outcome.REJECTED_MALFORMED, ingest.ingest(GroupUpdateWire.PREFIX + "not json", A).outcome)
+        assertEquals(GroupIngest.Outcome.REJECTED_MALFORMED,
+            ingest.ingest(GroupUpdateWire.PREFIX + "{\"type\":\"group_renamed\",\"name\":\"x\"}", A).outcome)
+    }
+
     // ------------------------------------------------------------------ sent copy
 
     @Test

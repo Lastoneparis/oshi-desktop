@@ -97,18 +97,26 @@ class CallVideoSession(
     private val receiver = VideoReceiveSession(sessionKey, sink = object : VideoStreamSink {
         override fun writeParameterSets(sps: ByteArray, pps: ByteArray) {
             // Never dropped: a lost parameter set would make every later frame undecodable.
+            val p = Job.Params(sps, pps)
+            lastParams = p
             decodeQueue.clear()
-            decodeQueue.offer(Job.Params(sps, pps))
+            decodeQueue.offer(p)
         }
         override fun writeAccessUnit(bytes: ByteArray) {
             if (!decodeQueue.offer(Job.Unit(bytes, lastRotation))) {
                 // Decoder behind: drop the backlog and ask for a clean restart point.
+                // The parameter sets go back in FIRST — the receive session writes them once
+                // and again only when they change, so clearing them here left the decoder
+                // without an SPS for the rest of the call (CI 35868599749: 642 frames
+                // delivered to a Windows caller whose decoder started late, 0 decoded).
                 decodeQueue.clear()
+                lastParams?.let { decodeQueue.offer(it) }
                 keyframeRequestPending = true
             }
         }
     })
     @Volatile private var lastRotation = 0
+    @Volatile private var lastParams: Job.Params? = null
     @Volatile private var keyframeRequestPending = false
     private var decodeThread: Thread? = null
 
@@ -227,6 +235,18 @@ class CallVideoSession(
             stopCamera()
             if (announce) announceCamera(false)
         }
+    }
+
+    /**
+     * __CALL_DEVICES_2026_09_23__ The iPhone's "switch camera", desktop-shaped: reopen the
+     * camera on the device now chosen in [com.oshi.desktop.call.media.CallDevices]. Nothing is
+     * announced — to the peer the camera never went off, the stream just continues from a
+     * new keyframe (a new encoder starts on one).
+     */
+    fun switchCamera() {
+        if (!cameraWanted || !active) return
+        stopCamera()
+        startCamera()
     }
 
     /** Ask the peer to turn this voice call into a video call (`0x0E`/`0x01`). */

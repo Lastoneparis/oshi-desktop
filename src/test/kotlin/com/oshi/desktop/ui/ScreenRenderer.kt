@@ -228,6 +228,24 @@ object ScreenRenderer {
             ))
             videoShot("21-video-peer-camera-off.png", connected.copy(video = true, cameraOn = true, remoteCameraOff = true))
             shot("22-voice-call-video-request.png", connected.copy(upgradeRequested = true))
+            // __CALL_PARITY_2026_09_23__ reconnecting, carrier badge, stalled picture, mini bar.
+            shot("23-call-reconnecting.png", connected.copy(reconnecting = true, carrier = com.oshi.desktop.ui.state.CallCarrier.UDP_RELAY))
+            shot("24-call-connected-p2p-badge.png", connected.copy(carrier = com.oshi.desktop.ui.state.CallCarrier.P2P))
+            videoShot("25-video-stalled-audio-ok.png", connected.copy(
+                video = true, cameraOn = true, videoStalled = true, audioFlowing = true,
+                carrier = com.oshi.desktop.ui.state.CallCarrier.TURN,
+            ))
+            render(File(out, "26-call-minimized-bar.png"), W, H) {
+                androidx.compose.foundation.layout.Box(
+                    androidx.compose.ui.Modifier.fillMaxSize()
+                        .background(androidx.compose.ui.graphics.Color(0xFFF4F3F8)),
+                ) {
+                    com.oshi.desktop.ui.components.CallMiniBar(
+                        connected.copy(minimized = true), {}, {}, nowMs = { fixedNow },
+                        modifier = androidx.compose.ui.Modifier.align(androidx.compose.ui.Alignment.TopCenter),
+                    )
+                }
+            }
             render(File(out, "17-call-rating.png"), W, H) {
                 com.oshi.desktop.ui.components.CallRatingPrompt({}, {})
             }
@@ -243,6 +261,102 @@ object ScreenRenderer {
                 onShow = {},
                 today = LocalDate.now(),
             )
+        }
+        // __GROUP_PARITY_2026_09_23__ a group thread: picture, sender names, a reply quote, a
+        // forwarded message, the "replying to" banner, the picture and mute controls.
+        run {
+            val picture = com.oshi.desktop.group.GroupPicture.prepare(
+                java.io.ByteArrayOutputStream().also { bos ->
+                    val img = java.awt.image.BufferedImage(256, 256, java.awt.image.BufferedImage.TYPE_INT_RGB)
+                    val g = img.createGraphics()
+                    g.paint = java.awt.GradientPaint(0f, 0f, java.awt.Color(0x5B, 0x5B, 0xF6), 256f, 256f, java.awt.Color(0xF6, 0x9B, 0x5B))
+                    g.fillRect(0, 0, 256, 256); g.dispose()
+                    javax.imageio.ImageIO.write(img, "png", bos)
+                }.toByteArray()
+            )!!.let(com.oshi.desktop.group.GroupPicture::encodeBase64)
+            fun msg(id: String, fromMe: Boolean, who: String, body: String, stamp: String,
+                    quote: com.oshi.desktop.ui.state.QuoteRow? = null, fwd: String? = null) =
+                com.oshi.desktop.ui.state.MessageRow(
+                    id = id, fromMe = fromMe, who = who, body = body, attachment = null, stamp = stamp,
+                    status = if (fromMe) "delivered" else null, failed = false, edited = false, deleted = false,
+                    reactions = "", quote = quote, forwardedFrom = fwd,
+                )
+            val thread = com.oshi.desktop.ui.state.ThreadView(
+                conversationId = "G1", title = "Weekend hike", address = "3F2A9C10-0000-4000-8000-00000000G001",
+                kind = ConversationKind.GROUP, groupAdmin = true,
+                groupPictureBase64 = picture, groupCanEditInfo = true, groupMuted = false,
+                groupMembers = listOf(
+                    com.oshi.desktop.ui.state.GroupMemberRow(addr('a'), "Alice", isAdmin = true, isCreator = true, self = true),
+                    com.oshi.desktop.ui.state.GroupMemberRow(addr('b'), "Bob", isAdmin = false, isCreator = false, self = false),
+                    com.oshi.desktop.ui.state.GroupMemberRow(addr('c'), "Chloé", isAdmin = false, isCreator = false, self = false),
+                ),
+                groupCandidates = emptyList(), safetyNumber = "", verified = false,
+                reach = com.oshi.desktop.ui.state.Reach.NOT_APPLICABLE, reachLabel = "", peerTyping = false,
+                messages = listOf(
+                    msg("1", false, "Bob", "Trailhead at 8, parking fills up fast", "09:12"),
+                    msg("2", false, "Chloé", "I'll bring the map", "09:14"),
+                    msg("3", true, "me", "Perfect, see you there",
+                        "09:15", quote = com.oshi.desktop.ui.state.QuoteRow("1", "Bob", "Trailhead at 8, parking fills up fast")),
+                    msg("4", false, "Bob", "Weather says clear skies all day", "09:20", fwd = "Météo Alpes"),
+                ),
+                composer = com.oshi.desktop.ui.state.ComposerState(true, null, true, null),
+            )
+            render(File(out, "23-group-thread.png"), W, H) {
+                com.oshi.desktop.ui.components.ThreadPane(
+                    thread = thread, notice = null, busy = false,
+                    wallpaper = com.oshi.desktop.ui.components.WallpaperId.NONE, onPickWallpaper = {},
+                    draft = "Can't wait", onDraft = {}, onSend = {}, onAttach = {}, onVoiceNote = {},
+                    onRenameGroup = {}, onReact = { _, _ -> }, onEditMessage = { _, _ -> }, onDeleteMessage = {},
+                    onAddGroupMember = {}, onRemoveGroupMember = {}, onSetGroupMemberAdmin = { _, _ -> },
+                    viewOnce = com.oshi.desktop.ui.components.ViewOnceFacts.NONE, revealed = emptySet(), onReveal = {},
+                    today = LocalDate.now(),
+                    replyingTo = com.oshi.desktop.ui.state.QuoteRow("2", "Chloé", "I'll bring the map"),
+                )
+            }
+            // __GROUP_PARITY_2026_09_23__ second pass: description, pinned bar, typing names, invite
+            // (header), and a blocked group (banner, closed composer).
+            val rich = thread.copy(
+                groupDescription = "Saturday hikes around Chamonix. Bring water.",
+                groupPinned = com.oshi.desktop.ui.state.QuoteRow("1", "Bob", "Trailhead at 8, parking fills up fast"),
+                typingNames = listOf("Chloé"),
+                groupInviteLink = com.oshi.desktop.group.GroupInvite.link("3F2A9C10-1B2C-4D5E-8F90-ABCDEF012345", "Weekend hike", addr('a')),
+                forwardTargets = listOf(com.oshi.desktop.ui.state.GroupCandidateRow(addr('d'), "Dan")),
+            )
+            render(File(out, "24-group-info-pinned-typing.png"), W, H) {
+                com.oshi.desktop.ui.components.ThreadPane(
+                    thread = rich, notice = null, busy = false,
+                    wallpaper = com.oshi.desktop.ui.components.WallpaperId.NONE, onPickWallpaper = {},
+                    draft = "", onDraft = {}, onSend = {}, onAttach = {}, onVoiceNote = {},
+                    onRenameGroup = {}, onReact = { _, _ -> }, onEditMessage = { _, _ -> }, onDeleteMessage = {},
+                    onAddGroupMember = {}, onRemoveGroupMember = {}, onSetGroupMemberAdmin = { _, _ -> },
+                    viewOnce = com.oshi.desktop.ui.components.ViewOnceFacts.NONE, revealed = emptySet(), onReveal = {},
+                    today = LocalDate.now(),
+                )
+            }
+            render(File(out, "25-group-blocked.png"), W, H) {
+                com.oshi.desktop.ui.components.ThreadPane(
+                    thread = rich.copy(
+                        groupBlocked = true, typingNames = emptyList(),
+                        composer = com.oshi.desktop.ui.state.ComposerState(false, "You won't receive messages from this group", false, null),
+                    ),
+                    notice = null, busy = false,
+                    wallpaper = com.oshi.desktop.ui.components.WallpaperId.NONE, onPickWallpaper = {},
+                    draft = "", onDraft = {}, onSend = {}, onAttach = {}, onVoiceNote = {},
+                    onRenameGroup = {}, onReact = { _, _ -> }, onEditMessage = { _, _ -> }, onDeleteMessage = {},
+                    onAddGroupMember = {}, onRemoveGroupMember = {}, onSetGroupMemberAdmin = { _, _ -> },
+                    viewOnce = com.oshi.desktop.ui.components.ViewOnceFacts.NONE, revealed = emptySet(), onReveal = {},
+                    today = LocalDate.now(),
+                )
+            }
+            render(File(out, "26-groups-list-pictures.png"), SIDEBAR, H) {
+                ConversationListPane(
+                    state = demoState().copy(conversations = demoState().conversations.map {
+                        if (it.kind == ConversationKind.GROUP) it.copy(pictureBase64 = picture) else it
+                    }),
+                    query = "", onQuery = {}, half = ConversationFilter.Half.GROUPS, onHalf = {},
+                    onSelect = {}, onShow = {}, today = LocalDate.now(),
+                )
+            }
         }
         render(File(out, "03-new.png"), W, H) {
             NewPane(demoState(), onStartConversation = {}, onCopy = {}, onPickQrImage = { null })

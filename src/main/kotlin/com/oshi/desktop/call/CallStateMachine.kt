@@ -182,6 +182,8 @@ sealed class CallAction {
         val nonceSalt: ByteArray,
         /** True when WE sent the offer. Decides which nonce salt direction is ours. */
         val isCaller: Boolean,
+        /** __WB_ADPCM_CODEC_2026_09_23__ the peer advertised 0x18: send it instead of 0x15. */
+        val wbAdpcm: Boolean = false,
     ) : CallAction() {
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
@@ -386,6 +388,10 @@ class CallStateMachine(
     var isVideo: Boolean = false
         private set
 
+    /** __WB_ADPCM_CODEC_2026_09_23__ the peer advertised WB-ADPCM (offer slot 4 / accept index 4). */
+    var peerWbAdpcm: Boolean = false
+        private set
+
     /** The media key from the offer, once known. */
     var sessionKey: ByteArray? = null
         private set
@@ -450,7 +456,7 @@ class CallStateMachine(
         lastAcceptAtMs = null
 
         val type = if (video) CallPacket.Type.VIDEO_CALL_REQUEST else CallPacket.Type.CALL_REQUEST
-        val offer = CallOffer(newSessionKey, newNonceSalt, newCallId).encode()
+        val offer = CallOffer(newSessionKey, newNonceSalt, newCallId, supportsVideo = true, supportsWbAdpcm = true).encode()
 
         // CONNECTING first, then RINGING — both clients publish the intermediate state and
         // arm a 20 s watchdog on it (`:5744`/`:5766`, `:1375`/`:1377`). Collapsing the two
@@ -485,7 +491,7 @@ class CallStateMachine(
         enter(CallState.CONNECTING, nowMs)
         val actions = mutableListOf<CallAction>(
             CallAction.StopRinging,
-            CallAction.Send(p, type, CallAccept().encode(), CallSignalType.CALL_ACCEPT, id),
+            CallAction.Send(p, type, CallAccept(supportsVideo = true, supportsWbAdpcm = true).encode(), CallSignalType.CALL_ACCEPT, id),
         )
         // The callee connects on sending the accept; the caller connects on receiving it.
         // Both clients do it this way, and the asymmetry is why the accept is
@@ -649,6 +655,7 @@ class CallStateMachine(
         isVideo = video
         sessionKey = offer.sessionKey
         nonceSalt = offer.nonceSalt
+        peerWbAdpcm = offer.supportsWbAdpcm
         connectedAtMs = null
         dialedAtMs = null
         enter(CallState.RINGING, nowMs)
@@ -678,7 +685,8 @@ class CallStateMachine(
         // offers neither OshiCodec nor AAC-ELD, so no negotiation outcome changes. Parsing
         // it anyway keeps the codec exercised and makes an empty legacy accept a tested
         // case rather than a discovered one.
-        CallAccept.decode(packet.payload)
+        // __WB_ADPCM_CODEC_2026_09_23__ except slot 4: WB-ADPCM is the one codec we share.
+        peerWbAdpcm = CallAccept.decode(packet.payload).supportsWbAdpcm
 
         val actions = mutableListOf<CallAction>(CallAction.StopRinging)
         connect(nowMs, actions)
@@ -846,7 +854,7 @@ class CallStateMachine(
         val key = sessionKey
         val salt = nonceSalt
         if (key != null && salt != null) {
-            actions.add(CallAction.StartMedia(peer!!, callId!!, key, salt, isOutgoing))
+            actions.add(CallAction.StartMedia(peer!!, callId!!, key, salt, isOutgoing, peerWbAdpcm))
         }
     }
 
@@ -878,6 +886,7 @@ class CallStateMachine(
         isVideo = false
         sessionKey = null
         nonceSalt = null
+        peerWbAdpcm = false
         connectedAtMs = null
         dialedAtMs = null
         lastAcceptAtMs = null

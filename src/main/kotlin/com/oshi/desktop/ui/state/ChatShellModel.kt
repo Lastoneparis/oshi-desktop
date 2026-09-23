@@ -107,10 +107,26 @@ class ChatShellModel(
 
     private val lock = Any()
     private val unread = HashMap<String, Int>()
+    /** __MENTIONS_2026_09_23__ conversations with an unseen `@you`; cleared when opened. */
+    private val mentionedYou = HashSet<String>()
+    /** __MENTIONS_2026_09_23__ members picked from the `@` picker for the current draft, per group. */
+    private val pickedMentions = HashMap<String, MutableList<com.oshi.desktop.group.MentionWire.Mention>>()
+
+    /** The composer's `@` picker chose [m] for the open conversation's draft. */
+    fun pickMention(m: com.oshi.desktop.group.MentionWire.Mention) {
+        synchronized(lock) {
+            val id = selectedId ?: return
+            pickedMentions.getOrPut(id) { mutableListOf() }.add(m)
+        }
+    }
     private var selectedId: String? = null
     private var destination: Destination = Destination.MESSAGES
     private var pane: Pane = Pane.CONVERSATION
     private var draftText: String = ""
+    /** __GROUP_PARITY_2026_09_23__ the message the next send replies to, and in which conversation. */
+    private var replyTarget: Pair<String, com.oshi.desktop.msg.ReplyEnvelope.Quote>? = null
+    /** __GROUP_PARITY_2026_09_23__ group id → member key → typing-until (epoch ms). */
+    private val groupTyping = HashMap<String, HashMap<String, Long>>()
     private var busy: Boolean = false
     private var notice: Notice? = null
     /** Account-pane outcome for the non-destructive V2 archive actions. */
@@ -386,9 +402,10 @@ class ChatShellModel(
             selectedId = id
             pane = Pane.CONVERSATION
             draftText = ""
+            replyTarget = null
             notice = null
             reach = Reach.UNKNOWN
-            if (id != null) unread.remove(id)
+            if (id != null) { unread.remove(id); mentionedYou.remove(id) }
         }
         publish()
         stopTyping?.takeIf { it != id }?.let { emitTyping(it, false) }
@@ -480,10 +497,12 @@ class ChatShellModel(
         stopTyping?.let { emitTyping(it, false) }
 
         val group = kindOf(target) == ConversationKind.GROUP
+        val quote = synchronized(lock) { replyTarget?.takeIf { it.first == target }?.second }
+        val mentions = synchronized(lock) { pickedMentions.remove(target)?.toList().orEmpty() }
         worker.execute {
             val result = try {
-                if (group) groupSendResult(client.sendGroupText(target, text))
-                else directSendResult(client.send(target, text))
+                if (group) groupSendResult(client.sendGroupText(target, text, quote, mentions))
+                else directSendResult(client.send(target, text, quote))
             } catch (e: Exception) {
                 synchronized(lock) {
                     busy = false
@@ -498,11 +517,48 @@ class ChatShellModel(
                 // A refused control payload is the one outcome that stored NOTHING — both
                 // send paths return before reaching the store — so clearing the box would
                 // delete what the user typed and leave no trace of it anywhere.
-                if (!result.keepDraft) draftText = ""
+                if (!result.keepDraft) { draftText = ""; replyTarget = null }
             }
             publish()
         }
     }
+
+    /**
+     * __GROUP_PARITY_2026_09_23__ Reply to [messageId] in the open conversation (1:1 or group),
+     * as iOS's swipe-to-reply does (`GroupViews.swift:5285`): the quote carries the
+     * UNWRAPPED text, never a sentinel's JSON, truncated at 180.
+     */
+    fun beginReply(messageId: String) {
+        synchronized(lock) {
+            val id = selectedId ?: return
+            val m = client.messages.messages(id).firstOrNull { it.id == messageId } ?: return
+            if (m.isDeletedForEveryone) return
+            replyTarget = id to com.oshi.desktop.msg.ReplyEnvelope.Quote(
+                originalMessageId = m.id,
+                originalSenderKey = if (m.fromMe) client.address else m.senderAddress,
+                originalText = com.oshi.desktop.msg.ReplyEnvelope.quotableText(m.content, m.mediaType?.wire),
+                originalTimestampMs = m.sentAtMs,
+                originalMediaType = m.mediaType?.wire,
+            )
+        }
+        publish()
+    }
+
+    fun cancelReply() {
+        synchronized(lock) { replyTarget = null }
+        publish()
+    }
+
+    /** Who a sender is, as THIS device names them: me, our contact alias, their nickname, or a short key. */
+    private fun senderLabel(key: String): String =
+        if (com.oshi.desktop.group.GroupIdentity.sameIdentity(key, client.address)) "me"
+        else client.contacts.get(key)?.label(short(key)) ?: short(key)
+
+    private fun quoteRow(q: com.oshi.desktop.msg.ReplyEnvelope.Quote): QuoteRow = QuoteRow(
+        messageId = q.originalMessageId,
+        who = if (q.originalSenderKey.isBlank()) "" else senderLabel(q.originalSenderKey),
+        text = q.originalText.ifBlank { q.originalMediaType?.let { "[$it]" }.orEmpty() },
+    )
 
     /**
      * Send an attachment to the open conversation — PARITY.md rows 0.15 and 0.12.
@@ -584,6 +640,22 @@ class ChatShellModel(
      * published to the relay, and the peer is not told: adding someone here is a local act.
      */
     fun startConversation(raw: String) {
+        // __GROUP_PARITY_2026_09_23__ a pasted or scanned GROUP invite joins the group instead.
+        if (com.oshi.desktop.group.GroupInvite.parse(raw) != null) {
+            val (outcome, gid) = client.joinGroupFromInvite(raw)
+            if (gid != null && outcome != OshiClient.JoinOutcome.NO_INVITER) select(gid)
+            synchronized(lock) {
+                destination = Destination.MESSAGES
+                notice = when (outcome) {
+                    OshiClient.JoinOutcome.ALREADY_MEMBER -> Notice("You are already in this group.", Severity.INFO)
+                    OshiClient.JoinOutcome.REQUESTED -> Notice("Join request sent to the person who invited you. The group fills in when they answer.", Severity.OK)
+                    OshiClient.JoinOutcome.NO_INVITER -> Notice("This is an old-style group link with no inviter; ask for a new invite link.", Severity.ERROR)
+                    OshiClient.JoinOutcome.NOT_AN_INVITE -> Notice("That is not a group invite.", Severity.ERROR)
+                }
+            }
+            publish()
+            return
+        }
         when (val scan = client.scanContact(raw)) {
             is ContactQr.Scan.Contact -> {
                 client.contacts.seen(scan.address, System.currentTimeMillis())
@@ -971,6 +1043,82 @@ class ChatShellModel(
         runDirectMessageAction("delete") { peer -> client.deleteMessage(peer, messageId) }
     }
 
+    /** __GROUP_PARITY_2026_09_23__ set the open group's picture from an image file (iOS rule: see `OshiClient.canEditGroupInfo`). */
+    fun setGroupPicture(groupId: String, file: File) = runGroupInfoChange("picture") {
+        client.setGroupPicture(groupId, file.readBytes())
+    }
+
+    fun removeGroupPicture(groupId: String) = runGroupInfoChange("picture") { client.setGroupPicture(groupId, null) }
+
+    fun setGroupMuted(groupId: String, muted: Boolean) = runGroupInfoChange("mute") { client.setGroupMuted(groupId, muted) }
+
+    fun setGroupDescription(groupId: String, text: String) = runGroupInfoChange("description") { client.setGroupDescription(groupId, text) }
+
+    fun pinMessage(messageId: String?) {
+        val gid = groupSelected() ?: return
+        runGroupInfoChange("pin") { client.setGroupPin(gid, messageId) }
+    }
+
+    fun setGroupBlocked(groupId: String, blocked: Boolean) = runGroupInfoChange("block") { client.setGroupBlocked(groupId, blocked) }
+
+    /** iOS: an admin "deletes" the group from this device; a member leaves. */
+    fun deleteGroup(groupId: String) {
+        worker.execute {
+            val ok = runCatching { client.deleteGroupLocally(groupId) }.getOrDefault(false)
+            synchronized(lock) {
+                if (ok && selectedId == groupId) selectedId = null
+                notice = if (ok) Notice(t("conversation.deleted"), Severity.OK) else Notice("The group could not be deleted.", Severity.ERROR)
+            }
+            publish()
+        }
+    }
+
+    /** "Delete for me" — this device only. */
+    fun deleteMessageForMe(messageId: String) {
+        val id = synchronized(lock) { selectedId } ?: return
+        worker.execute {
+            runCatching { client.deleteMessageForMe(id, messageId) }
+            publish()
+        }
+    }
+
+    /** Forward one message of the open conversation to a contact (iOS `forwardGroupMessage`). */
+    fun forwardMessage(messageId: String, toPeer: String) {
+        val from = synchronized(lock) { selectedId } ?: return
+        worker.execute {
+            val outcome = runCatching { client.forwardMessage(from, messageId, toPeer) }.getOrNull()
+            synchronized(lock) {
+                notice = when (outcome) {
+                    OshiClient.SendOutcome.SENT -> Notice(t("forward.success"), Severity.OK)
+                    OshiClient.SendOutcome.BLOCKED -> Notice("That contact is blocked.", Severity.ERROR)
+                    null -> Notice("That message cannot be forwarded.", Severity.ERROR)
+                    else -> Notice(t("forward.failed"), Severity.ERROR)
+                }
+            }
+            publish()
+        }
+    }
+
+    private fun runGroupInfoChange(what: String, change: () -> com.oshi.desktop.group.GroupDefinition?) {
+        synchronized(lock) { busy = true; notice = null }
+        publish()
+        worker.execute {
+            val outcome = runCatching(change)
+            synchronized(lock) {
+                busy = false
+                notice = when {
+                    outcome.isFailure -> Notice("Could not change the group $what: ${outcome.exceptionOrNull()?.message ?: "error"}", Severity.ERROR)
+                    outcome.getOrNull() == null -> Notice(
+                        if (what == "picture") "Not changed: only an admin can edit this group, or the file is not a picture." else "Not changed.",
+                        Severity.ERROR,
+                    )
+                    else -> null
+                }
+            }
+            refresh()
+        }
+    }
+
     private fun groupSelected(): String? =
         synchronized(lock) { selectedId?.takeIf { kindOf(it) == ConversationKind.GROUP } }
 
@@ -1043,10 +1191,18 @@ class ChatShellModel(
     fun onInbound(m: Message) {
         val shouldNotify: Boolean
         synchronized(lock) {
-            shouldNotify = !m.fromMe && m.conversationId != selectedId
-            if (shouldNotify) {
+            val unseen = !m.fromMe && m.conversationId != selectedId
+            if (unseen) {
                 unread[m.conversationId] = (unread[m.conversationId] ?: 0) + 1
             }
+            // __MENTIONS_2026_09_23__ an admitted `@you` breaks through mute (never through a block).
+            val mentionsMe = !m.fromMe && com.oshi.desktop.group.MentionWire.mentions(
+                client.address, m.mentions, com.oshi.desktop.group.GroupIdentity::sameIdentity,
+            )
+            if (unseen && mentionsMe) mentionedYou.add(m.conversationId)
+            // __GROUP_PARITY_2026_09_23__ a muted group still counts unread, it just stays quiet.
+            shouldNotify = unseen && (mentionsMe || !client.isGroupMuted(m.conversationId)) &&
+                !client.isGroupBlocked(m.conversationId)
         }
         publish()
         // Deliberately after durable storage (which OshiClient completed before this
@@ -1057,6 +1213,19 @@ class ChatShellModel(
 
     /** Control payloads mutate the store silently; typing additionally drives a short-lived hint. */
     private fun onControl(peer: String, event: ControlEvent) {
+        // __GROUP_PARITY_2026_09_23__ in a group, WHO is typing (the sender is checked against the
+        // authenticated envelope in OshiClient before this is called).
+        if (event is ControlEvent.Typing && kindOf(peer) == ConversationKind.GROUP) {
+            val who = event.payload.senderPublicKey
+            val expiresAt = System.currentTimeMillis() + TYPING_VISIBLE_MS
+            synchronized(lock) {
+                val m = groupTyping.getOrPut(peer) { HashMap() }
+                if (event.payload.isTyping) m[who] = expiresAt else m.remove(who)
+            }
+            if (event.payload.isTyping) typingExpiry.schedule({ publish() }, TYPING_VISIBLE_MS + 50, TimeUnit.MILLISECONDS)
+            publish()
+            return
+        }
         if (event is ControlEvent.Typing) {
             val expiresAt = System.currentTimeMillis() + TYPING_VISIBLE_MS
             if (event.payload.isTyping) {
@@ -1151,6 +1320,8 @@ class ChatShellModel(
                 lastActivity = stamp(summary.lastActivityMs),
                 preview = previewOf(summary.lastMessage),
                 unread = unread[summary.conversationId] ?: 0,
+                mentionedYou = summary.conversationId in mentionedYou,
+                pictureBase64 = if (kind == ConversationKind.GROUP) client.groups.get(summary.conversationId)?.groupPictureBase64 else null,
             )
         }
         val id = selectedId
@@ -1163,10 +1334,34 @@ class ChatShellModel(
                 address = id,
                 kind = kind,
                 groupAdmin = group?.isAdmin(client.address) == true,
+                groupPictureBase64 = group?.groupPictureBase64,
+                groupInviteLink = group?.let { client.groupInviteLink(id) },
+                groupDescription = group?.description,
+                groupBlocked = group != null && client.isGroupBlocked(id),
+                groupPinned = group?.pinnedMessageId?.let { pid ->
+                    client.history(id).firstOrNull { com.oshi.desktop.group.GroupMessageWire.sameMessageId(it.id, pid) }?.let { m ->
+                        QuoteRow(m.id, if (m.fromMe) "me" else senderLabel(m.senderAddress),
+                            com.oshi.desktop.msg.ReplyEnvelope.quotableText(m.content, m.mediaType?.wire))
+                    }
+                },
+                forwardTargets = if (kind == ConversationKind.DIRECT || kind == ConversationKind.GROUP) {
+                    client.contacts.all().filterNot { it.blocked || it.address == id }
+                        .map { GroupCandidateRow(it.address, it.label(short(it.address))) }
+                } else emptyList(),
+                typingNames = if (group == null) emptyList() else synchronized(lock) {
+                    val now = System.currentTimeMillis()
+                    groupTyping[id].orEmpty().filter { (k, until) -> until > now && !com.oshi.desktop.group.GroupIdentity.sameIdentity(k, client.address) }
+                        .keys.map(::senderLabel).sorted()
+                },
+                groupCanEditInfo = group != null && client.canEditGroupInfo(id),
+                groupMuted = group?.isMuted == true,
                 groupMembers = group?.members?.map { member ->
                     GroupMemberRow(
                         address = member.publicKey,
-                        label = client.contacts.get(member.publicKey)?.label(short(member.publicKey)) ?: short(member.publicKey),
+                        // __GROUP_PARITY_2026_09_23__ our alias, then the member's own group alias
+                        // (iOS `GroupMentions.displayName` order), then a short key.
+                        label = client.contacts.get(member.publicKey)?.label(member.alias?.takeIf { it.isNotBlank() } ?: short(member.publicKey))
+                            ?: member.alias?.takeIf { it.isNotBlank() } ?: short(member.publicKey),
                         isAdmin = member.isAdmin,
                         isCreator = GroupIdentity.sameIdentity(member.publicKey, group.adminPublicKey),
                         self = member.publicKey == client.address,
@@ -1188,6 +1383,13 @@ class ChatShellModel(
                 peerTyping = kind == ConversationKind.DIRECT && (typingUntilMs[id] ?: 0L) > System.currentTimeMillis(),
                 messages = client.history(id).map { row(it) },
                 composer = composerFor(id),
+                // __BOT_E2E_2026_09_23__ BOT_SEAL_SPEC.md §3: say how the LATEST bot post was
+                // protected. Rows stored before bot-seal-v1 carry no bot transport = legacy.
+                botSealing = if (kind != ConversationKind.BOT) null else
+                    client.history(id).lastOrNull { !it.fromMe }?.let {
+                        com.oshi.desktop.bot.BotEnvelope.Sealing.fromTransport(it.transport)
+                            ?: com.oshi.desktop.bot.BotEnvelope.Sealing.NONE
+                    },
             )
         }
         return ShellState(
@@ -1203,6 +1405,7 @@ class ChatShellModel(
             ownNickname = client.ownNickname,
             nicknameBroadcasts = client.mayBroadcastProfile,
             profileNotice = profileNotice,
+            replyingTo = replyTarget?.takeIf { it.first == id }?.second?.let(::quoteRow),
             destination = destination,
             // `all()`, not `visible()`: this list is where blocking is UNDONE, and a blocked
             // peer filtered out of the only screen carrying an unblock control would be a
@@ -1240,10 +1443,13 @@ class ChatShellModel(
         )
     }
 
-    private fun row(m: Message): MessageRow = MessageRow(
+    private fun row(m: Message): MessageRow {
+        // __GROUP_PARITY_2026_09_23__ reply / forward envelopes are unwrapped, never drawn as JSON.
+        val env = if (m.isDeletedForEveryone) null else com.oshi.desktop.msg.ReplyEnvelope.unwrap(m.content)
+        return MessageRow(
         id = m.id,
         fromMe = m.fromMe,
-        who = if (m.fromMe) "me" else short(m.senderAddress),
+        who = if (m.fromMe) "me" else senderLabel(m.senderAddress),
         // The DELETE flag is read BEFORE the content, not after. A row deleted for everyone
         // can still carry a body — the store keeps the record and the router nulls the text,
         // but nothing in the type system says a caller could not hand it both — and a
@@ -1254,9 +1460,14 @@ class ChatShellModel(
             m.isDeletedForEveryone -> "(deleted)"
             // __DESKTOP_CALL_UI_2026_09_23__ a call-history row carries a KEY; draw it localized.
             com.oshi.desktop.msg.CallSummary.isCallSummary(m.content) -> com.oshi.desktop.msg.CallSummary.render(m.content!!) { t(it) }
+            env != null -> env.content
             m.mediaRef != null -> m.content.orEmpty()
             else -> m.content ?: "(deleted)"
         },
+        quote = env?.quote?.let(::quoteRow),
+        forwardedFrom = env?.forwardedFrom,
+        // __MENTIONS_2026_09_23__ admitted targets; the bubble finds their `@name` in `body`.
+        mentions = if (m.isDeletedForEveryone) emptyList() else m.mentions,
         // The bytes are on disk (PARITY.md row 0.15) and this window does not open them.
         // Naming the file and the path is a true statement; a thumbnail would be a promise.
         attachment = if (m.isDeletedForEveryone || m.mediaRef == null) null
@@ -1271,10 +1482,14 @@ class ChatShellModel(
         deleted = m.isDeletedForEveryone,
         reactions = m.reactions.keys.sorted().joinToString(""),
     )
+    }
 
     private fun previewOf(m: Message?): String = when {
         m == null -> ""
         m.isDeletedForEveryone -> "(deleted)"
+        m.hiddenLocally -> ""
+        com.oshi.desktop.msg.ReplyEnvelope.isWrapped(m.content) ->
+            com.oshi.desktop.msg.ReplyEnvelope.unwrap(m.content)?.content ?: m.content.orEmpty()
         com.oshi.desktop.msg.CallSummary.isCallSummary(m.content) -> com.oshi.desktop.msg.CallSummary.render(m.content!!) { t(it) }
         m.mediaRef != null -> "[${m.mediaType?.wire ?: "file"}] " + m.content.orEmpty()
         else -> m.content.orEmpty()
@@ -1314,7 +1529,10 @@ class ChatShellModel(
             // the REPL has always used — so a disabled composer here was the window being
             // behind the client, not the client being unable.
             // __GROUP_E2E_V2_2026_09_23__ group media now fans out (OshiClient.sendGroupFile).
-            ConversationKind.GROUP -> ComposerState(true, null, true, null)
+            ConversationKind.GROUP -> if (client.isGroupBlocked(id)) {
+                // __GROUP_PARITY_2026_09_23__ iOS closes the composer of a blocked group behind a banner.
+                ComposerState(false, t("group.blocked_message"), false, t("group.blocked_message"))
+            } else ComposerState(true, null, true, null)
             ConversationKind.BOT -> ComposerState(
                 false,
                 OshiClient.BOT_CHANNEL_IS_PLAINTEXT + " — so this window will not put it behind the " +
@@ -1490,6 +1708,10 @@ data class ConversationRow(
     val lastActivity: String,
     val preview: String,
     val unread: Int,
+    /** __MENTIONS_2026_09_23__ an unseen message in this group mentions you. */
+    val mentionedYou: Boolean = false,
+    /** __GROUP_PARITY_2026_09_23__ a group's picture, drawn instead of the monogram. */
+    val pictureBase64: String? = null,
 )
 
 data class MessageRow(
@@ -1504,7 +1726,16 @@ data class MessageRow(
     val edited: Boolean,
     val deleted: Boolean,
     val reactions: String,
+    /** __GROUP_PARITY_2026_09_23__ the message this one replies to, when it is a reply. */
+    val quote: QuoteRow? = null,
+    /** Non-null for a forwarded message (may be blank: the sender was not named). */
+    val forwardedFrom: String? = null,
+    /** __MENTIONS_2026_09_23__ `@name` targets, highlighted in the bubble (MentionWire). */
+    val mentions: List<com.oshi.desktop.group.MentionWire.Mention> = emptyList(),
 )
+
+/** A reply's quote block, and the composer's "replying to" banner. */
+data class QuoteRow(val messageId: String, val who: String, val text: String)
 
 data class ThreadView(
     val conversationId: String,
@@ -1513,6 +1744,23 @@ data class ThreadView(
     val kind: ConversationKind,
     /** Group controls are drawn only when this account is an administrator in this roster. */
     val groupAdmin: Boolean,
+    /** __GROUP_PARITY_2026_09_23__ the group picture (JPEG, base64), when the definition carries one. */
+    val groupPictureBase64: String? = null,
+    /** iOS `canChangeGroupPicture`: admins, or any member of a non-admin-only group. */
+    val groupCanEditInfo: Boolean = false,
+    /** Notifications off for this group on this device (local only). */
+    val groupMuted: Boolean = false,
+    /** iOS-format invite link, shown with its QR code. */
+    val groupInviteLink: String? = null,
+    val groupDescription: String? = null,
+    /** Blocked on this device: composer closed behind a banner, no notifications. */
+    val groupBlocked: Boolean = false,
+    /** The pinned message, when the definition names one we hold. */
+    val groupPinned: QuoteRow? = null,
+    /** Group members typing right now (display names). */
+    val typingNames: List<String> = emptyList(),
+    /** __GROUP_PARITY_2026_09_23__ contacts a message may be forwarded to. */
+    val forwardTargets: List<GroupCandidateRow> = emptyList(),
     /** Empty for direct, bot and radio threads; roster data comes only from a stored definition. */
     val groupMembers: List<GroupMemberRow>,
     /** Known unblocked contacts not in this group; candidates are never inferred from messages. */
@@ -1526,6 +1774,8 @@ data class ThreadView(
     val peerTyping: Boolean,
     val messages: List<MessageRow>,
     val composer: ComposerState,
+    /** __BOT_E2E_2026_09_23__ Bot threads only: how the latest post was protected; null elsewhere. */
+    val botSealing: com.oshi.desktop.bot.BotEnvelope.Sealing? = null,
 )
 
 private const val TYPING_VISIBLE_MS = 5_000L
@@ -1594,6 +1844,8 @@ data class ShellState(
     val profileNotice: Notice? = null,
     /** False on an identity shared with a phone: the nickname is kept local (see `OshiClient.mayBroadcastProfile`). */
     val nicknameBroadcasts: Boolean = true,
+    /** __GROUP_PARITY_2026_09_23__ the message the draft replies to (open conversation only). */
+    val replyingTo: QuoteRow? = null,
 ) {
     companion object {
         fun empty(address: String, name: String) = ShellState(

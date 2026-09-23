@@ -1290,6 +1290,7 @@
   "group.member.send_message": "ส่งข้อความ",
   "group.member.view_profile": "ดูโปรไฟล์",
   "group.member.you_admin": "คุณ (ผู้ดูแล)",
+  "group.member_must_update": "%@ ต้องอัปเดต OSHI เพื่อรับข้อความของกลุ่มนี้",
   "group.mute": "ปิดเสียงการแจ้งเตือน",
   "group.mute_group": "ปิดเสียงกลุ่ม",
   "group.no_contacts": "ไม่มีผู้ติดต่อที่ใช้ได้",

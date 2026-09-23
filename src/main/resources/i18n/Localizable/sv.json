@@ -1290,6 +1290,7 @@
   "group.member.send_message": "Skicka meddelande",
   "group.member.view_profile": "Visa profil",
   "group.member.you_admin": "Du (Admin)",
+  "group.member_must_update": "%@ måste uppdatera OSHI för att ta emot gruppens meddelanden",
   "group.mute": "Tysta aviseringar",
   "group.mute_group": "Tysta grupp",
   "group.no_contacts": "Inga kontakter tillgängliga",

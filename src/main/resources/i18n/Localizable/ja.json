@@ -1299,6 +1299,7 @@
   "group.member.send_message": "メッセージを送信",
   "group.member.view_profile": "プロフィールを見る",
   "group.member.you_admin": "あなた（管理者）",
+  "group.member_must_update": "%@ はこのグループのメッセージを受け取るために OSHI を更新する必要があります。",
   "group.mute": "通知をミュート",
   "group.mute_group": "グループをミュート",
   "group.no_contacts": "連絡先がありません",

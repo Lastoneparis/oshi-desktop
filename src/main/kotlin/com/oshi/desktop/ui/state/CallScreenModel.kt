@@ -45,6 +45,13 @@ class CallScreenModel(
         Thread(r, "oshi-call-ui").apply { isDaemon = true }
     },
     private val clock: () -> Long = System::currentTimeMillis,
+    /**
+     * __CALL_PARITY_2026_09_23__ An incoming call ended unanswered — the desktop's missed-call
+     * notification (iOS gets it from CallKit's Recents). `label` is for the UI only.
+     */
+    private val onMissedCall: (peer: String, label: String) -> Unit = { _, _ -> },
+    /** True while a call is connected: the window holds the machine awake ([com.oshi.desktop.ui.SleepInhibitor]). */
+    private val onCallLive: (Boolean) -> Unit = {},
 ) {
     enum class Phase { INCOMING, OUTGOING, ANSWERING, CONNECTED, ENDED }
 
@@ -82,12 +89,26 @@ class CallScreenModel(
         val upgradeRequested: Boolean = false,
         /** Our microphone gives only digital silence — OS microphone access is off. */
         val micBlocked: Boolean = false,
+        /** Nothing from the peer for [CallLiveness.RECONNECT_AFTER_MS] — iOS `call.quality.reconnecting`. */
+        val reconnecting: Boolean = false,
+        /** Video on, peer camera on, but no new picture — iOS `call.video.rx.stalled`. */
+        val videoStalled: Boolean = false,
+        /** Audio still arriving (shown beside a stalled picture: `call.video.rx.audio_ok`). */
+        val audioFlowing: Boolean = false,
+        /** What carries the call now — iOS's transport badge. Null before a path exists. */
+        val carrier: CallCarrier? = null,
+        /** The call screen is collapsed to a bar so the app can be used (iOS `call.minimize`). */
+        val minimized: Boolean = false,
     ) {
         fun durationSeconds(nowMs: Long): Long = connectedAtMs?.let { ((nowMs - it) / 1000).coerceAtLeast(0) } ?: 0
     }
 
     private val lock = Any()
     private var current: CallScreen? = null
+    private val liveness = CallLiveness()
+    private var lastRelaySent = 0L
+    private var lastWsSent = 0L
+    private var live = false
 
     @Volatile var onChange: (CallScreen?) -> Unit = {}
 
@@ -159,6 +180,16 @@ class CallScreenModel(
         }
     }
 
+    /** Reopen the camera on the device now chosen in `CallDevices` (iOS "switch camera"). */
+    fun switchCamera() {
+        worker.execute { lane.video()?.switchCamera(); refreshVideo() }
+    }
+
+    /** Collapse the call screen to a bar, or bring it back (iOS `call.minimize` / `.restore`). */
+    fun setMinimized(minimized: Boolean) {
+        update { if (it.phase == Phase.CONNECTED || it.phase == Phase.OUTGOING) it.copy(minimized = minimized) else it.copy(minimized = false) }
+    }
+
     /** Answer the peer's request to add video: [shareCamera] = `0x02`, else `0x05`. */
     fun answerVideoRequest(accept: Boolean, shareCamera: Boolean = true) {
         worker.execute {
@@ -177,6 +208,27 @@ class CallScreenModel(
                 cameraProblem = if (v.cameraWanted && !v.cameraRunning) v.cameraProblem else null,
                 remoteCameraOff = v.remoteCameraOff,
                 upgradeRequested = v.upgradeRequested,
+            )
+        }
+    }
+
+    /** [CallLiveness] + [CallCarrier] from the leg's counters, once a second while connected. */
+    private fun refreshLiveness(nowMs: Long, d: CallLane.MediaDiagnostics) {
+        val v = lane.video()
+        val leg = lane.media
+        val videoActive = v != null && v.active && !v.remoteCameraOff
+        val packets = d.framesAccepted + d.framesRefused + (v?.videoPacketsIn ?: 0L)
+        val status = liveness.observe(nowMs, packets, d.framesAccepted, videoActive, v?.remoteFrameCount ?: 0L)
+        val relaySent = leg?.relaySent?.get() ?: 0L
+        val wsSent = leg?.wsSent?.get() ?: 0L
+        val carrier = CallCarrier.of(leg?.selected?.type, relaySent - lastRelaySent, wsSent - lastWsSent)
+        lastRelaySent = relaySent; lastWsSent = wsSent
+        update {
+            if (it.phase != Phase.CONNECTED) it else it.copy(
+                reconnecting = status.reconnecting,
+                videoStalled = status.videoStalled,
+                audioFlowing = status.audioFlowing,
+                carrier = carrier ?: it.carrier,
             )
         }
     }
@@ -202,6 +254,7 @@ class CallScreenModel(
                 }
                 update { if (it.phase == Phase.CONNECTED) it.copy(audio = audio, framesSent = d.framesSent, framesReceived = d.framesAccepted, micBlocked = d.micLooksBlocked && !it.muted) else it }
                 refreshVideo()
+                refreshLiveness(nowMs, d)
             }
             Phase.ENDED -> if (nowMs - (s.endedAtMs ?: nowMs) >= ENDED_SHOW_MS) {
                 synchronized(lock) { if (current === s) current = null }
@@ -270,6 +323,7 @@ class CallScreenModel(
         }
         publish()
         val s = finished ?: return
+        if (!s.outgoing && screen?.endedKey == catalogKey("call.missed")) runCatching { onMissedCall(event.peer, s.label) }
         val duration = if (event.wasConnected) s.durationSeconds(now) else 0
         recordSummary(event.peer, CallSummary.forEndedCall(s.outgoing, event.wasConnected, event.reason, duration), s.outgoing)
         if (event.wasConnected) {
@@ -296,7 +350,16 @@ class CallScreenModel(
         return next
     }
 
-    private fun publish() = onChange(screen)
+    private fun publish() {
+        val s = screen
+        val nowLive = s?.phase == Phase.CONNECTED
+        if (nowLive != live) {
+            live = nowLive
+            if (nowLive) { liveness.reset(); lastRelaySent = 0L; lastWsSent = 0L }
+            runCatching { onCallLive(nowLive) }
+        }
+        onChange(s)
+    }
 
     companion object {
         /** How long the ended screen stays, like iOS's "Call Ended" beat before dismissing. */

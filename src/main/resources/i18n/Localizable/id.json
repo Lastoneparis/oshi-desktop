@@ -1290,6 +1290,7 @@
   "group.member.send_message": "Kirim Pesan",
   "group.member.view_profile": "Lihat Profil",
   "group.member.you_admin": "Anda (Admin)",
+  "group.member_must_update": "%@ harus memperbarui OSHI untuk menerima pesan grup ini",
   "group.mute": "Bisukan Notifikasi",
   "group.mute_group": "Bisukan Grup",
   "group.no_contacts": "Tidak ada kontak tersedia",

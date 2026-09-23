@@ -1290,6 +1290,7 @@
   "group.member.send_message": "发送消息",
   "group.member.view_profile": "查看个人资料",
   "group.member.you_admin": "您（管理员）",
+  "group.member_must_update": "%@ 需要更新 OSHI 才能接收此群组的消息。",
   "group.mute": "静音通知",
   "group.mute_group": "静音群组",
   "group.no_contacts": "没有可用的联系人",

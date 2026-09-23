@@ -1290,6 +1290,7 @@
   "group.member.send_message": "Send besked",
   "group.member.view_profile": "Se profil",
   "group.member.you_admin": "Dig (Administrator)",
+  "group.member_must_update": "%@ skal opdatere OSHI for at modtage gruppens beskeder",
   "group.mute": "Slå notifikationer fra",
   "group.mute_group": "Slå gruppe fra",
   "group.no_contacts": "Ingen kontakter tilgængelige",

@@ -1290,6 +1290,7 @@
   "group.member.send_message": "Надіслати повідомлення",
   "group.member.view_profile": "Переглянути профіль",
   "group.member.you_admin": "Ви (Адмін)",
+  "group.member_must_update": "%@ має оновити OSHI, щоб отримувати повідомлення цієї групи",
   "group.mute": "Вимкнути сповіщення",
   "group.mute_group": "Вимкнути звук групи",
   "group.no_contacts": "Немає доступних контактів",

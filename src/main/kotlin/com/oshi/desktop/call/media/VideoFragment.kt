@@ -4,7 +4,7 @@ package com.oshi.desktop.call.media
  * Application-level fragmentation for video — PARITY.md row 2.1.
  *
  * ```
- * [0x01][frame_id(2 BE)][fragment_index(1)][total_fragments(1)][payload ≤ 1100]
+ * [0x01][frame_id(2 BE)][fragment_index(1)][total_fragments(1)][payload ≤ 1100; we send ≤ 1000]
  * ```
  *
  * `OSHI/VideoCallManager.swift:421-432` specifies it, `:2404-2430` emits it and
@@ -41,8 +41,21 @@ object VideoFragment {
     /** magic(1) + frame_id(2) + idx(1) + total(1). */
     const val HEADER_SIZE = 5
 
-    /** Payload budget per fragment. Header + type + seq + nonce + tag ≈ 1142 B, under a 1200 B MTU. */
-    const val MAX_PAYLOAD = 1100
+    /**
+     * Payload budget per fragment — a SENDER choice only: every receiver (iOS, Android, this
+     * one) concatenates whatever sizes arrive, so lowering it needs no peer upgrade.
+     *
+     * __VIDEO_MTU_2026_09_23__ 1100 → 1000. The old "1142 B, under a 1200 B MTU" counted the
+     * `0xF1` envelope and forgot the carrier: the `:8089` relay adds
+     * `[t][len][recip 43-44][len][sender 43-44][len][callId 36]` = 126-128 B upstream and
+     * 82-84 B downstream, so a full fragment left as a 1270 B UDP payload — 1318 B on IPv6,
+     * above the 1280 B minimum MTU, fragmented (and dropped) by exactly the VPNs and
+     * carriers the audio path lost to (1957 B/pkt). It also broke the server's
+     * `UDP_SAFE_DATAGRAM = 1200` check downstream (1225 B), so one-way video was mirrored
+     * over WS as well. At 1000: 1042 B envelope, ≤ 1170 B relay-up, ≤ 1126 B relay-down,
+     * ≤ 1218 B on IPv6. Cost: ~+9 % datagrams, header overhead 3.8 % → 4.2 %.
+     */
+    const val MAX_PAYLOAD = 1000
 
     /** `total_fragments` is one byte. */
     const val MAX_FRAGMENTS = 255
@@ -232,13 +245,19 @@ class VideoReassembler {
     }
 
     private fun complete(frameId: Int, frame: ByteArray, abandoned: Boolean): Outcome {
+        var gap = 0
         if (lastCompleted >= 0) {
-            val gap = ((frameId - lastCompleted) and 0xFFFF) - 1
+            gap = ((frameId - lastCompleted) and 0xFFFF) - 1
             if (gap in 1..1000) lostFrames += gap.toLong()
         }
         lastCompleted = frameId
         completedFrames++
-        return Outcome(Reason.COMPLETE, frameId, frame, abandoned)
+        // __VIDEO_GAP_PLI_2026_09_23__ A frame that vanished WHOLE (every fragment lost —
+        // the common case for a 1-2 fragment P-frame) leaves no in-flight entry to abandon,
+        // so it never set `requestKeyframe`: the decoder ran on a broken reference until the
+        // peer's next periodic IDR (≤ 1 s). iOS asks on the gap (`noteFrameCompleted`,
+        // swift:553-574), and so does this now. The receive session still throttles it.
+        return Outcome(Reason.COMPLETE, frameId, frame, abandoned || gap in 1..1000)
     }
 
     /** In-flight entries, for tests and diagnostics. */

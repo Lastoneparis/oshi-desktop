@@ -1290,6 +1290,7 @@
   "group.member.send_message": "傳送訊息",
   "group.member.view_profile": "查看個人資料",
   "group.member.you_admin": "您（管理員）",
+  "group.member_must_update": "%@ 需要更新 OSHI 才能接收此群組的訊息。",
   "group.mute": "靜音通知",
   "group.mute_group": "靜音群組",
   "group.no_contacts": "無可用聯絡人",

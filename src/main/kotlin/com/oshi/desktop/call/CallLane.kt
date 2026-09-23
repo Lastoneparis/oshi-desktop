@@ -619,6 +619,24 @@ class CallLane(
         if (packet.type == CallPacket.Type.ICE_CANDIDATE_EXCHANGE) {
             onIceCandidates(senderAddress, packet, envelope.callId.takeIf { it.isNotEmpty() })
         }
+        // __VIDEO_PLI_SIGNAL_2026_09_23__ iOS sends keyframe requests and camera pause/resume
+        // ONLY on this channel (`VoiceCallManager.sendKeyframeRequest`, `createCallPacket` →
+        // `/signal`), and Android sends a copy here as well. The machine returns no action for
+        // them, so until now every iPhone PLI reached a desktop and was dropped: the desktop
+        // encoder waited for its own 1 s GOP. Same gates as the candidates (authenticated
+        // peer of THIS call); handed to the video half exactly as its media-channel twin.
+        if (packet.type == CallPacket.Type.REQUEST_KEYFRAME ||
+            packet.type == CallPacket.Type.VIDEO_PAUSED ||
+            packet.type == CallPacket.Type.VIDEO_RESUMED
+        ) {
+            val current = machine.peer
+            val video = leg?.takeIf { !it.isClosed }?.video
+            if (video != null && current != null &&
+                BlockPolicy.normalizeKey(current) == BlockPolicy.normalizeKey(senderAddress)
+            ) {
+                video.onMedia(com.oshi.desktop.call.media.VideoControl.encodeToggle(packet.type.code, nowMs))
+            }
+        }
         return true
     }
 
@@ -797,6 +815,7 @@ class CallLane(
         // length check was, found the same way.
         val spec = CallMediaSpec(
             action.callId, action.sessionKey, action.nonceSalt, action.isCaller, video = machine.isVideo,
+            wbAdpcm = action.wbAdpcm,
             selfKey = myAddress, peerKey = action.peer,
             wsUpgradeHeaders = transport::webSocketUpgradeHeaders,
             // __CALL_MEDIA_AUTH_DESKTOP_2026_09_23__ contract §2: this call's relay token.

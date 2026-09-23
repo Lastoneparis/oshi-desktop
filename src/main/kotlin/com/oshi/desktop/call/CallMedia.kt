@@ -702,6 +702,8 @@ data class CallMediaSpec(
     val relayToken: (() -> RelayToken?)? = null,
     /** `x-oshi-*` headers for an empty-body GET of a path (`/voip/turn-creds`), or null = unsigned. */
     val signedGet: ((path: String) -> Map<String, String>)? = null,
+    /** __WB_ADPCM_CODEC_2026_09_23__ the peer advertised 0x18 — TX it instead of 0x15. */
+    val wbAdpcm: Boolean = false,
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -776,6 +778,7 @@ object CallMedia {
                     datagram = datagram,
                     audioFor = { send ->
                         CallAudioSession(spec.sessionKey, spec.nonceSalt, spec.isCaller, send)
+                            .also { it.useWbAdpcm = spec.wbAdpcm }
                     },
                     videoFor = { send, nextSeq ->
                         CallVideoSession(spec.sessionKey, spec.nonceSalt, spec.isCaller, send, nextSeq, log = log)

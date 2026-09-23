@@ -345,7 +345,7 @@ class VideoWireTest {
 
     @Test
     fun `a duplicated fragment does not count twice`() {
-        val frags = VideoFragment.fragment(1, ByteArray(2200) { 3 })
+        val frags = VideoFragment.fragment(1, ByteArray(2 * VideoFragment.MAX_PAYLOAD) { 3 })
         val r = VideoReassembler()
         r.offer(frags[0]); r.offer(frags[0]); r.offer(frags[0])
         assertEquals(VideoReassembler.Reason.COMPLETE, r.offer(frags[1]).reason)
@@ -398,6 +398,35 @@ class VideoWireTest {
         val out = r.offer(new[0])
         assertTrue("the abandoned frame must produce a keyframe request", out.requestKeyframe)
         assertEquals(1, r.pending())
+    }
+
+    /**
+     * A frame lost WHOLE leaves nothing in flight to abandon — only the gap in frame ids
+     * shows it. That gap must ask for an IDR too (iOS `noteFrameCompleted`), or the decoder
+     * runs on a broken reference until the peer's next periodic keyframe.
+     */
+    @Test
+    fun `a frame lost whole is seen from the gap and asks the peer for a keyframe`() {
+        val r = VideoReassembler()
+        assertFalse(r.offer(VideoFragment.fragment(20, ByteArray(300) { 1 })[0]).requestKeyframe)
+        // frame 21 (one fragment) never arrives
+        val out = r.offer(VideoFragment.fragment(22, ByteArray(300) { 3 })[0])
+        assertEquals(VideoReassembler.Reason.COMPLETE, out.reason)
+        assertTrue("a gap in frame ids is a lost reference", out.requestKeyframe)
+        assertEquals(1L, r.lostFrames)
+        assertFalse("the next in-order frame is healthy",
+            r.offer(VideoFragment.fragment(23, ByteArray(300) { 4 })[0]).requestKeyframe)
+    }
+
+    /** Every datagram a full fragment makes must fit 1200 B even after the `:8089` relay framing. */
+    @Test
+    fun `a full fragment fits 1200 B through the relay, upstream and down`() {
+        val env = VideoMediaFrame.HEADER_SIZE + 12 + 16 + VideoFragment.HEADER_SIZE + VideoFragment.MAX_PAYLOAD
+        val relayUp = 1 + 1 + 44 + 1 + 44 + 1 + 36   // [t][len][recip][len][sender][len][callId]
+        val relayDown = 1 + 1 + 44 + 1 + 36            // [t][len][sender][len][callId]
+        assertTrue("relay upstream ${env + relayUp} B", env + relayUp <= 1200)
+        assertTrue("relay downstream ${env + relayDown} B (server UDP_SAFE_DATAGRAM)", env + relayDown <= 1200)
+        assertTrue("IPv6 packet ${env + relayUp + 48} B within the 1280 B minimum MTU", env + relayUp + 48 <= 1280)
     }
 
     @Test
