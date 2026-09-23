@@ -181,6 +181,20 @@ class KeyVaultTest {
     }
 
     @Test
+    fun `putAll writes related secrets together and copies caller material`() {
+        val s = store()
+        val first = ByteArray(4) { 1 }
+        val second = ByteArray(4) { 2 }
+        KeyVault.open(file, s).putAll(mapOf("first" to first, "second" to second))
+        first.fill(0)
+        second.fill(0)
+
+        val reopened = KeyVault.open(file, s)
+        assertArrayEquals(ByteArray(4) { 1 }, reopened.get("first"))
+        assertArrayEquals(ByteArray(4) { 2 }, reopened.get("second"))
+    }
+
+    @Test
     fun `destroy removes both the file and the master key`() {
         val s = store()
         val v = KeyVault.open(file, s)

@@ -49,7 +49,7 @@ import javax.sound.sampled.UnsupportedAudioFileException
 class AudioPlayer(
     private val devices: AudioDevices = AudioDevices.JavaSound,
     private val transcoder: AudioTranscoder = SystemAudioTranscoder(),
-    private val workDir: File = com.oshi.desktop.store.DesktopPaths.file("media"),
+    private val workDir: File = com.oshi.desktop.store.DesktopPaths.file(com.oshi.desktop.store.MediaVault.SCRATCH_DIR_NAME),
 ) {
 
     private val current = AtomicReference<Session?>(null)
@@ -68,6 +68,24 @@ class AudioPlayer(
 
         if (!file.isFile) return PlaybackStart.Failure(PlaybackFailure.FileMissing(file.path))
         if (file.length() == 0L) return PlaybackStart.Failure(PlaybackFailure.FileEmpty(file.path))
+
+        // __LOCAL_DATA_AT_REST_2026_09_22__ A sealed attachment ("OSHIMED1") is decrypted to a
+        // scratch file for the JDK/transcoder, which only take paths; that copy is deleted
+        // when the session ends (or on refusal below), and swept at the next start regardless.
+        if (!com.oshi.desktop.store.MediaVault.isSealed(file)) return playPlain(file, null, onEnd)
+        val vault = com.oshi.desktop.store.MediaVault.current()
+            ?: return PlaybackStart.Failure(PlaybackFailure.Undecryptable(file.path, "no media key is loaded"))
+        val plain = try {
+            vault.decryptToScratch(file)
+        } catch (t: Throwable) {
+            return PlaybackStart.Failure(PlaybackFailure.Undecryptable(file.path, describe(t)))
+        }
+        val started = playPlain(plain, plain, onEnd)
+        if (started !is PlaybackStart.Started) plain.delete()
+        return started
+    }
+
+    private fun playPlain(file: File, decryptedCopy: File?, onEnd: (PlaybackEnd) -> Unit): PlaybackStart {
 
         val opened = open(file)
         val stream = when (opened) {
@@ -94,7 +112,7 @@ class AudioPlayer(
             return PlaybackStart.Failure(PlaybackFailure.DeviceUnavailable(describe(t)))
         }
 
-        val session = Session(stream, line, opened.temp, onEnd)
+        val session = Session(stream, line, opened.temp, onEnd, decryptedCopy)
         if (!current.compareAndSet(null, session)) {
             session.release()
             return PlaybackStart.Failure(PlaybackFailure.Busy)
@@ -232,6 +250,7 @@ class AudioPlayer(
         val line: RenderLine,
         val temp: File?,
         val onEnd: (PlaybackEnd) -> Unit,
+        val decryptedCopy: File? = null,
     ) {
         val running = AtomicBoolean(true)
         val stopRequested = AtomicBoolean(false)
@@ -244,6 +263,7 @@ class AudioPlayer(
             runCatching { line.close() }
             runCatching { stream.close() }
             temp?.let { runCatching { it.delete() } }
+            decryptedCopy?.let { runCatching { it.delete() } }
         }
     }
 
@@ -313,6 +333,11 @@ sealed interface PlaybackFailure {
 
     data class DeviceUnavailable(val detail: String) : PlaybackFailure {
         override val message: String = "The speaker could not be opened. ($detail)"
+    }
+
+    /** A sealed attachment that could not be decrypted: wrong key, tampered or truncated. */
+    data class Undecryptable(val path: String, val detail: String) : PlaybackFailure {
+        override val message: String = "This voice note could not be decrypted from local storage ($detail): $path"
     }
 
     object Busy : PlaybackFailure {

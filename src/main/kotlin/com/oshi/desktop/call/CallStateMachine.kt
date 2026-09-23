@@ -701,10 +701,12 @@ class CallStateMachine(
         if (!isOutgoing || (state != CallState.RINGING && state != CallState.CONNECTING)) {
             return CallDecision(state, refusal = CallRefusal.WRONG_STATE)
         }
-        val dialed = dialedAtMs
-        if (dialed != null && nowMs - dialed < CallTimeouts.END_GRACE_AFTER_DIAL_MS) {
-            return CallDecision(state, refusal = CallRefusal.GRACE_PERIOD)
-        }
+        // __DECLINE_NO_DIAL_GRACE_2026_09_23__ NO post-dial grace here. iOS applies its 5 s
+        // window to `callEnd` only; a `callDecline` ends the call at once
+        // (`VoiceCallManager.swift:5603-5605`: `.callDecline` → `endCall(reason: .declined)`).
+        // With the grace, a callee who declined within 5 s — the usual case for a decline —
+        // was ignored, and the caller rang on for the full 45 s no-answer timeout. Found by
+        // `CallScreenModelTest.incomingDecline`, the first test that declined at human speed.
         val actions = mutableListOf<CallAction>(CallAction.StopRinging)
         finish(CallEndReason.DECLINED, nowMs, actions, connected = false)
         return CallDecision(state, actions)

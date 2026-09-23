@@ -149,6 +149,9 @@ object GroupUpdateWire {
             // Pinned false: iOS overwrites it locally anyway (swift:1028) and Android
             // pins it too. Muting is a personal preference, not group state.
             .bool("isMuted", false)
+        // __GROUP_E2E_V2_2026_09_23__ spec §5.1.
+        json.optional("description", group.description?.takeIf { it.isNotEmpty() })
+        if (group.evictedMemberKeys.isNotEmpty()) json.strArr("evictedMemberKeys", group.evictedMemberKeys)
         group.groupPictureBase64?.takeIf { it.isNotEmpty() }?.let {
             json.str("groupPictureData", it)
             json.optional("groupPictureUpdatedBy", group.groupPictureUpdatedBy?.takeIf(String::isNotEmpty))
@@ -353,6 +356,8 @@ object GroupUpdateWire {
                 pinnedBy = o.opt("pinnedBy") as? String,
                 avatar = o.opt("avatar") as? String,
                 stateVersion = (o.opt("stateVersion") as? Number)?.toInt(),
+                description = (o.opt("description") as? String)?.takeIf { it.isNotEmpty() },
+                evictedMemberKeys = stringArray(o.opt("evictedMemberKeys")),
             ),
         )
     }

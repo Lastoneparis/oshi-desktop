@@ -22,6 +22,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
@@ -45,6 +46,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.oshi.desktop.i18n.dt
 import com.oshi.desktop.i18n.t
+import com.oshi.desktop.media.RecordingStart
+import com.oshi.desktop.media.VoiceNote
+import com.oshi.desktop.media.VoiceNoteResult
+import com.oshi.desktop.media.VoiceNotes
 import com.oshi.desktop.ui.OshiTheme
 import com.oshi.desktop.ui.state.ComposerState
 import com.oshi.desktop.ui.state.ConversationKind
@@ -62,10 +67,10 @@ import java.time.LocalDate
  *
  * `ChatView.swift`'s retractable action bar has four buttons and two of them are `phone.fill`
  * and `video.fill`. Those are the parts of that screen this window deliberately does not
- * port. PARITY.md row 2.1: signalling works and reaches the REPL, and **no audio flows** —
- * `CallAudioSession` is referenced by nothing in the repository, so a connected call is two
- * devices agreeing and silence. A greyed-out phone icon would still tell a user calls are a
- * thing this app does, which is why there is no phone glyph in [Glyph] to draw one with.
+ * port. PARITY.md row 2.1: the REPL's opt-in lane now opens audio devices and carries sealed
+ * loopback PCM, but no call has crossed two real machines or a phone and there is no TURN.
+ * A greyed-out phone icon would still advertise a call feature the window cannot yet prove,
+ * which is why there is no phone glyph in [Glyph] to draw one with.
  *
  * What IS in the header: the peer, the address, the measured reachability (never a presence
  * dot — this client has no presence protocol), the conversation kind when it is not a plain
@@ -89,11 +94,23 @@ fun ThreadPane(
     onDraft: (String) -> Unit,
     onSend: () -> Unit,
     onAttach: () -> Unit,
+    onVoiceNote: (VoiceNote) -> Unit,
+    onRenameGroup: (String) -> Unit,
+    onReact: (String, String) -> Unit,
+    onEditMessage: (String, String) -> Unit,
+    onDeleteMessage: (String) -> Unit,
+    onAddGroupMember: (String) -> Unit,
+    onRemoveGroupMember: (String) -> Unit,
+    onSetGroupMemberAdmin: (String, Boolean) -> Unit,
     viewOnce: ViewOnceFacts,
     revealed: Set<String>,
     onReveal: (String) -> Unit,
     today: LocalDate,
     modifier: Modifier = Modifier,
+    /** Start a call (true = video). Null = no call buttons (groups, bots, radio threads, no call lane). */
+    onCall: ((video: Boolean) -> Unit)? = null,
+    /** __GROUP_E2E_V2_2026_09_23__ Leave the open group (confirmed in the header). */
+    onLeaveGroup: () -> Unit = {},
 ) {
     var pickerOpen by remember(thread.conversationId) { mutableStateOf(false) }
 
@@ -106,14 +123,20 @@ fun ThreadPane(
         // extra steps. It provides `LocalMediaOpener`; the bubbles read it.
         WithMediaViewer {
             Column(Modifier.fillMaxSize()) {
-                ThreadHeader(thread, wallpaper, pickerOpen) { pickerOpen = !pickerOpen }
+                ThreadHeader(
+                    thread, wallpaper, pickerOpen, onRenameGroup, onAddGroupMember, onRemoveGroupMember, onSetGroupMemberAdmin,
+                    onLeaveGroup = onLeaveGroup,
+                    // __DESKTOP_CALL_UI_2026_09_23__ 1:1 only — like iOS, which offers no call in a
+                    // group, and never in a bot or radio thread: neither has a peer that can answer.
+                    onCall = onCall?.takeIf { thread.kind == ConversationKind.DIRECT },
+                ) { pickerOpen = !pickerOpen }
                 Hairline()
 
                 Box(Modifier.weight(1f).fillMaxWidth()) {
                     if (thread.messages.isEmpty()) {
                         EmptyThread(thread.kind)
                     } else {
-                        MessageLog(thread, wallpaper, viewOnce, revealed, onReveal, today)
+                        MessageLog(thread, wallpaper, viewOnce, revealed, onReveal, onReact, onEditMessage, onDeleteMessage, today)
                     }
                     if (pickerOpen) {
                         Box(Modifier.fillMaxSize().padding(OshiTheme.lg), contentAlignment = Alignment.TopEnd) {
@@ -128,7 +151,7 @@ fun ThreadPane(
 
                 notice?.let { NoticeBar(it) }
                 Hairline()
-                    Composer(thread.composer, busy, draft, onDraft, onSend, onAttach)
+                    Composer(thread.conversationId, thread.composer, busy, draft, onDraft, onSend, onAttach, onVoiceNote)
             }
         }
     }
@@ -141,8 +164,19 @@ private fun ThreadHeader(
     thread: ThreadView,
     wallpaper: WallpaperId,
     pickerOpen: Boolean,
+    onRenameGroup: (String) -> Unit,
+    onAddGroupMember: (String) -> Unit,
+    onRemoveGroupMember: (String) -> Unit,
+    onSetGroupMemberAdmin: (String, Boolean) -> Unit,
+    onCall: ((video: Boolean) -> Unit)? = null,
+    onLeaveGroup: () -> Unit = {},
     onWallpaper: () -> Unit,
 ) {
+    var confirmLeave by remember(thread.conversationId) { mutableStateOf(false) }
+    var editingName by remember(thread.conversationId) { mutableStateOf(false) }
+    var typedName by remember(thread.conversationId) { mutableStateOf(thread.title) }
+    var showRoster by remember(thread.conversationId) { mutableStateOf(false) }
+    var showCandidates by remember(thread.conversationId) { mutableStateOf(false) }
     Row(
         Modifier
             .fillMaxWidth()
@@ -154,13 +188,27 @@ private fun ThreadHeader(
         Monogram(thread.title, thread.address, Metrics.avatarHeader)
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm)) {
-                Text(
-                    thread.title,
-                    style = OshiTheme.typography.titleMedium,
-                    color = Ink.strong,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                if (editingName) {
+                    BasicTextField(
+                        value = typedName,
+                        onValueChange = { typedName = it },
+                        singleLine = true,
+                        textStyle = OshiTheme.typography.titleMedium.copy(color = Ink.strong),
+                        cursorBrush = SolidColor(OshiTheme.brand),
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextAction(dt("desktop.group.rename.save")) { onRenameGroup(typedName); editingName = false }
+                    TextAction(t("common.cancel")) { typedName = thread.title; editingName = false }
+                } else {
+                    Text(
+                        thread.title,
+                        style = OshiTheme.typography.titleMedium,
+                        color = Ink.strong,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (thread.groupAdmin) TextAction(dt("desktop.group.rename.action")) { editingName = true }
+                }
                 KindBadge(thread.kind)
             }
             Spacer(Modifier.height(OshiTheme.xxs))
@@ -175,6 +223,74 @@ private fun ThreadHeader(
             if (thread.reachLabel.isNotEmpty()) {
                 Spacer(Modifier.height(OshiTheme.xxs))
                 Text(thread.reachLabel, fontSize = 11.sp, color = Ink.soft)
+            }
+            if (thread.peerTyping) {
+                Spacer(Modifier.height(OshiTheme.xxs))
+                Text(t("typing.indicator", thread.title), fontSize = 11.sp, color = OshiTheme.brand)
+            }
+            if (thread.kind == ConversationKind.GROUP) {
+                Spacer(Modifier.height(OshiTheme.xxs))
+                Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm), verticalAlignment = Alignment.CenterVertically) {
+                    Text(dt("desktop.group.members.count", thread.groupMembers.size), fontSize = 11.sp, color = Ink.soft)
+                    if (thread.groupAdmin) Text(dt("desktop.group.members.admin"), fontSize = 11.sp, color = OshiTheme.success)
+                    TextAction(if (showRoster) dt("desktop.group.members.hide") else dt("desktop.group.members.show")) { showRoster = !showRoster }
+                    // __GROUP_E2E_V2_2026_09_23__ leave, with the phones' confirmation wording.
+                    if (!confirmLeave) TextAction(t("groups.leave")) { confirmLeave = true }
+                }
+                if (confirmLeave) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm), verticalAlignment = Alignment.CenterVertically) {
+                        Text(t("confirm_leave_group"), fontSize = 11.sp, color = Ink.soft)
+                        TextAction(t("groups.leave")) { confirmLeave = false; onLeaveGroup() }
+                        TextAction(t("common.cancel")) { confirmLeave = false }
+                    }
+                }
+                if (showRoster) {
+                    for (member in thread.groupMembers) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm), verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                buildString {
+                                    append(member.label)
+                                    if (member.self) append(" · you")
+                                    if (member.isAdmin) append(" · admin")
+                                },
+                                fontSize = 11.sp,
+                                color = Ink.soft,
+                            )
+                            if (thread.groupAdmin && !member.self) {
+                                TextAction("Remove") { onRemoveGroupMember(member.address) }
+                                if (member.isAdmin && !member.isCreator) TextAction("Demote") { onSetGroupMemberAdmin(member.address, false) }
+                                if (!member.isAdmin) TextAction("Promote") { onSetGroupMemberAdmin(member.address, true) }
+                            }
+                        }
+                    }
+                    if (thread.groupAdmin && thread.groupCandidates.isNotEmpty()) {
+                        TextAction(if (showCandidates) "Hide contacts" else "Add contact") { showCandidates = !showCandidates }
+                        if (showCandidates) for (candidate in thread.groupCandidates) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm), verticalAlignment = Alignment.CenterVertically) {
+                                Text(candidate.label, fontSize = 11.sp, color = Ink.soft)
+                                TextAction("Add") { onAddGroupMember(candidate.address) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (onCall != null) {
+            // Video first, voice second — the order of the phones' chat header.
+            for ((video, glyph, label) in listOf(
+                Triple(true, CallGlyph.CAMERA, t("chat.video_call")),
+                Triple(false, CallGlyph.PHONE, t("call.contact.default")),
+            )) {
+                val (source, hovered) = rememberRowInteraction()
+                Box(
+                    Modifier
+                        .size(Metrics.actionButton)
+                        .clip(CircleShape)
+                        .background(if (hovered.value) OshiTheme.surface else Color.Transparent)
+                        .focusRing(CircleShape)
+                        .clickable(interactionSource = source, indication = null, onClickLabel = label) { onCall(video) },
+                    contentAlignment = Alignment.Center,
+                ) { CallGlyphIcon(glyph, OshiTheme.brand, 20.dp) }
             }
         }
         HeaderButton(Glyph.PALETTE, t("wallpaper.title"), pickerOpen || wallpaper != WallpaperId.NONE, onWallpaper)
@@ -212,6 +328,9 @@ private fun MessageLog(
     viewOnce: ViewOnceFacts,
     revealed: Set<String>,
     onReveal: (String) -> Unit,
+    onReact: (String, String) -> Unit,
+    onEditMessage: (String, String) -> Unit,
+    onDeleteMessage: (String) -> Unit,
     today: LocalDate,
 ) {
     val listState = rememberLazyListState()
@@ -258,6 +377,11 @@ private fun MessageLog(
                 viewOnce = viewOnce.isViewOnce(row.id),
                 revealed = row.id in revealed,
                 onReveal = { onReveal(row.id) },
+                // __GROUP_E2E_V2_2026_09_23__ groups too (GROUP_E2E_V2_SPEC §2.3-2.4): edit own, delete own or as admin.
+                onReact = if (thread.kind == ConversationKind.DIRECT || thread.kind == ConversationKind.GROUP) { emoji -> onReact(row.id, emoji) } else null,
+                onEdit = if ((thread.kind == ConversationKind.DIRECT || thread.kind == ConversationKind.GROUP) && row.fromMe) { body -> onEditMessage(row.id, body) } else null,
+                onDelete = if ((thread.kind == ConversationKind.DIRECT && row.fromMe) ||
+                    (thread.kind == ConversationKind.GROUP && (row.fromMe || thread.groupAdmin))) { { onDeleteMessage(row.id) } } else null,
             )
         }
     }
@@ -378,12 +502,14 @@ private fun NoticeBar(notice: Notice) {
  */
 @Composable
 private fun Composer(
+    conversationId: String,
     composer: ComposerState,
     busy: Boolean,
     draft: String,
     onDraft: (String) -> Unit,
     onSend: () -> Unit,
     onAttach: () -> Unit,
+    onVoiceNote: (VoiceNote) -> Unit,
 ) {
     if (!composer.enabled && !busy) {
         DisabledComposer(composer)
@@ -391,9 +517,18 @@ private fun Composer(
     }
 
     var whyOpen by remember { mutableStateOf(false) }
+    val voice = remember { VoiceNotes() }
+    var recording by remember(conversationId) { mutableStateOf(false) }
+    var voiceProblem by remember(conversationId) { mutableStateOf<String?>(null) }
+    DisposableEffect(conversationId) {
+        onDispose { if (voice.isRecording) voice.cancelRecording() }
+    }
     val canSend = draft.isNotBlank() && !busy
 
     Column(Modifier.fillMaxWidth().background(OshiTheme.background)) {
+        if (voiceProblem != null) {
+            Text(voiceProblem!!, fontSize = 11.sp, color = OshiTheme.warning, modifier = Modifier.padding(horizontal = OshiTheme.lg, vertical = OshiTheme.xs))
+        }
         if (whyOpen && composer.attachDisabledReason != null) {
             Column(
                 Modifier
@@ -424,6 +559,24 @@ private fun Composer(
                     if (composer.attachEnabled) onAttach() else whyOpen = !whyOpen
                 },
             )
+
+            TextAction(if (recording) "Stop" else "Record") {
+                if (recording) {
+                    recording = false
+                    when (val result = voice.stopRecording()) {
+                        is VoiceNoteResult.Ready -> {
+                            voiceProblem = result.note.warning
+                            onVoiceNote(result.note)
+                        }
+                        is VoiceNoteResult.Failure -> voiceProblem = result.reason.message
+                    }
+                } else {
+                    when (val result = voice.startRecording()) {
+                        RecordingStart.Started -> { recording = true; voiceProblem = null }
+                        is RecordingStart.Failure -> voiceProblem = result.reason.message
+                    }
+                }
+            }
 
             DraftField(
                 draft = draft,

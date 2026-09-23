@@ -14,7 +14,7 @@ import javax.sound.sampled.TargetDataLine
  *
  * ============================================================ THE FORMAT IS NOT A CHOICE
  *
- * 48 000 Hz, mono, signed 16-bit, **big-endian**, 20 ms frames = 960 samples = 1 920
+ * 48 000 Hz, mono, signed 16-bit, **little-endian**, 20 ms frames = 960 samples = 1 920
  * bytes. Every one of those is fixed by the peer, not by us:
  *
  *  - 48 kHz mono signed-16 is what packet type `0x15` means
@@ -22,12 +22,18 @@ import javax.sound.sampled.TargetDataLine
  *  - 20 ms is the frame the whole pipeline is built around — `CALL_V2_PLAN.md:31`,
  *    "20 ms frames @ 48 kHz → 960 samples per frame" — and it is what makes iOS's
  *    measured 50 fps and 1 957 bytes per datagram add up.
- *  - **Big-endian is the one that will surprise a JVM developer.** Every multi-byte
- *    field in this protocol is big-endian (the packet header, the media sequence, the
- *    ICE TLV), and `javax.sound.sampled` defaults to little-endian on a PCM line. Get
- *    it wrong and the call is not silent — it is loud white noise, because every sample
- *    has its bytes swapped. That is why [FORMAT] passes `bigEndian = true` explicitly
- *    rather than letting a default decide.
+ *  - **Little-endian is the one that will surprise a reader of this protocol.** Every
+ *    multi-byte HEADER field is big-endian (the packet header, the media sequence, the
+ *    ICE TLV) — but the PCM samples are not. iOS assembles each `0x15` sample as
+ *    `(hi << 8) | lo` from bytes `[lo, hi]` (`VoiceCallManager.swift` `int16ToFloat32`,
+ *    "LE assemble … same byte order as Android emits") and emits native ARM64 Int16;
+ *    Android writes `AudioRecord` bytes and plays them into `AudioTrack` untouched, both
+ *    native little-endian. Get it wrong and the call is not silent — it is loud white
+ *    noise, because every sample has its bytes swapped. **This file shipped with
+ *    `bigEndian = true` until 2026-09-22**, which would have been exactly that noise in
+ *    both directions against every phone; no test could see it because every test was
+ *    desktop ↔ desktop, where the two swaps cancel. [FORMAT] passes `bigEndian = false`
+ *    explicitly rather than letting a default decide.
  *
  * ============================================================ WHAT THE JDK DOES NOT GIVE YOU
  *
@@ -82,8 +88,36 @@ object CallAudio {
     /** Frames per second. 50. Used by the bandwidth note in [CallMediaFrame]. */
     const val FRAMES_PER_SECOND = 1000 / FRAME_MS
 
+    /** 2 ms at 48 kHz: the fade-in after a discontinuity (iOS `min(frameLength, 96)`). */
+    const val FADE_IN_SAMPLES = 96
+
     /**
-     * The one PCM format this client speaks. **Big-endian on purpose** — see the class doc.
+     * How long a received PCM frame plays, never below [FRAME_MS]: the current iPhone
+     * build sends 20 ms, the App Store build ~32 ms. Capped so a malformed frame cannot
+     * stall the render loop.
+     */
+    fun frameMsFor(pcmBytes: Int): Int =
+        (pcmBytes / (BYTES_PER_FRAME / FRAME_MS)).coerceIn(FRAME_MS, 120)
+
+    /**
+     * A copy of [pcm] (Int16 little-endian, [FORMAT]) whose first [FADE_IN_SAMPLES]
+     * samples ramp linearly from 0 to unity. The input is never modified.
+     */
+    fun fadeIn(pcm: ByteArray): ByteArray {
+        val out = pcm.copyOf()
+        val n = minOf(pcm.size / 2, FADE_IN_SAMPLES)
+        for (i in 0 until n) {
+            val s = ((out[2 * i + 1].toInt() shl 8) or (out[2 * i].toInt() and 0xFF)).toShort().toInt()
+            val scaled = s * i / n
+            out[2 * i] = (scaled and 0xFF).toByte()
+            out[2 * i + 1] = ((scaled shr 8) and 0xFF).toByte()
+        }
+        return out
+    }
+
+    /**
+     * The one PCM format this client speaks. **Little-endian, as the phones** — see the
+     * class doc.
      */
     val FORMAT: AudioFormat = AudioFormat(
         AudioFormat.Encoding.PCM_SIGNED,
@@ -92,7 +126,7 @@ object CallAudio {
         CHANNELS,
         (SAMPLE_BITS / 8) * CHANNELS,
         SAMPLE_RATE,
-        true,
+        false,
     )
 
     /**
@@ -150,13 +184,85 @@ open class CallAudioSession(
      */
     internal val playback = PlaybackBuffer()
 
-    private var mic: TargetDataLine? = null
-    private var speaker: SourceDataLine? = null
+    private var devices: AudioDevices? = null
+
+    /**
+     * The two PCM ends of a call — microphone and speaker — reduced to the three calls this
+     * class makes on them. The seam exists so a machine with NO audio hardware (a CI runner,
+     * which is the only Windows this project can test on) can still run a real call through
+     * the real socket, crypto and jitter path with a generated tone in place of a
+     * microphone. The application only ever uses [openDevices]'s default: real lines.
+     */
+    class AudioDevices(
+        /** Blocking read of captured PCM ([CallAudio.FORMAT]); ≤0 = nothing this time. */
+        val read: (ByteArray, Int, Int) -> Int,
+        /** Blocking write of PCM to be played. */
+        val write: (ByteArray, Int, Int) -> Unit,
+        val close: () -> Unit,
+    )
+
+    /**
+     * Open the microphone and speaker. Throws [LineUnavailableException] when either will
+     * not open — see [start].
+     */
+    @Throws(LineUnavailableException::class)
+    protected open fun openDevices(): AudioDevices {
+        val inLine = AudioSystem.getLine(
+            DataLine.Info(TargetDataLine::class.java, CallAudio.FORMAT),
+        ) as TargetDataLine
+        // Four frames of device buffer. Smaller starves on a scheduling hiccup;
+        // larger adds latency the user hears as delay before the jitter buffer ever
+        // sees the audio.
+        inLine.open(CallAudio.FORMAT, CallAudio.BYTES_PER_FRAME * 4)
+        val outLine = try {
+            (AudioSystem.getLine(DataLine.Info(SourceDataLine::class.java, CallAudio.FORMAT)) as SourceDataLine)
+                .also { it.open(CallAudio.FORMAT, CallAudio.BYTES_PER_FRAME * 4) }
+        } catch (t: Throwable) {
+            runCatching { inLine.close() }
+            throw t
+        }
+        inLine.start()
+        outLine.start()
+        return AudioDevices(
+            read = { b, off, len -> inLine.read(b, off, len) },
+            write = { b, off, len -> outLine.write(b, off, len) },
+            close = {
+                runCatching { inLine.stop() }; runCatching { inLine.flush() }; runCatching { inLine.close() }
+                runCatching { outLine.stop() }; runCatching { outLine.flush() }; runCatching { outLine.close() }
+            },
+        )
+    }
     private var captureThread: Thread? = null
     private var renderThread: Thread? = null
 
     /** True between a successful [start] and [stop]. */
     val isRunning: Boolean get() = running.get()
+
+    /**
+     * __DESKTOP_CALL_UI_2026_09_23__ Mute. The capture keeps running and frames keep
+     * leaving — as SILENCE — rather than stopping: a sender that goes quiet on the wire is
+     * indistinguishable from a dead path to the peer's watchdogs, and the NAT mapping the
+     * hole punch opened would age out under a long mute.
+     */
+    @Volatile var muted: Boolean = false
+
+    /** Sealed frames handed to the socket. The outbound half of "audio is flowing". */
+    val framesSent = java.util.concurrent.atomic.AtomicLong()
+
+    /**
+     * Consecutive captured frames that were EXACT digital zero while not muted.
+     *
+     * A real microphone never delivers a run of bit-exact zeros — even a quiet room has
+     * noise in the low bits. Windows does exactly that when Settings → Privacy & security →
+     * Microphone is OFF for desktop apps: the line opens, `read` returns full buffers, and
+     * every sample is 0. The call looks healthy on both ends and the peer hears nothing.
+     * macOS does the same for a process that was refused microphone access. This counter
+     * is how the call screen can say so instead of letting both people wait.
+     */
+    val consecutiveSilentFrames = java.util.concurrent.atomic.AtomicLong()
+
+    /** ~3 s of digital zero from an unmuted microphone. See [consecutiveSilentFrames]. */
+    val micLooksBlocked: Boolean get() = consecutiveSilentFrames.get() >= MIC_BLOCKED_FRAMES
 
     /**
      * Open both lines and start pumping.
@@ -180,29 +286,13 @@ open class CallAudioSession(
     open fun start() {
         if (!running.compareAndSet(false, true)) return
         try {
-            val inLine = AudioSystem.getLine(
-                DataLine.Info(TargetDataLine::class.java, CallAudio.FORMAT),
-            ) as TargetDataLine
-            // Four frames of device buffer. Smaller starves on a scheduling hiccup;
-            // larger adds latency the user hears as delay before the jitter buffer ever
-            // sees the audio.
-            inLine.open(CallAudio.FORMAT, CallAudio.BYTES_PER_FRAME * 4)
-            mic = inLine
-
-            val outLine = AudioSystem.getLine(
-                DataLine.Info(SourceDataLine::class.java, CallAudio.FORMAT),
-            ) as SourceDataLine
-            outLine.open(CallAudio.FORMAT, CallAudio.BYTES_PER_FRAME * 4)
-            speaker = outLine
-
-            inLine.start()
-            outLine.start()
-
-            captureThread = Thread({ pumpCapture(inLine) }, "oshi-call-capture").apply {
+            val d = openDevices()
+            devices = d
+            captureThread = Thread({ pumpCapture(d) }, "oshi-call-capture").apply {
                 isDaemon = true
                 start()
             }
-            renderThread = Thread({ pumpRender(outLine) }, "oshi-call-render").apply {
+            renderThread = Thread({ pumpRender(d) }, "oshi-call-render").apply {
                 isDaemon = true
                 start()
             }
@@ -219,6 +309,13 @@ open class CallAudioSession(
      * client cannot decode — three different reasons a frame is not played, all of which
      * a caller may want to count separately from silence.
      */
+    /**
+     * Draw the next value of THIS call's media counter for a non-audio sealed control
+     * (`0x0E`/`0x0F` video upgrade). Shared on purpose: the control is sealed under the
+     * audio key and salt, so a private counter would repeat an audio nonce.
+     */
+    fun nextSequence(): Long = sequence.next()
+
     fun onFrame(frame: ByteArray): Boolean {
         val decoded = CallMediaFrame.decode(sessionKey, frame) ?: return false
         if (!replay.accept(decoded.seq)) return false
@@ -229,7 +326,7 @@ open class CallAudioSession(
         return true
     }
 
-    private fun pumpCapture(line: TargetDataLine) {
+    private fun pumpCapture(line: AudioDevices) {
         val buf = ByteArray(CallAudio.BYTES_PER_FRAME)
         while (running.get()) {
             var filled = 0
@@ -239,21 +336,42 @@ open class CallAudioSession(
                 filled += n
             }
             if (filled != buf.size || !running.get()) continue
+            if (!muted) {
+                if (buf.all { it == 0.toByte() }) consecutiveSilentFrames.incrementAndGet()
+                else consecutiveSilentFrames.set(0)
+            }
             val sealed = CallMediaFrame.encode(
                 sessionKey, baseSalt, isCaller, sequence.next(),
-                CallMediaFrame.TYPE_PCM_48K, buf.copyOf(),
+                CallMediaFrame.TYPE_PCM_48K, if (muted) ByteArray(buf.size) else buf.copyOf(),
             )
-            runCatching { send(sealed) }
+            if (runCatching { send(sealed) }.isSuccess) framesSent.incrementAndGet()
         }
     }
 
-    private fun pumpRender(line: SourceDataLine) {
+    private fun pumpRender(line: AudioDevices) {
+        // Duration of the last real frame. The iPhone App Store build sends ~32 ms frames
+        // at ~30 pkt/s: waiting only 20 ms for one wrote 20 ms of silence between every
+        // two of them — audio that was never sent, and a click either side of it.
+        var waitMs = CallAudio.FRAME_MS.toLong()
+        var fadeInNext = false
         while (running.get()) {
-            val frame = playback.take(CallAudio.FRAME_MS.toLong())
+            val frame = playback.take(waitMs)
             // A missing frame is written as silence rather than skipped. Skipping shortens
             // the stream and every later frame plays early, which compounds — the drift a
             // PLC would otherwise hide.
-            val pcm = frame ?: ByteArray(CallAudio.BYTES_PER_FRAME)
+            val pcm = if (frame == null) {
+                fadeInNext = true
+                ByteArray(CallAudio.BYTES_PER_FRAME)
+            } else {
+                waitMs = CallAudio.frameMsFor(frame.size).toLong()
+                // __DROP_CLICK_FADE_2026_09_22__ (iOS): after an overflow drop or a
+                // silence, this frame does not continue the last one's waveform — the
+                // step is a click. 2 ms of fade-in removes it and cannot be heard.
+                if (playback.consumeDiscontinuity() || fadeInNext) {
+                    fadeInNext = false
+                    CallAudio.fadeIn(frame)
+                } else frame
+            }
             runCatching { line.write(pcm, 0, pcm.size) }
         }
     }
@@ -274,11 +392,14 @@ open class CallAudioSession(
         renderThread?.interrupt()
         captureThread = null
         renderThread = null
-        mic?.let { runCatching { it.stop() }; runCatching { it.flush() }; runCatching { it.close() } }
-        speaker?.let { runCatching { it.stop() }; runCatching { it.flush() }; runCatching { it.close() } }
-        mic = null
-        speaker = null
+        devices?.let { runCatching { it.close() } }
+        devices = null
         playback.clear()
+    }
+
+    companion object {
+        /** 150 × 20 ms = 3 s. Long enough that a PTT-quiet start never trips it. */
+        const val MIC_BLOCKED_FRAMES = 150L
     }
 }
 
@@ -297,14 +418,29 @@ open class CallAudioSession(
  */
 class PlaybackBuffer(private val maxFrames: Int = MAX_FRAMES) {
     private val queue = java.util.concurrent.LinkedBlockingQueue<ByteArray>()
+    private val discontinuity = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** Frames discarded because the queue was full. Diagnostic. */
+    val overflowDrops = java.util.concurrent.atomic.AtomicLong()
 
     fun offer(pcm: ByteArray) {
         // Drop the OLDEST on overflow, never the newest: in a live call the freshest
         // audio is the only audio worth hearing, and discarding it to preserve a backlog
         // makes the call lag further behind with every overrun.
-        while (queue.size >= maxFrames) queue.poll()
+        while (queue.size >= maxFrames) {
+            if (queue.poll() != null) {
+                overflowDrops.incrementAndGet()
+                discontinuity.set(true)
+            }
+        }
         queue.offer(pcm)
     }
+
+    /**
+     * True once after an overflow drop: the next frame taken does not continue the one
+     * before it. The render loop fades it in (__DROP_CLICK_FADE_2026_09_22__).
+     */
+    fun consumeDiscontinuity(): Boolean = discontinuity.getAndSet(false)
 
     /** The next frame, or null after [timeoutMs]. Null means "play silence". */
     fun take(timeoutMs: Long): ByteArray? =
@@ -314,7 +450,10 @@ class PlaybackBuffer(private val maxFrames: Int = MAX_FRAMES) {
 
     fun size(): Int = queue.size
 
-    fun clear() = queue.clear()
+    fun clear() {
+        queue.clear()
+        discontinuity.set(false)
+    }
 
     companion object {
         /** 3 × 20 ms = 60 ms, the shipped depth. */

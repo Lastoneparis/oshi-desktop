@@ -92,6 +92,27 @@ class GroupWiringTest {
         assertNull("we were removed from a group and kept it", me.groups.get("g3"))
     }
 
+    // ============================================================ left-group tombstone (devsync)
+
+    @Test
+    fun `a group left on this account is not re-created by a member's re-share, unless rejoined`() {
+        // __DEVSYNC_REJOIN_2026_09_23__ the desktop's only tombstone is the devsync left-groups state.
+        val me = fx.client("me")
+        val ingest = GroupIngest(me.groups) { me.address }
+        var left = true
+        ingest.refusesGroup = { gid -> left && gid.equals("g9", ignoreCase = true) }
+        val def = definition("g9", listOf("peer" to true, me.address to false))
+
+        val refused = ingest.ingest(GroupUpdateWire.encodeDefinitionFramed(def), sender = "peer")
+        assertEquals(GroupIngest.Outcome.REJECTED_NOT_PERMITTED, refused.outcome)
+        assertNull("a member's re-share walked us back into a group we left", me.groups.get("g9"))
+
+        left = false // the user rejoined on another device of the account
+        val created = ingest.ingest(GroupUpdateWire.encodeDefinitionFramed(def), sender = "peer")
+        assertEquals(GroupIngest.Outcome.CREATED, created.outcome)
+        assertNotNull(me.groups.get("g9"))
+    }
+
     // ============================================================ restampAdminSet
 
     @Test
@@ -157,6 +178,37 @@ class GroupWiringTest {
         val g = me.groups.get("g7")!!
         assertTrue("the admin set was taken from a non-admin sender", g.isAdmin(me.address))
         assertFalse(g.isAdmin("peer"))
+    }
+
+    @Test
+    fun `a non-admin cannot locally mutate a group roster or name`() {
+        val me = fx.client("me")
+        // __GROUP_E2E_V2_2026_09_23__ admin_only: in a collaborative/public group any member may
+        // add and rename (GROUP_E2E_V2_SPEC §5.2), so the refusal is asserted where it applies.
+        val original = definition("g10", listOf("peer" to true, me.address to false), name = "original")
+            .copy(type = GroupType.ADMIN_ONLY)
+        me.groups.put(original)
+
+        assertNull(me.addGroupMember("g10", "newcomer"))
+        assertNull(me.removeGroupMember("g10", "peer"))
+        assertNull(me.renameGroup("g10", "rewritten"))
+
+        assertEquals(original, me.groups.get("g10"))
+    }
+
+    @Test
+    fun `only an admin can change roles and the creator cannot be demoted`() {
+        val me = fx.client("me")
+        val original = definition("g11", listOf(me.address to true, "peer" to false))
+        me.groups.put(original)
+
+        assertTrue(me.setGroupMemberAdmin("g11", "peer", true)!!.isAdmin("peer"))
+        assertNull(me.setGroupMemberAdmin("g11", me.address, false))
+        assertTrue(me.groups.get("g11")!!.isAdmin(me.address))
+
+        val member = fx.client("member")
+        member.groups.put(definition("g12", listOf("peer" to true, member.address to false)))
+        assertNull(member.setGroupMemberAdmin("g12", member.address, true))
     }
 
     @Test

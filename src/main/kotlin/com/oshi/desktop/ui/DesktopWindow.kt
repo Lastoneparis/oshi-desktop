@@ -54,10 +54,15 @@ import com.oshi.desktop.ui.state.Destination
 import com.oshi.desktop.ui.state.Pane
 import com.oshi.desktop.ui.state.PlacesModel
 import com.oshi.desktop.ui.state.ShellState
+import com.oshi.desktop.ui.state.CallScreenModel
+import com.oshi.desktop.ui.components.CallOverlay
+import com.oshi.desktop.ui.components.CallVideoFrames
+import com.oshi.desktop.ui.components.CallRatingPrompt
 import java.awt.Toolkit
 import java.awt.datatransfer.StringSelection
 import java.io.File
 import java.time.LocalDate
+import kotlinx.coroutines.delay
 import org.jetbrains.skia.Image as SkiaImage
 
 /**
@@ -124,8 +129,9 @@ import org.jetbrains.skia.Image as SkiaImage
  * And this window has only ever been OPENED on macOS aarch64: skiko publishes windows-x64,
  * linux-x64 and linux-arm64 natives and this build has loaded none of them.
  */
-fun runDesktopUi(client: OshiClient) {
-    val model = ChatShellModel(client)
+fun runDesktopUi(client: OshiClient, startHidden: Boolean = false) {
+    val notifier = DesktopNotifier()
+    val model = ChatShellModel(client, onIncomingNotification = notifier::notifyIncomingMessage)
     model.attach()
 
     // The two sibling models. They are constructed here rather than inside a composable so
@@ -133,30 +139,118 @@ fun runDesktopUi(client: OshiClient) {
     // AI manager is the SAME singleton the REPL's `/ai` drives — one model file, one engine,
     // one history, whichever door the user came in through.
     val ai = AiConsoleModel(com.oshi.desktop.ai.DesktopAi.manager())
+    val mail = com.oshi.desktop.ui.state.MailModel(client)
+    val mailArrivals = com.oshi.desktop.ui.state.MailArrivalTracker()
     val places = PlacesModel(PlacesModel.defaultDir(client.mediaDir.parentFile))
 
     // `OshiClient.home` is private; `mediaDir` is `File(home, "media")` and public, so this is
     // the client's real home even under `--home`, not `DesktopPaths.dataDir` guessed at again.
     val wallpapers = WallpaperStore(File(client.mediaDir.parentFile, WallpaperStore.FILE_NAME))
 
+    // __DESKTOP_CALL_UI_2026_09_23__ Voice calls in the window (PARITY.md row 2.1). The lane
+    // polls from `client.start` (UiLauncher turns it on for the window); this model turns its
+    // events into a screen, a ring and a history row. `mutableStateOf` outside composition is
+    // snapshot state like any other, so the poll thread can write it.
+    val callTones = CallTones()
+    val callScreen = mutableStateOf<CallScreenModel.CallScreen?>(null)
+    val ratingAsk = mutableStateOf<com.oshi.desktop.call.CallRatingClient.Pending?>(null)
+    val calls = CallScreenModel(
+        lane = client.calls,
+        labelFor = { addr -> client.contacts.get(addr)?.label(com.oshi.desktop.app.short(addr)) ?: com.oshi.desktop.app.short(addr) },
+        ringer = callTones,
+        recordSummary = { peer, content, outgoing ->
+            // The phones' own call-history row, written locally (see CallSummary), then shown.
+            runCatching {
+                client.messages.append(
+                    com.oshi.desktop.store.Message(
+                        id = java.util.UUID.randomUUID().toString(),
+                        conversationId = peer,
+                        senderAddress = if (outgoing) client.address else peer,
+                        recipientAddress = if (outgoing) peer else client.address,
+                        fromMe = outgoing,
+                        content = content,
+                        sentAtMs = System.currentTimeMillis(),
+                        sentAtSource = com.oshi.desktop.store.TimestampSource.LOCAL_CLOCK,
+                        deliveryStatus = com.oshi.desktop.store.DeliveryStatus.DELIVERED,
+                        transport = "local",
+                    )
+                )
+            }
+            model.refresh()
+        },
+        afterCall = { callId, peer, seconds, normally ->
+            client.callRating.callDidEnd(callId, peer, seconds, normally)?.let { ratingAsk.value = it }
+        },
+    )
+    calls.onChange = { callScreen.value = it }
+    run {
+        val previous = client.onCall
+        client.onCall = { event -> previous(event); calls.onEvent(event) }
+    }
+
     application {
         val quit: () -> Unit = { exitApplication() }
+        // __DESKTOP_BACKGROUND_2026_09_23__ Closing the window HIDES it while a tray/menu-bar
+        // icon (or the macOS Dock) can bring it back, so calls and messages keep arriving —
+        // there is no push to wake a process that is not running (PARITY.md row 2.3).
+        var windowVisible by remember { mutableStateOf(!startHidden) }
+        var keepsRunning by remember { mutableStateOf(false) }
         var state by remember { mutableStateOf(model.state) }
         var aiState by remember { mutableStateOf(ai.state) }
+        var mailState by remember { mutableStateOf(mail.state) }
         var placesState by remember { mutableStateOf(places.state) }
 
-        DisposableEffect(model) {
+        DisposableEffect(model, mail) {
             // The poll thread writes this; Compose snapshot state is safe to write from any
             // thread and schedules its own recomposition, so there is no invokeLater here.
             model.onChange = { state = it }
             ai.onChange = { aiState = it }
             places.onChange = { placesState = it }
+            val stopObservingMail = mail.observe {
+                if (mailArrivals.onSnapshot(it)) notifier.notifyIncomingMessage()
+                mailState = it
+            }
+            keepsRunning = notifier.install(
+                openLabel = dt("desktop.background.open"),
+                quitLabel = dt("desktop.background.quit"),
+                onOpen = { windowVisible = true },
+                onQuit = quit,
+            ) || LoginItem.os() == LoginItem.Os.MAC
+            if (!keepsRunning) windowVisible = true
+            // macOS: clicking the Dock icon of a hidden OSHI brings the window back.
+            runCatching {
+                java.awt.Desktop.getDesktop().addAppEventListener(java.awt.desktop.AppReopenedListener { windowVisible = true })
+            }
             model.refresh()
-            onDispose { model.onChange = {}; ai.onChange = {}; places.onChange = {}; model.close() }
+            // Match iOS's ChatsTabView launch task: warm the sealed mailbox before the
+            // user opens Mail. MailModel performs its blocking account/inbox requests on
+            // its own worker, and MailPane observes the resulting snapshot when mounted.
+            mail.refresh()
+            onDispose {
+                model.onChange = {}
+                ai.onChange = {}
+                places.onChange = {}
+                stopObservingMail()
+                notifier.close()
+                model.close()
+            }
+        }
+
+        // Desktop has no APNs/FCM mail wake. Once the initial account + inbox snapshot
+        // proves this identity owns a mailbox, poll it while the process is alive so the
+        // menu's unread count can change without opening Mail. A no-mailbox identity is
+        // never retried in a loop: only this client can claim that address.
+        LaunchedEffect(mail, mailState.hasMailbox, mailState.loading) {
+            if (!mailState.hasMailbox || mailState.loading) return@LaunchedEffect
+            while (true) {
+                delay(MAIL_POLL_INTERVAL_MS)
+                mail.refresh()
+            }
         }
 
         Window(
-            onCloseRequest = quit,
+            onCloseRequest = { if (keepsRunning) windowVisible = false else quit() },
+            visible = windowVisible,
             title = "${t("identity.app_name")} — ${client.displayName}",
             // The shipped app icon, off the CLASSPATH — so the packaged .exe shows OSHI in
             // the Windows taskbar and in alt-tab rather than the JVM's default coffee cup.
@@ -173,6 +267,9 @@ fun runDesktopUi(client: OshiClient) {
                 // a future script-specific spelling (it is a key the phones already own) reach
                 // this menu without anyone remembering this line exists.
                 Menu(t("identity.app_name")) {
+                    val unreadMail = mailState.badgeCount(com.oshi.desktop.ui.state.MailModel.FOLDER_INBOX)
+                    val mailLabel = if (unreadMail == 0) t("mail.title") else "${t("mail.title")} ($unreadMail)"
+                    Item(mailLabel, onClick = { model.show(Pane.MAIL); model.go(Destination.MESSAGES) })
                     Item(dt("desktop.nav.account"), onClick = { model.show(Pane.ACCOUNT) })
                     Item(dt("desktop.nav.limits"), onClick = { model.show(Pane.LIMITS) })
                     Separator()
@@ -183,7 +280,23 @@ fun runDesktopUi(client: OshiClient) {
                     Item(dt("desktop.menu.closeConversation"), onClick = { model.select(null) })
                 }
             }
+            // An incoming call raises the window and — when it is not the focused one — posts
+            // the metadata-free notification, once per call.
+            val incomingCallId = callScreen.value?.takeIf { it.phase == CallScreenModel.Phase.INCOMING }?.callId
+            LaunchedEffect(incomingCallId) {
+                if (incomingCallId == null) return@LaunchedEffect
+                if (!window.isFocused || !windowVisible) notifier.notifyIncomingCall(t("call.incoming.voice"))
+                // Hidden in the tray: the small ringing card below answers for it.
+                if (!windowVisible) return@LaunchedEffect
+                window.isMinimized = false
+                window.toFront()
+                window.requestFocus()
+            }
+            LaunchedEffect(calls) {
+                while (true) { calls.tick(); delay(1_000) }
+            }
             MaterialTheme(colorScheme = OshiTheme.colors, typography = OshiTheme.typography) {
+                Box(Modifier.fillMaxSize()) {
                 Surface(Modifier.fillMaxSize(), color = OshiTheme.background) {
                     Shell(
                         state = state,
@@ -192,6 +305,7 @@ fun runDesktopUi(client: OshiClient) {
                         wallpapers = wallpapers,
                         ai = ai,
                         aiState = aiState,
+                        mail = mail,
                         places = places,
                         placesState = placesState,
                         // AWT's chooser, not a hand-rolled one: it is the dialog the user's
@@ -200,12 +314,48 @@ fun runDesktopUi(client: OshiClient) {
                         // BLOCKS the AWT thread, which is correct — a modal file dialog is
                         // supposed to.
                         onPickFile = { pickFile(window) },
+                        onCall = { peer, video -> calls.call(peer, video) },
                     )
+                }
+                callScreen.value?.let { screen ->
+                    CallOverlay(
+                        screen = screen,
+                        onAnswer = calls::answer,
+                        onDecline = calls::decline,
+                        onHangUp = calls::hangUp,
+                        onToggleMute = calls::toggleMute,
+                        onDismiss = calls::dismiss,
+                        video = { client.calls.video()?.let(::CallVideoFrames) },
+                        onToggleCamera = calls::toggleCamera,
+                        onAnswerVideoRequest = calls::answerVideoRequest,
+                    )
+                }
+                if (callScreen.value == null) ratingAsk.value?.let { pending ->
+                    CallRatingPrompt(
+                        onSubmit = { stars ->
+                            Thread({ runCatching { client.callRating.submit(stars) } }, "oshi-call-rating").apply { isDaemon = true }.start()
+                            ratingAsk.value = null
+                        },
+                        onNotNow = { client.callRating.dismiss(); ratingAsk.value = null },
+                    )
+                }
                 }
             }
         }
+
+        // __DESKTOP_BACKGROUND_2026_09_23__ The window is closed to the tray: ring in a small card.
+        callScreen.value?.takeIf { it.phase == CallScreenModel.Phase.INCOMING && !windowVisible }?.let { ringing ->
+            IncomingCallWindow(
+                screen = ringing,
+                onAnswer = { calls.answer(); windowVisible = true },
+                onDecline = calls::decline,
+            )
+        }
     }
 }
+
+/** Mail's polling equivalent of iOS's push wake; bounded by the process lifetime above. */
+private const val MAIL_POLL_INTERVAL_MS = 30_000L
 
 @Composable
 private fun Shell(
@@ -215,9 +365,11 @@ private fun Shell(
     wallpapers: WallpaperStore,
     ai: AiConsoleModel,
     aiState: AiConsoleModel.AiState,
+    mail: com.oshi.desktop.ui.state.MailModel,
     places: PlacesModel,
     placesState: PlacesModel.PlacesState,
     onPickFile: () -> File?,
+    onCall: ((String, Boolean) -> Unit)? = null,
 ) {
     // See DRAFTS above. Keyed by conversation so a switch does not lose what was typed.
     val drafts: SnapshotStateMap<String, String> = remember { mutableStateMapOf() }
@@ -252,6 +404,7 @@ private fun Shell(
                 state = state,
                 onStartConversation = { model.startConversation(it) },
                 onCopy = { copyToClipboard(it) },
+                onPickQrImage = onPickFile,
             )
             Destination.AI -> AiPane(
                 state = aiState,
@@ -271,13 +424,27 @@ private fun Shell(
                 onSelect = { model.select(it); model.go(Destination.MESSAGES) },
                 onSetBlocked = { address, blocked -> model.setBlocked(address, blocked) },
                 onRename = { address, name -> model.renameContact(address, name) },
+                onVerifySafetyNumber = { address, payload -> model.verifySafetyNumber(address, payload) },
                 onCopy = { copyToClipboard(it) },
+                // __ENCRYPTED_MESSAGE_EXPORT_2026_09_22__ the dialog blocks the AWT thread, as a
+                // modal should; the export/import itself runs on the model's worker.
+                onExportMessages = {
+                    com.oshi.desktop.ui.components.pickMessageExportTarget()?.let { model.exportMessages(it) }
+                },
+                onImportMessages = {
+                    com.oshi.desktop.ui.components.pickMessageExportSource()?.let { model.importMessages(it) }
+                },
+                // __SHARED_NICKNAME_2026_09_22__ all three run on the model's worker.
+                onSetNickname = { model.setOwnNickname(it) },
+                onPullNickname = { model.pullNicknameFromPhone() },
+                onPushNickname = { model.pushNicknameToPhone() },
             )
             Destination.MESSAGES -> MessagesDestination(
                 state = state,
                 model = model,
                 client = client,
                 wallpapers = wallpapers,
+                mail = mail,
                 drafts = drafts,
                 query = query,
                 onQuery = { query = it },
@@ -286,6 +453,7 @@ private fun Shell(
                 revealed = revealed,
                 today = today,
                 onPickFile = onPickFile,
+                onCall = onCall,
             )
         }
     }
@@ -320,6 +488,7 @@ private fun MessagesDestination(
     model: ChatShellModel,
     client: OshiClient,
     wallpapers: WallpaperStore,
+    mail: com.oshi.desktop.ui.state.MailModel,
     drafts: SnapshotStateMap<String, String>,
     query: String,
     onQuery: (String) -> Unit,
@@ -328,7 +497,27 @@ private fun MessagesDestination(
     revealed: SnapshotStateMap<String, Unit>,
     today: LocalDate,
     onPickFile: () -> File?,
+    onCall: ((String, Boolean) -> Unit)? = null,
 ) {
+    // The header's reach badge and incoming-share counter depend on the CLOCK as well as on
+    // events (a peer drop outlasts its grace, a LoRa node ages out, a share ends), so they are
+    // sampled on a tick rather than pushed. One second is the badge's resolution; the read is
+    // two map scans and a ConcurrentHashMap size.
+    var badge by remember { mutableStateOf(com.oshi.desktop.ui.state.NetworkBadge.OFFLINE) }
+    var incomingShares by remember { mutableStateOf(emptyList<com.oshi.desktop.ui.state.IncomingShare>()) }
+    LaunchedEffect(model) {
+        while (true) {
+            val now = System.currentTimeMillis()
+            val (b, shares) = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                model.networkBadge(now) to model.incomingLiveShares(now)
+            }
+            // Assigning an EQUAL value is a no-op for a state read, so an unchanged header
+            // does not recompose once a second.
+            badge = b
+            incomingShares = shares
+            kotlinx.coroutines.delay(1_000)
+        }
+    }
     Row(Modifier.fillMaxSize().background(OshiTheme.background)) {
         ConversationListPane(
             state = state,
@@ -338,13 +527,26 @@ private fun MessagesDestination(
             onHalf = onHalf,
             onSelect = { model.select(it) },
             onShow = { model.show(it) },
+            onCreateGroup = { name, members -> model.createGroup(name, members) },
             today = today,
+            badge = badge,
+            incomingShares = incomingShares,
         )
         Box(Modifier.width(Metrics.hairline).fillMaxHeight().background(OshiTheme.separator))
         Box(Modifier.weight(1f).fillMaxHeight()) {
             when (state.pane) {
-                Pane.ACCOUNT -> AccountPane(state) { copyToClipboard(it) }
+                Pane.MAIL -> com.oshi.desktop.ui.components.MailPane(mail, onPickFile)
+                Pane.ACCOUNT -> AccountPane(
+                    state = state,
+                    onCopyAddress = { copyToClipboard(it) },
+                    onDeliveryReceipts = { model.setReceiptPrivacy(delivery = it) },
+                    onReadReceipts = { model.setReceiptPrivacy(read = it) },
+                    onSyncPush = model::syncPushContacts,
+                    onSyncPull = model::syncPull,
+                )
                 Pane.LIMITS -> LimitsPane()
+                // __DEVSYNC_DIRECT_2026_09_22__
+                Pane.DEVICES -> com.oshi.desktop.ui.components.LinkedDevicesPane(client.devSync, client.deviceMailbox)
                 // `remember(client)` and not a fresh instance per recomposition: CovertText
                 // holds the identity private key, and a composable is re-entered freely.
                 Pane.COVERT -> {
@@ -353,6 +555,15 @@ private fun MessagesDestination(
                     }
                     CovertPane(covert, state.contacts, onCopy = { text -> copyToClipboard(text) })
                 }
+                Pane.SCHEDULED -> com.oshi.desktop.ui.components.ScheduledPane(
+                    rows = state.scheduled,
+                    contacts = state.contacts,
+                    groups = state.conversations.filter { it.kind == com.oshi.desktop.ui.state.ConversationKind.GROUP },
+                    busy = state.busy,
+                    onSchedule = model::scheduleMessage,
+                    onEdit = model::editScheduled,
+                    onCancel = model::cancelScheduled,
+                )
                 Pane.CONVERSATION -> {
                     val thread = state.thread
                     if (thread == null) {
@@ -372,17 +583,31 @@ private fun MessagesDestination(
                                 wallpapers.set(thread.conversationId, it)
                             },
                             draft = drafts[thread.conversationId].orEmpty(),
-                            onDraft = { drafts[thread.conversationId] = it },
+                            onDraft = {
+                                drafts[thread.conversationId] = it
+                                model.typingChanged(thread.conversationId, it.isNotBlank())
+                            },
                             onSend = {
                                 // The ONLY place the model hears about the draft.
+                                model.typingChanged(thread.conversationId, false)
                                 model.draft(drafts[thread.conversationId].orEmpty())
                                 model.send()
                             },
                             onAttach = { onPickFile()?.let { model.attach(it) } },
+                            onVoiceNote = { model.attach(it.file, it.mediaType, discardAfterSend = true) },
+                            onRenameGroup = { model.renameGroup(thread.conversationId, it) },
+                            onReact = model::react,
+                            onEditMessage = model::editMessage,
+                            onDeleteMessage = model::deleteMessage,
+                            onAddGroupMember = { model.addGroupMember(thread.conversationId, it) },
+                            onRemoveGroupMember = { model.removeGroupMember(thread.conversationId, it) },
+                            onSetGroupMemberAdmin = { member, admin -> model.setGroupMemberAdmin(thread.conversationId, member, admin) },
                             viewOnce = facts,
                             revealed = revealed.keys,
                             onReveal = { revealed[it] = Unit },
                             today = today,
+                            onCall = onCall?.let { call -> { video -> call(thread.conversationId, video) } },
+                            onLeaveGroup = { model.leaveGroup(thread.conversationId) },
                         )
                     }
                 }

@@ -121,11 +121,11 @@ object VoiceNoteFormat {
     const val MIN_DURATION_MS = 200L
 
     /**
-     * The capture format. **Little-endian, deliberately, and this differs from the call
-     * path on purpose.**
+     * The capture format. **Little-endian, deliberately.**
      *
-     * `CallAudio.FORMAT` is big-endian because packet type `0x15` is defined that way by
-     * the peer. Nothing here is defined by a peer: these samples go into a RIFF/WAVE
+     * `CallAudio.FORMAT` is little-endian too, but for a different reason: packet type
+     * `0x15` carries the phones' native little-endian Int16 (it was wrongly big-endian
+     * until 2026-09-22). Nothing here is defined by a peer: these samples go into a RIFF/WAVE
      * file, whose sample data is little-endian by specification, and then into an encoder.
      * Copying the call path's `bigEndian = true` would produce a WAV whose bytes are
      * swapped inside every sample — which does not fail, it just sounds like white noise.

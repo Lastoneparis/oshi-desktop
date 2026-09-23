@@ -13,15 +13,15 @@ import javax.crypto.spec.SecretKeySpec
  *
  * ## Scope on the desktop — read this before assuming it does anything
  *
- * This is the CODEC only. On iOS the codec is reached exclusively by the covert-relay
- * transport (`CovertChannelManager.swift`, gated on `covertChannelEnabled`); Android
+ * This is the CODEC, not a covert-relay transport. On iOS it is reached exclusively by
+ * the covert relay (`CovertChannelManager.swift`, gated on `covertChannelEnabled`); Android
  * has the matching `CovertChannelManager.kt` and wires it through `MessageRepository`.
- * **The desktop client has neither** — there is no `CovertChannelManager` here, nothing
- * polls a covert relay, and no UI enables it. So this class has NO caller in the desktop
- * app today, exactly like the video-call lanes in rows 2.1-v / 2.1-c: a verified byte
- * contract with no transport under it yet. It is shipped as a building block for a future
- * covert lane (row 2.2), not as a live feature, and it is labelled that way in PARITY.md
- * so it cannot read as coverage it is not.
+ * Desktop has no `CovertChannelManager` and does not poll or send through such a relay.
+ * It does expose [CovertText] in the window as a deliberately manual carrier: a person
+ * copies the resulting text to an out-of-band channel and pastes a received carrier back.
+ * That makes desktop↔desktop text hiding a live feature without pretending a copy action
+ * is a phone-compatible relay send. The phone relay's extracted bytes are JSON fragments;
+ * the manual desktop surface uses raw UTF-8, so the formats must not be mixed.
  *
  * What IS verified end-to-end and machine-checkable without any transport: round-trip
  * embed->extract for all four methods, and — the reason a port is worth anything —

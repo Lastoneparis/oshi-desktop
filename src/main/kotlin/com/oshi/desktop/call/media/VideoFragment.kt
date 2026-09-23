@@ -121,6 +121,13 @@ object VideoFragment {
  */
 class VideoReassembler {
 
+    /**
+     * A healthy sender has only a few frames in flight; this is deliberately generous
+     * while bounding a hostile stream of mutually non-newer frame ids. At the protocol's
+     * largest frame it retains under 9 MiB of payload plus fragment slots.
+     */
+    private companion object { const val MAX_IN_FLIGHT = 32 }
+
     enum class Reason {
         /** Not a fragment, or a header that contradicts itself. */
         MALFORMED,
@@ -195,6 +202,13 @@ class VideoReassembler {
             if (dist in 1..32768) { it.remove(); abandoned = true }
         }
 
+        if (!inFlight.containsKey(h.frameId) && inFlight.size >= MAX_IN_FLIGHT) {
+            // LinkedHashMap is insertion ordered. No ordering relation exists between a
+            // deliberately decreasing id stream, so discard the oldest arrival rather than
+            // letting it allocate one Entry (and up to 255 retained fragments) forever.
+            inFlight.entries.iterator().apply { next(); remove() }
+            abandoned = true
+        }
         val entry = inFlight.getOrPut(h.frameId) { Entry(h.total) }
         if (entry.total != h.total) {
             inFlight.remove(h.frameId)

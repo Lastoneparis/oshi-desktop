@@ -62,12 +62,18 @@ class AccountStoresTest {
     }
 
     @Test
-    fun `an incomplete account reads as no account, not as a broken one`() {
+    fun `an incomplete account is never silently replaced with a new address`() {
         val v = vault()
         IdentityStore.loadOrCreate(v)
         v.delete(IdentityStore.ACCOUNT_ED25519_PRIV)
         assertNull("half an account must not load", IdentityStore.load(vault()))
-        assertTrue(!IdentityStore.exists(vault()))
+        assertTrue(IdentityStore.hasAnyAccountMaterial(vault()))
+        try {
+            IdentityStore.loadOrCreate(vault())
+            fail("partial account material must stop account creation")
+        } catch (_: IdentityImportException) {
+            assertNull("the partial account must not be overwritten", IdentityStore.load(vault()))
+        }
     }
 
     @Test
@@ -78,6 +84,58 @@ class AccountStoresTest {
         assertNull(IdentityStore.load(vault()))
         val fresh = IdentityStore.loadOrCreate(vault())
         assertNotNull(fresh.userKey)
+    }
+
+    @Test
+    fun `a mobile recovery key restores the same two public identities`() {
+        val original = DesktopIdentity.generate()
+        val recovery = IdentityStore.exportRecoveryKey(original)
+
+        val imported = IdentityStore.importRecoveryKey(vault(), "oshi-recovery:$recovery")
+        assertEquals(original.userKey, imported.userKey)
+        assertArrayEquals(original.signingPub, imported.signingPub)
+        assertEquals(imported.userKey, IdentityStore.load(vault())!!.userKey)
+    }
+
+    @Test
+    fun `recovery import rejects malformed material before writing an account`() {
+        val v = vault()
+        try {
+            IdentityStore.importRecoveryKey(v, java.util.Base64.getEncoder().encodeToString(ByteArray(63)))
+            fail("a 63-byte recovery key must not import")
+        } catch (_: IdentityImportException) {
+            assertNull("a failed import must leave the vault empty", IdentityStore.load(vault()))
+        }
+    }
+
+    @Test
+    fun `recovery import accepts only canonical bounded mobile base64`() {
+        val recovery = IdentityStore.exportRecoveryKey(DesktopIdentity.generate())
+        try {
+            IdentityStore.parseRecoveryKey(recovery.dropLast(2))
+            fail("unpadded recovery material must not be accepted as the mobile wire format")
+        } catch (_: IdentityImportException) {
+            // expected
+        }
+        try {
+            IdentityStore.parseRecoveryKey("A".repeat(257))
+            fail("an oversized paste must be rejected before decoding")
+        } catch (_: IdentityImportException) {
+            // expected
+        }
+    }
+
+    @Test
+    fun `recovery import never overwrites an existing account`() {
+        val v = vault()
+        val existing = IdentityStore.loadOrCreate(v)
+        val incoming = IdentityStore.exportRecoveryKey(DesktopIdentity.generate())
+        try {
+            IdentityStore.importRecoveryKey(v, incoming)
+            fail("an import must not mix a new identity with existing sessions or history")
+        } catch (_: IdentityImportException) {
+            assertEquals(existing.userKey, IdentityStore.load(vault())!!.userKey)
+        }
     }
 
     // ------------------------------------------------------------------ prekeys

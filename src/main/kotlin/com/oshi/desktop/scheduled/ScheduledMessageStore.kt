@@ -1,7 +1,8 @@
 package com.oshi.desktop.scheduled
 
-import com.oshi.desktop.store.AtomicFile
 import com.oshi.desktop.store.DesktopPaths
+import com.oshi.desktop.store.LocalDataKeys
+import com.oshi.desktop.store.SealedJsonFile
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -34,18 +35,22 @@ import java.io.File
  * user finds out by the message never arriving. There is no recovery path that reads as
  * success here.
  *
- * ============================================================ PLAINTEXT
+ * ============================================================ AT REST
  *
- * Same posture as [com.oshi.desktop.store.MessageStore], and worth restating because the
- * contents are worse than a contact list: this file holds message BODIES, unsent, for as
- * long as the user schedules them ahead. It is protected by [DesktopPaths]'s owner-only
- * directory and by nothing else. Both phones do the same — iOS writes it into `Documents/`
- * with no `Data Protection` class named (`swift:268-273`), Android into `filesDir` (`.kt:317`).
- * Stated, not defended: it is the same trade the message history makes, and if that one is
- * revisited this file moves with it.
+ * __LOCAL_DATA_AT_REST_2026_09_22__ This file holds message BODIES, unsent, for as long as
+ * the user schedules them ahead, so it is encrypted when [atRestKey] is given (always, from
+ * `OshiClient`): a [com.oshi.desktop.store.SealedJsonFile] envelope under HKDF subkey
+ * [LocalDataKeys.SCHEDULED]. A legacy plaintext file is migrated through the verified write
+ * (temp, fsync, decrypt-back compare, atomic move) ONLY when every row in it parsed — the
+ * reader skips a malformed row, and a rewrite would make that loss permanent, so a file with
+ * a skipped row stays plaintext until someone looks at it. A sealed file that cannot be
+ * opened raises [ScheduledStoreException]; it is never read as "nothing scheduled".
+ * Both phones still keep this file in plaintext (iOS `Documents/`, `swift:268-273`; Android
+ * `filesDir`, `.kt:317`).
  */
 class ScheduledMessageStore(
     private val file: File = DesktopPaths.file("scheduled-messages.json"),
+    private val atRestKey: ByteArray? = null,
 ) {
 
     @Volatile
@@ -168,9 +173,15 @@ class ScheduledMessageStore(
     private fun load(): MutableMap<String, ScheduledMessage> {
         cache?.let { return it }
         val map = LinkedHashMap<String, ScheduledMessage>()
-        if (file.isFile) {
+        val read = try {
+            SealedJsonFile.read(file, atRestKey, LocalDataKeys.SCHEDULED)
+        } catch (e: Exception) {
+            throw ScheduledStoreException("scheduled-messages file is not readable: ${file.absolutePath}", e)
+        }
+        var skipped = 0
+        if (read != null) {
             val o = try {
-                JSONObject(file.readText(Charsets.UTF_8))
+                JSONObject(read.json)
             } catch (e: Exception) {
                 throw ScheduledStoreException(
                     "scheduled-messages file is not readable JSON: ${file.absolutePath}", e
@@ -178,19 +189,25 @@ class ScheduledMessageStore(
             }
             val arr = o.optJSONArray("messages") ?: JSONArray()
             for (i in 0 until arr.length()) {
-                val m = parse(arr.getJSONObject(i)) ?: continue
+                val m = parse(arr.getJSONObject(i))
+                if (m == null) { skipped++; continue }
                 map[m.id] = m
             }
         }
         cache = map
-        return map
+        if (read != null && !read.sealed && atRestKey != null && skipped == 0) {
+            runCatching { persist(map) } // failure leaves the plaintext file; retried next open
+        }
+        return cache ?: map
     }
 
     private fun persist(map: Map<String, ScheduledMessage>) {
         val arr = JSONArray()
         for (m in map.values.sortedWith(ORDER)) arr.put(toJson(m))
         val json = JSONObject().put("v", 1).put("messages", arr).toString()
-        AtomicFile.write(file, json.toByteArray(Charsets.UTF_8))
+        SealedJsonFile.write(file, atRestKey, LocalDataKeys.SCHEDULED, json) { back ->
+            JSONObject(back).getJSONArray("messages").length() == map.size
+        }
         cache = LinkedHashMap(map)
     }
 

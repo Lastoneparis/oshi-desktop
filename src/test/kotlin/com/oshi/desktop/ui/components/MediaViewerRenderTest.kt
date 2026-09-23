@@ -124,6 +124,18 @@ class MediaViewerRenderTest {
     }
 
     @Test
+    fun `an unopened voice note draws controls and never touches the file`() {
+        // Rendering the overlay must not probe or decode an attachment before the person asks
+        // to play it. The deliberately absent file turns an accidental still-image load into
+        // a visible refusal, while the audio branch still renders its play control.
+        val png = render(
+            "viewer-07-audio.png",
+            MediaViewerTarget(MediaType.AUDIO, "/does/not/exist/note.m4a", "note.m4a", viewOnce = false),
+        )
+        assertTrue(spread(png) > 3.0)
+    }
+
+    @Test
     fun `a revealed view-once row still draws`() {
         val f = tmp.newFile("secret.png").also { writePng(it, 300, 200, FIXTURE_ARGB) }
         val png = render(

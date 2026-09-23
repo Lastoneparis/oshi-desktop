@@ -79,6 +79,46 @@ class V2BlobClientTest {
         assertTrue("decrypted bytes do not match the original plaintext", out.readBytes().contentEquals(plaintext))
     }
 
+    @Test
+    fun `streaming receive refuses plaintext over its cap and removes any partial file`() {
+        val plaintext = ByteArray(64 * 1024) { (it % 251).toByte() }
+        val enc = OSHICryptoV2.encryptFile(plaintext, "large.bin", "application/octet-stream", chunkSize = 32 * 1024)
+        val blobId = client.uploadBlob("peer-recipient-key", enc.chunks)!!
+        relay.clear()
+        val out = File(dir, "over-cap.bin")
+
+        val written = client.downloadAndDecryptToFile(
+            blobId, enc.chunks.size, enc.fileKey, enc.fileNonce, enc.manifest, out,
+            maxPlaintextBytes = plaintext.size.toLong() - 1,
+        )
+
+        assertNull(written)
+        assertFalse("oversized receive must leave no destination file", out.exists())
+        assertEquals("manifest rejection must happen before a chunk GET", 0,
+            relay.requests().count { it.method == "GET" })
+    }
+
+    @Test
+    fun `streaming receive rejects an authenticated manifest with phantom chunks before download`() {
+        val fileKey = ByteArray(32) { 7 }
+        val fileNonce = ByteArray(8) { 9 }
+        val bogusInfo = OSHICryptoV2.manifestJson(
+            filename = "one-byte.bin", mime = "application/octet-stream",
+            size = 1, chunkCount = 2, chunkSize = OSHICryptoV2.DEFAULT_CHUNK_SIZE,
+        )
+        val manifest = OSHICryptoV2.aesGcmSeal(
+            fileKey, OSHICryptoV2.chunkNonce(fileNonce, OSHICryptoV2.MANIFEST_COUNTER), bogusInfo, ByteArray(0),
+        )
+        val out = File(dir, "phantom-chunks.bin")
+
+        assertNull(client.downloadAndDecryptToFile(
+            "blob-123e4567-e89b-12d3-a456-426614174000", 2, fileKey, fileNonce, manifest, out,
+        ))
+        assertFalse(out.exists())
+        assertEquals("manifest geometry must be rejected before any chunk GET", 0,
+            relay.requests().count { it.method == "GET" })
+    }
+
     // ------------------------------------------------------------------ signing rules
 
     @Test
@@ -184,6 +224,33 @@ class V2BlobClientTest {
         val res = client.reserve("peer-key", totalSize = V2BlobClient.MAX_BLOB_BYTES + 1, chunkCount = 1)
         assertNull(res)
         assertEquals("must refuse locally, never even reach the relay", before, relay.requests().size)
+    }
+
+    @Test
+    fun `peer supplied blob ids cannot choose a signed relay path`() {
+        val id = "../../account/delete?as=peer"
+        val before = relay.requests().size
+
+        assertFalse(client.uploadChunk(id, 0, byteArrayOf(1)))
+        assertNull(client.status(id))
+        assertFalse(client.commit(id))
+        assertNull(client.downloadChunk(id, 0))
+        assertFalse(client.delete(id))
+        assertNull(client.downloadBlob(id, 1))
+        assertNull(client.downloadAndDecryptToFile(
+            id, 1, ByteArray(32), ByteArray(12), byteArrayOf(1), File(dir, "blocked"),
+        ))
+
+        assertEquals("invalid IDs must be rejected before any signed HTTP request", before, relay.requests().size)
+    }
+
+    @Test
+    fun `blob id grammar accepts server ids and rejects path syntax`() {
+        assertTrue(V2BlobClient.isValidBlobId("blob-123e4567-e89b-12d3-a456-426614174000"))
+        assertTrue(V2BlobClient.isValidBlobId("A_b.c-9"))
+        for (bad in listOf("", "..", "../blob", "blob/part", "blob?query", "blob%2Fpart", "x".repeat(129))) {
+            assertFalse("must reject $bad", V2BlobClient.isValidBlobId(bad))
+        }
     }
 
     // ------------------------------------------------------------------ resume

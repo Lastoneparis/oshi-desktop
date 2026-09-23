@@ -9,6 +9,8 @@ import org.json.JSONObject
 import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
+import java.io.OutputStream
 import java.time.Duration
 
 /** `POST /v2/blobs` response — iOS `V2.ReserveResult`, Android `V2Reservation`. */
@@ -36,8 +38,10 @@ data class V2BlobStatus(val blobId: String, val missing: List<Int>, val committe
  *
  * Every route but reserve carries `x-oshi-user` (the server authorises owner-or-recipient);
  * `blobId` is NOT percent-encoded — the blob store does not decode its path segments and a
- * blob id is always server-generated hex/UUID, never user input (PLAN.md §4.1 is about
- * *identities* in a path, which blob ids are not).
+ * blob id is NOT percent-encoded because the blob store does not decode its path segments.
+ * A reservation is server-generated, but a download id arrives in a peer-supplied file-key
+ * message, so every public operation validates the conservative server-id alphabet before it
+ * builds or signs a path. A peer must never choose an authenticated relay route.
  *
  * THE CHUNK DOWNLOAD IS THE AWKWARD ONE, and it was fixed at the root rather than worked
  * around here. Its response is AES-GCM ciphertext, so it cannot come back through a
@@ -73,7 +77,7 @@ class V2BlobClient(
         return try {
             val o = JSONObject(resp.body)
             V2Reservation(
-                blobId = o.getString("blobId"),
+                blobId = o.getString("blobId").takeIf(::isValidBlobId) ?: return null,
                 chunkSize = o.optInt("chunkSize", OSHICryptoV2.DEFAULT_CHUNK_SIZE),
                 missing = o.optJSONArray("missing").toIntList(),
             )
@@ -84,6 +88,7 @@ class V2BlobClient(
 
     /** PUT one chunk. Idempotent server-side, so a retry after an ambiguous drop is safe. */
     fun uploadChunk(blobId: String, index: Int, data: ByteArray): Boolean {
+        if (!isValidBlobId(blobId) || index < 0) return false
         val path = "/v2/blobs/$blobId/chunk/$index"
         // Verified BEFORE the streamed body is read ⇒ sign over `""`, not the chunk bytes —
         // V2Http.put's default bodyToHash arg is exactly that two-byte string, so it is not
@@ -93,6 +98,7 @@ class V2BlobClient(
 
     /** Non-destructive status: which chunk indices the server is still missing. */
     fun status(blobId: String): V2BlobStatus? {
+        if (!isValidBlobId(blobId)) return null
         val path = "/v2/blobs/$blobId/status"
         val resp = http.request(
             "GET", path,
@@ -103,8 +109,10 @@ class V2BlobClient(
         if (!resp.isSuccess) return null
         return try {
             val o = JSONObject(resp.body)
+            val responseId = o.optString("blobId", blobId)
+            if (responseId != blobId || !isValidBlobId(responseId)) return null
             V2BlobStatus(
-                blobId = o.optString("blobId", blobId),
+                blobId = responseId,
                 missing = o.optJSONArray("missing").toIntList(),
                 committed = o.optBoolean("committed", false),
                 expiresAt = o.optDouble("expiresAt", 0.0),
@@ -122,6 +130,7 @@ class V2BlobClient(
      * the steered one.
      */
     fun commit(blobId: String): Boolean {
+        if (!isValidBlobId(blobId)) return false
         val path = "/v2/blobs/$blobId/commit"
         // Commit DOES go through the server's JSON body reader ⇒ hash the actual (empty)
         // body, i.e. zero bytes — V2Http.postEmpty exists for exactly this shape.
@@ -130,7 +139,7 @@ class V2BlobClient(
 
     /** Download one chunk's opaque ciphertext-plus-tag. Null on any non-2xx / transport error. */
     fun downloadChunk(blobId: String, index: Int): ByteArray? {
-        if (index < 0) return null
+        if (!isValidBlobId(blobId) || index < 0) return null
         val (code, bytes) = http.getBytes(
             path = "/v2/blobs/$blobId/chunk/$index",
             withUserHeader = true,
@@ -143,6 +152,7 @@ class V2BlobClient(
 
     /** Delete-after-delivery. 404 counts as success — the blob is already gone. */
     fun delete(blobId: String): Boolean {
+        if (!isValidBlobId(blobId)) return false
         // V2Http.delete's own defaults are already this route's rules: hash `""`, carry
         // x-oshi-user. Nothing to override.
         val resp = http.delete("/v2/blobs/$blobId")
@@ -224,7 +234,7 @@ class V2BlobClient(
      * here. Returns null if any chunk is missing, so the caller can hold the relay ack.
      */
     fun downloadBlob(blobId: String, chunkCount: Int): List<ByteArray>? {
-        if (chunkCount < 1) return null
+        if (!isValidBlobId(blobId) || chunkCount < 1) return null
         val out = ArrayList<ByteArray>(chunkCount)
         for (i in 0 until chunkCount) {
             out.add(downloadChunk(blobId, i) ?: return null)
@@ -240,7 +250,9 @@ class V2BlobClient(
      *
      * The bytes written are byte-identical to what [OSHICryptoV2.decryptFile] would return —
      * this is an internal restructuring, not a protocol change. [out] is deleted on any
-     * failure so a partial file can never be mistaken for media.
+     * failure so a partial file can never be mistaken for media. The authenticated manifest
+     * and the write sink both enforce [MAX_PLAINTEXT_BYTES]: a peer cannot use a receive-only
+     * file transfer to exceed the send-side media limit.
      *
      * @return the plaintext size, or null when a chunk was unavailable or the blob failed to
      *   open (the caller then holds the relay ack, exactly as before).
@@ -252,12 +264,23 @@ class V2BlobClient(
         fileNonce: ByteArray,
         manifest: ByteArray,
         out: File,
+        maxPlaintextBytes: Long = MAX_PLAINTEXT_BYTES.toLong(),
+        /**
+         * __LOCAL_DATA_AT_REST_2026_09_22__ How [out] is opened. `OshiClient` passes
+         * `MediaVault.sealingStream`, so the plaintext is re-sealed chunk by chunk as it
+         * arrives and never reaches the disk; the default writes plaintext (tests).
+         */
+        openSink: (File) -> java.io.OutputStream = { FileOutputStream(it) },
     ): Long? {
-        if (chunkCount < 1) return null
+        if (!isValidBlobId(blobId) || chunkCount < 1 || maxPlaintextBytes < 0) return null
         return try {
+            // Open this before creating the destination or fetching a chunk. The streaming
+            // decryptor opens it again as part of its authenticated reassembly contract.
+            val info = OSHICryptoV2Streaming.openManifest(fileKey, fileNonce, manifest)
+            if (!isPlausibleManifest(info, chunkCount, maxPlaintextBytes)) return null
             out.parentFile?.mkdirs()
             var written = 0L
-            BufferedOutputStream(FileOutputStream(out)).use { sink ->
+            BufferedOutputStream(CappedOutputStream(openSink(out), maxPlaintextBytes)).use { sink ->
                 written = OSHICryptoV2Streaming.decryptToStream(
                     fileKey = fileKey,
                     fileNonce = fileNonce,
@@ -280,6 +303,29 @@ class V2BlobClient(
         /** iOS `V2.maxBlobBytes` / Android `MAX_BLOB_BYTES` = 200 MB + 1 MiB AEAD slack (V2ClientModels.swift:255). */
         const val MAX_BLOB_BYTES = 200 * 1024 * 1024 + 1024 * 1024
 
+        /** Server-issued IDs only: one URL segment, no escape or normalisation syntax. */
+        private val BLOB_ID = Regex("[A-Za-z0-9._-]{1,128}")
+
+        internal fun isValidBlobId(blobId: String): Boolean =
+            BLOB_ID.matches(blobId) && blobId != "." && blobId != ".."
+
+        /**
+         * Every shipped sender derives the chunk count from the plaintext length, rather than
+         * trusting a separately supplied count. Require the same relation before a receive
+         * loop: without it, a sender could authenticate a zero-byte chunk thousands of times
+         * and make the receiver issue one signed GET per declared phantom chunk.
+         */
+        internal fun isPlausibleManifest(
+            info: OSHICryptoV2Streaming.Manifest,
+            expectedChunkCount: Int,
+            maxPlaintextBytes: Long,
+        ): Boolean {
+            if (info.size <= 0 || info.size > maxPlaintextBytes || info.chunkSize <= 0) return false
+            val chunkSize = info.chunkSize.toLong()
+            val expected = info.size / chunkSize + if (info.size % chunkSize == 0L) 0 else 1
+            return info.chunkCount == expectedChunkCount && expected == expectedChunkCount.toLong()
+        }
+
         /**
          * Per-CHUNK read timeout. A chunk is at most 2 MiB, but a phone uploading over a
          * weak uplink can take a while to have it available — and this is one chunk of a
@@ -287,6 +333,29 @@ class V2BlobClient(
          */
         private val CHUNK_TIMEOUT: Duration = Duration.ofSeconds(60)
     }
+}
+
+/** Refuses a malformed authenticated stream that writes more than its declared allowed size. */
+private class CappedOutputStream(
+    private val delegate: OutputStream,
+    private val maxBytes: Long,
+) : OutputStream() {
+    private var written = 0L
+
+    override fun write(b: Int) = write(byteArrayOf(b.toByte()))
+
+    override fun write(bytes: ByteArray, offset: Int, length: Int) {
+        require(offset >= 0 && length >= 0 && offset <= bytes.size - length) { "invalid write range" }
+        if (length.toLong() > maxBytes - written) {
+            throw IOException("plaintext exceeds $maxBytes bytes")
+        }
+        delegate.write(bytes, offset, length)
+        written += length.toLong()
+    }
+
+    override fun flush() = delegate.flush()
+
+    override fun close() = delegate.close()
 }
 
 /** Null-safe: a missing/absent `missing` array reads as "nothing reported", not a crash. */

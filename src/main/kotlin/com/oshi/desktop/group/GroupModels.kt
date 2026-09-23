@@ -122,7 +122,18 @@ data class GroupDefinition(
     val avatar: String? = null,
     /** See the file doc: `Int?`, never `Int`, and never defaulted to 0. */
     val stateVersion: Int? = null,
+    /** __GROUP_E2E_V2_2026_09_23__ spec §5.1: optional `description` (iOS ignores unknown keys). */
+    val description: String? = null,
+    /**
+     * __GROUP_E2E_V2_2026_09_23__ spec §5.1: members removed by an admin. Receivers take the
+     * UNION and never shrink it; content from an evicted key is dropped (§3 step 6).
+     */
+    val evictedMemberKeys: List<String> = emptyList(),
 ) {
+    /** True when [publicKey] was evicted by an admin (canonical comparison). */
+    fun isEvicted(publicKey: String): Boolean =
+        evictedMemberKeys.any { GroupIdentity.sameIdentity(it, publicKey) }
+
     /** Member keys in wire order. */
     val memberKeys: List<String> get() = members.map { it.publicKey }
 

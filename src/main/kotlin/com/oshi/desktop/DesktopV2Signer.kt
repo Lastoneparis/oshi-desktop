@@ -36,6 +36,9 @@ import java.security.MessageDigest
  */
 class DesktopV2Signer(private val identity: DesktopIdentity) {
 
+    /** The account X25519 userKey this signer puts in `x-oshi-user` (the devsync upgrade binds it into B). */
+    val userKey: String get() = identity.userKey
+
     fun sign(
         method: String,
         path: String,

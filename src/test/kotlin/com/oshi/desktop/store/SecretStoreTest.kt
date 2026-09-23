@@ -3,6 +3,7 @@ package com.oshi.desktop.store
 import java.io.File
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -145,6 +146,64 @@ class SecretStoreTest {
         val known = if (DesktopPaths.isWindows) "cmd.exe" else "sh"
         assertNotNull("PATH lookup failed for $known", Proc.which(known))
         assertNull(Proc.which("definitely-not-a-real-binary-${System.nanoTime()}"))
+    }
+
+    @Test
+    fun `malformed secret-store output becomes a named store error`() {
+        try {
+            decodeStoredSecret("not base64!", "test store")
+            fail("malformed helper output escaped the secret-store error contract")
+        } catch (e: SecretStoreException) {
+            assertTrue(e.message!!.contains("test store"))
+            assertTrue(e.message!!.contains("malformed base64"))
+            assertTrue(e.cause is IllegalArgumentException)
+        }
+    }
+
+    @Test
+    fun `blank secret-store output remains a missing entry`() {
+        assertNull(decodeStoredSecret(" \n", "test store"))
+        assertArrayEquals(byteArrayOf(1, 2), decodeStoredSecret("AQI=\n", "test store"))
+    }
+
+    @Test
+    fun `Linux secret tool prefers the trusted system path over PATH`() {
+        val resolved = LinuxSecretToolStore.resolveSecretTool(
+            pathLookup = { "/attacker/bin/secret-tool" },
+            isExecutable = { it == "/usr/bin/secret-tool" },
+        )
+        assertEquals("/usr/bin/secret-tool", resolved)
+    }
+
+    @Test
+    fun `Linux secret tool falls back only when the trusted binary is unavailable`() {
+        val resolved = LinuxSecretToolStore.resolveSecretTool(
+            pathLookup = { "/opt/minimal/bin/secret-tool" },
+            isExecutable = { false },
+        )
+        assertEquals("/opt/minimal/bin/secret-tool", resolved)
+    }
+
+    @Test
+    fun `Windows DPAPI prefers SystemRoot PowerShell over PATH`() {
+        val root = "/windows"
+        val trusted = File(root, "System32/WindowsPowerShell/v1.0/powershell.exe").path
+        val resolved = WindowsDpapiStore.resolvePowerShell(
+            systemRoot = root,
+            pathLookup = { "/attacker/powershell.exe" },
+            isExecutable = { it == trusted },
+        )
+        assertEquals(trusted, resolved)
+    }
+
+    @Test
+    fun `Windows DPAPI falls back to PATH only without SystemRoot PowerShell`() {
+        val resolved = WindowsDpapiStore.resolvePowerShell(
+            systemRoot = "/windows",
+            pathLookup = { binary -> if (binary == "powershell.exe") "/minimal/powershell.exe" else null },
+            isExecutable = { false },
+        )
+        assertEquals("/minimal/powershell.exe", resolved)
     }
 
     @Test

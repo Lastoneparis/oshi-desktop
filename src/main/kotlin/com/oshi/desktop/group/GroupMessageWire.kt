@@ -123,7 +123,23 @@ object GroupMessageWire {
         val plaintextContent: String? = null,
         val senderName: String? = null,
         val chainIndex: Int = 0,
-    )
+        /** __GROUP_E2E_V2_2026_09_23__ spec §2.2 `mediaFileName` (v2 media). */
+        val mediaFileName: String? = null,
+        /**
+         * __GROUP_E2E_V2_2026_09_23__ spec §2.4: `message_edited` / `message_deleted`. When set the
+         * message is a COMMAND: `senderPublicKey:"SYSTEM"`, `encryptedContent:""`, `isRead:true`.
+         */
+        val systemMessageType: String? = null,
+        /** `actorPublicKey`, `editedMessageId`/`editedContent` or `deletedMessageId`. Strings only. */
+        val systemMessageData: Map<String, String>? = null,
+    ) {
+        val isSystem: Boolean get() = systemMessageType != null || senderPublicKey == SYSTEM_SENDER
+    }
+
+    /** `senderPublicKey` of a system message (spec §2.4). */
+    const val SYSTEM_SENDER: String = "SYSTEM"
+    const val SYSTEM_EDITED: String = "message_edited"
+    const val SYSTEM_DELETED: String = "message_deleted"
 
     /**
      * The JSON an iPhone's `JSONDecoder().decode(GroupMessage.self, …)` accepts, in Android's
@@ -136,6 +152,22 @@ object GroupMessageWire {
      * should stop here rather than render as the year 55 000 on somebody's phone.
      */
     fun encode(msg: GroupMessagePayload): String {
+        if (msg.systemMessageType != null) {
+            // __GROUP_E2E_V2_2026_09_23__ spec §2.4 / vectors `edit`, `delete`.
+            val data = GroupJson()
+            msg.systemMessageData.orEmpty().forEach { (k, v) -> data.str(k, v) }
+            return GroupJson()
+                .str("id", msg.messageId)
+                .str("groupId", GroupIdentity.canonicalGroupId(msg.groupId))
+                .str("senderPublicKey", SYSTEM_SENDER)
+                .str("encryptedContent", "")
+                .num("timestamp", WireClock.toAppleSeconds(msg.timestampUnixMillis))
+                .bool("isRead", true)
+                .int("messageChainIndex", 0)
+                .str("systemMessageType", msg.systemMessageType)
+                .obj("systemMessageData", data.build())
+                .build()
+        }
         val json = GroupJson()
             .str("id", msg.messageId)
             .str("groupId", GroupIdentity.canonicalGroupId(msg.groupId))
@@ -148,6 +180,7 @@ object GroupMessageWire {
             .bool("isRead", false)
             .int("messageChainIndex", msg.chainIndex)
         msg.mediaType?.let { json.str("mediaType", it.raw) }
+        if (msg.mediaType != null) json.optional("mediaFileName", msg.mediaFileName?.takeIf { it.isNotEmpty() })
         // Caption: media only. On a plain text message the body already travels in
         // `encryptedContent`, and duplicating it here makes iOS draw the same string twice
         // (Android's own note, GroupManager.kt:2305-2311).
@@ -224,6 +257,11 @@ object GroupMessageWire {
             plaintextContent = (o.opt("plaintextContent") as? String)?.takeIf { it.isNotEmpty() },
             senderName = (o.opt("senderName") as? String)?.takeIf { it.isNotEmpty() },
             chainIndex = (o.opt("messageChainIndex") as? Number)?.toInt() ?: 0,
+            mediaFileName = (o.opt("mediaFileName") as? String)?.takeIf { it.isNotEmpty() },
+            systemMessageType = (o.opt("systemMessageType") as? String)?.takeIf { it.isNotEmpty() },
+            systemMessageData = (o.opt("systemMessageData") as? JSONObject)?.let { d ->
+                d.keys().asSequence().mapNotNull { k -> (d.opt(k) as? String)?.let { k to it } }.toMap()
+            },
         )
     }
 

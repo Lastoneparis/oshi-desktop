@@ -3,8 +3,9 @@ package com.oshi.desktop.app
 import com.oshi.desktop.group.GroupDefinition
 import com.oshi.desktop.group.GroupIdentity
 import com.oshi.desktop.group.GroupUpdateWire
-import com.oshi.desktop.store.AtomicFile
 import com.oshi.desktop.store.DesktopPaths
+import com.oshi.desktop.store.LocalDataKeys
+import com.oshi.desktop.store.SealedJsonFile
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -31,10 +32,15 @@ import java.io.File
  * the way [com.oshi.desktop.store.ContactStore] handles a damaged file — by raising rather
  * than by reading as empty, because "you are in no groups" is a lie a user acts on.
  *
- * Not encrypted, same posture as the message log and the contact list: see
- * [com.oshi.desktop.store.MessageStore]'s threat-model note.
+ * __LOCAL_DATA_AT_REST_2026_09_22__ Encrypted at rest when [atRestKey] is given (always, from
+ * `OshiClient`): a [SealedJsonFile] envelope under HKDF subkey [LocalDataKeys.GROUPS]. A legacy
+ * plaintext file is migrated through the verified write and left untouched if that fails; a
+ * sealed file that cannot be opened raises [GroupStoreException] and is never read as empty.
  */
-class GroupStore(private val file: File = DesktopPaths.file("groups.json")) {
+class GroupStore(
+    private val file: File = DesktopPaths.file("groups.json"),
+    private val atRestKey: ByteArray? = null,
+) {
 
     @Volatile
     private var cache: MutableMap<String, GroupDefinition>? = null
@@ -74,9 +80,14 @@ class GroupStore(private val file: File = DesktopPaths.file("groups.json")) {
     private fun load(): MutableMap<String, GroupDefinition> {
         cache?.let { return it }
         val map = LinkedHashMap<String, GroupDefinition>()
-        if (file.isFile) {
+        val read = try {
+            SealedJsonFile.read(file, atRestKey, LocalDataKeys.GROUPS)
+        } catch (e: Exception) {
+            throw GroupStoreException("groups file at ${file.absolutePath} is unreadable", e)
+        }
+        if (read != null) {
             val o = try {
-                JSONObject(file.readText(Charsets.UTF_8))
+                JSONObject(read.json)
             } catch (e: Exception) {
                 // Same refusal as ContactStore: a damaged file must not read as "no groups".
                 throw GroupStoreException("groups file at ${file.absolutePath} is unreadable", e)
@@ -97,14 +108,20 @@ class GroupStore(private val file: File = DesktopPaths.file("groups.json")) {
             }
         }
         cache = map
-        return map
+        // Every definition decoded (a bad one throws above), so the sealed copy loses nothing.
+        if (read != null && !read.sealed && atRestKey != null) {
+            runCatching { persist(map) } // failure leaves the plaintext file; retried next open
+        }
+        return cache ?: map
     }
 
     private fun persist(map: Map<String, GroupDefinition>) {
         val arr = JSONArray()
         for (g in map.values) arr.put(GroupUpdateWire.encodeDefinition(g))
         val json = JSONObject().put("v", 1).put("groups", arr).toString()
-        AtomicFile.write(file, json.toByteArray(Charsets.UTF_8))
+        SealedJsonFile.write(file, atRestKey, LocalDataKeys.GROUPS, json) { back ->
+            JSONObject(back).getJSONArray("groups").length() == map.size
+        }
         cache = LinkedHashMap(map)
     }
 }

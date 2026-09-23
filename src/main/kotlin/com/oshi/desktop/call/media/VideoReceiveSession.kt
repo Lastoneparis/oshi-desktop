@@ -39,6 +39,8 @@ class VideoReceiveSession(
     private var cachedSps: ByteArray? = null
     private var cachedPps: ByteArray? = null
     private var sawIdr = false
+    private var writtenSps: ByteArray? = null
+    private var writtenPps: ByteArray? = null
     private var sinceKeyframeRequest = Int.MAX_VALUE
 
     /** Envelopes that were not video, or did not authenticate. */
@@ -118,7 +120,16 @@ class VideoReceiveSession(
                 return Result(false, requestKeyframe = throttle(true))
             }
             sink?.writeParameterSets(sps, pps)
+            writtenSps = sps; writtenPps = pps
             sawIdr = true
+        } else if (idr && sps != null && pps != null &&
+            (!sps.contentEquals(writtenSps) || !pps.contentEquals(writtenPps))
+        ) {
+            // The peer's encoder was rebuilt — an iPhone recreates VideoToolbox on every
+            // rotation (`swift:1666`), so 360×640 becomes 640×360 mid-call. A decoder that
+            // keeps the first SPS decodes the new IDR against the wrong geometry.
+            sink?.writeParameterSets(sps, pps)
+            writtenSps = sps; writtenPps = pps
         }
 
         val annexB = VideoFramePacket.toAnnexB(body)

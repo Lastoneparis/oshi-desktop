@@ -264,6 +264,17 @@ class VideoWireTest {
         assertEquals("only the intact NAL survives", nal(5).size, annexB.size)
     }
 
+    @Test
+    fun `an overflowing AVCC length is rejected before it can index the frame`() {
+        // 0x7fffffff made `o + 4 + len` wrap negative in the old guard. There is no
+        // payload after this header, so every consumer must return its empty answer.
+        val hostile = byteArrayOf(0x7f, 0xff.toByte(), 0xff.toByte(), 0xff.toByte())
+        assertEquals(-1, VideoFramePacket.firstNalType(hostile))
+        assertTrue(VideoFramePacket.embeddedParameterSets(hostile).first == null)
+        assertTrue(VideoFramePacket.toAnnexB(hostile).isEmpty())
+        assertTrue(VideoFramePacket.stripParameterSets(hostile).isEmpty())
+    }
+
     // ====================================================== fragments
 
     /** `[0x01][frame_id(2 BE)][idx][total][payload]` — `swift:2404-2418`, `kt:1336-1344`. */
@@ -387,6 +398,23 @@ class VideoWireTest {
         val out = r.offer(new[0])
         assertTrue("the abandoned frame must produce a keyframe request", out.requestKeyframe)
         assertEquals(1, r.pending())
+    }
+
+    @Test
+    fun `decreasing unfinished frame ids cannot grow reassembly without bound`() {
+        val r = VideoReassembler()
+        // Every id is older than its predecessor on the circular sequence, so the normal
+        // newer-frame eviction deliberately cannot apply. Before the cap this grew to all
+        // 65,536 ids, each retaining an array sized by the peer-controlled total field.
+        for (id in 40 downTo 9) {
+            assertEquals(VideoReassembler.Reason.BUFFERED,
+                r.offer(byteArrayOf(0x01, 0, id.toByte(), 0, 2, 0x55)).reason)
+        }
+        assertEquals(32, r.pending())
+        val capped = r.offer(byteArrayOf(0x01, 0, 8, 0, 2, 0x55))
+        assertEquals(VideoReassembler.Reason.BUFFERED, capped.reason)
+        assertTrue("eviction must ask the peer for a recoverable keyframe", capped.requestKeyframe)
+        assertEquals("the 33rd unfinished frame replaces the oldest, never grows the map", 32, r.pending())
     }
 
     /** Fragment loss never fires a completion callback, so it is counted from the gaps. */

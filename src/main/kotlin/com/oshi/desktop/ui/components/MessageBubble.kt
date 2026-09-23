@@ -17,15 +17,20 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontFamily
@@ -72,7 +77,13 @@ fun MessageBubbleRow(
     viewOnce: Boolean,
     revealed: Boolean,
     onReveal: () -> Unit,
+    onReact: ((String) -> Unit)? = null,
+    onEdit: ((String) -> Unit)? = null,
+    onDelete: (() -> Unit)? = null,
 ) {
+    var editing by remember(row.id) { mutableStateOf(false) }
+    var editedBody by remember(row.id, row.body) { mutableStateOf(row.body) }
+    var confirmingDelete by remember(row.id) { mutableStateOf(false) }
     val media = remember(row.attachment, viewOnce, revealed) {
         MediaPresentation.of(row.attachment, viewOnce, revealed)
     }
@@ -100,6 +111,39 @@ fun MessageBubbleRow(
                         .border(Metrics.hairline, OshiTheme.separator, OshiTheme.pill)
                         .padding(horizontal = OshiTheme.sm, vertical = OshiTheme.xxs),
                 )
+            }
+
+            if (!row.deleted && (onReact != null || onEdit != null || onDelete != null)) {
+                Spacer(Modifier.height(OshiTheme.xs))
+                Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm)) {
+                    onReact?.let { react ->
+                        TextAction("♥") { react("♥") }
+                        TextAction("👍") { react("👍") }
+                        TextAction("😂") { react("😂") }
+                    }
+                    onEdit?.let { TextAction("Edit") { editing = true } }
+                    onDelete?.let { delete ->
+                        TextAction(if (confirmingDelete) "Confirm delete" else "Delete") {
+                            if (confirmingDelete) delete() else confirmingDelete = true
+                        }
+                        if (confirmingDelete) TextAction("Cancel") { confirmingDelete = false }
+                    }
+                }
+            }
+
+            if (editing && onEdit != null) {
+                Spacer(Modifier.height(OshiTheme.xs))
+                BasicTextField(
+                    value = editedBody,
+                    onValueChange = { editedBody = it },
+                    textStyle = OshiTheme.typography.bodyMedium.copy(color = OshiTheme.textPrimary),
+                    cursorBrush = SolidColor(OshiTheme.brand),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm)) {
+                    TextAction("Save") { onEdit(editedBody); editing = false }
+                    TextAction("Cancel") { editedBody = row.body; editing = false }
+                }
             }
 
             if (lastInRun || row.failed || row.edited || row.status == DeliveryStatus.PENDING.wire) {
@@ -293,9 +337,39 @@ private fun SealedViewOnce(media: MediaPresentation, onReveal: () -> Unit) {
  */
 @Composable
 private fun InlineImage(media: MediaPresentation, inkSoft: Color) {
-    val bitmap: ImageBitmap? = remember(media.path) {
-        runCatching { SkiaImage.makeFromEncoded(File(media.path).readBytes()).toComposeImageBitmap() }.getOrNull()
+    // __PHOTO_DECODE_OFF_UI_2026_09_23__ The read + decrypt + decode used to run INSIDE
+    // `remember`, i.e. on the UI thread during composition — and a LazyColumn forgets a row
+    // that scrolls away, so it ran again every time a photo came back into view. Measured with
+    // `FluidityBench` (60 sealed 4032×3024 phone photos): opening that chat held ONE frame for
+    // 194 ms, and scrolling spiked to 62 ms per photo entering. It also kept every visible photo
+    // as a full 12 MP bitmap (~48 MB each) to draw it 250dp wide. It now decodes on IO, is
+    // downscaled to the bubble's pixel width, and is kept in a small cache so scrolling back
+    // costs nothing. Until it lands, a placeholder holds EXACTLY the space the picture will
+    // take: its size comes from the image header (one 64 KB chunk decrypted, no decode). A
+    // guessed height is not good enough — the thread's LazyColumn anchors its first visible
+    // row, so rows that change height after arriving pushed the newest messages off the
+    // bottom of a chat that had just opened scrolled to them (seen in the bench's frames).
+    val headerSize = remember(media.path) { InlineBitmaps.size(media.path) }
+    val targetPx = with(androidx.compose.ui.platform.LocalDensity.current) { Metrics.mediaBubble.roundToPx() }
+    val loaded by androidx.compose.runtime.produceState(
+        InlineBitmaps.cached(media.path, targetPx) ?: InlineBitmaps.LOADING, media.path, targetPx,
+    ) {
+        if (value !== InlineBitmaps.LOADING) return@produceState
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { InlineBitmaps.load(media.path, targetPx) }
     }
+    if (loaded === InlineBitmaps.LOADING) {
+        // The Image below is `width(mediaBubble).heightIn(max = mediaBubble)`, so its height is
+        // the picture's aspect at that width, capped — the same arithmetic, before the pixels.
+        val height = headerSize?.let { (w, h) -> if (w > 0) Metrics.mediaBubble * (h.toFloat() / w).coerceAtMost(1f) else null }
+            ?: Metrics.mediaBubble
+        Column(Modifier.width(Metrics.mediaBubble), verticalArrangement = Arrangement.spacedBy(OshiTheme.xs)) {
+            Box(Modifier.width(Metrics.mediaBubble).height(height).clip(OshiTheme.radiusMd).background(OshiTheme.surface))
+            Text(media.fileName, fontSize = 10.sp, color = inkSoft, fontFamily = FontFamily.Monospace)
+            media.note?.let { Text(it, fontSize = 10.sp, color = inkSoft) }
+        }
+        return
+    }
+    val bitmap: ImageBitmap? = (loaded as? InlineBitmaps.Result.Ready)?.bitmap
     if (bitmap == null) {
         FileCard(media, fromMe = false, inkSoft = inkSoft, overrideNote = DECODE_FAILED)
         return
@@ -319,6 +393,85 @@ private fun InlineImage(media: MediaPresentation, inkSoft: Color) {
         )
         Text(media.fileName, fontSize = 10.sp, color = inkSoft, fontFamily = FontFamily.Monospace)
         media.note?.let { Text(it, fontSize = 10.sp, color = inkSoft) }
+    }
+}
+
+/**
+ * Inline photos, decoded off the UI thread and downscaled — see [InlineImage].
+ *
+ * Keyed by path AND target width: a density change must not serve a bitmap sized for another
+ * screen. A FAILED decode is cached too, so an undecodable file is not re-read on every scroll.
+ * Bounded (LRU): at the default bubble width a cached photo is ~1.7 MB, not ~48 MB.
+ */
+internal object InlineBitmaps {
+    sealed class Result {
+        object Loading : Result()
+        object Failed : Result()
+        class Ready(val bitmap: ImageBitmap) : Result()
+    }
+
+    val LOADING: Result = Result.Loading
+    private const val MAX_ENTRIES = 48
+
+    private val cache = object : LinkedHashMap<String, Result>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Result>?) = size > MAX_ENTRIES
+    }
+
+    private fun key(path: String, px: Int) = "$px@$path"
+
+    private val sizes = object : LinkedHashMap<String, Pair<Int, Int>?>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Pair<Int, Int>?>?) = size > 512
+    }
+
+    /**
+     * (width, height) from the image HEADER — ImageIO reads only as far as the dimensions, so a
+     * sealed file costs one decrypted chunk, not a decode. null when ImageIO cannot tell (a
+     * format it lacks, a damaged file); the caller then reserves the maximum height.
+     */
+    fun size(path: String): Pair<Int, Int>? {
+        synchronized(sizes) { if (sizes.containsKey(path)) return sizes[path] }
+        val dims = runCatching {
+            com.oshi.desktop.store.MediaVault.openAny(File(path)).use { raw ->
+                javax.imageio.ImageIO.createImageInputStream(raw).use { iis ->
+                    val reader = javax.imageio.ImageIO.getImageReaders(iis).asSequence().firstOrNull() ?: return@use null
+                    try {
+                        reader.setInput(iis, true, true)
+                        reader.getWidth(0) to reader.getHeight(0)
+                    } finally { reader.dispose() }
+                }
+            }
+        }.getOrNull()
+        synchronized(sizes) { sizes[path] = dims }
+        return dims
+    }
+
+    fun cached(path: String, px: Int): Result? = synchronized(cache) { cache[key(path, px)] }
+
+    /** Blocking — call it off the UI thread. */
+    fun load(path: String, px: Int): Result {
+        cached(path, px)?.let { return it }
+        // __LOCAL_DATA_AT_REST_2026_09_22__ decrypted in memory from the sealed file (and
+        // capped at the inline ceiling BEFORE allocating); plaintext never touches the disk.
+        val result = runCatching {
+            val bytes = com.oshi.desktop.store.MediaVault.readAny(File(path), MediaPresentation.MAX_INLINE_BYTES)
+            val full = SkiaImage.makeFromEncoded(bytes)
+            val bitmap = if (px <= 0 || full.width <= px) full.toComposeImageBitmap() else {
+                val h = maxOf(1, (full.height.toLong() * px / full.width).toInt())
+                val surface = org.jetbrains.skia.Surface.makeRasterN32Premul(px, h)
+                surface.canvas.drawImageRect(
+                    full,
+                    org.jetbrains.skia.Rect.makeWH(full.width.toFloat(), full.height.toFloat()),
+                    org.jetbrains.skia.Rect.makeWH(px.toFloat(), h.toFloat()),
+                    org.jetbrains.skia.SamplingMode.MITCHELL,
+                    null,
+                    true,
+                )
+                surface.makeImageSnapshot().toComposeImageBitmap().also { surface.close(); full.close() }
+            }
+            Result.Ready(bitmap) as Result
+        }.getOrDefault(Result.Failed)
+        synchronized(cache) { cache[key(path, px)] = result }
+        return result
     }
 }
 

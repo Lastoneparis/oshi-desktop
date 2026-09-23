@@ -64,6 +64,13 @@ class GroupIngest(
     private val selfAddress: () -> String,
 ) {
 
+    /**
+     * __DEVSYNC_REJOIN_2026_09_23__ The desktop's left-group tombstone: true for a group this account
+     * LEFT (own-device sync state) and has not rejoined. Gate zero in front of materialising an
+     * unknown group: a member whose roster still names us would otherwise walk us back in.
+     */
+    @Volatile var refusesGroup: (groupId: String) -> Boolean = { false }
+
     /** What [ingest] did. Every refusal is a distinct value so a refusal can be counted. */
     enum class Outcome {
         /** A group we had never seen, materialised. */
@@ -136,9 +143,17 @@ class GroupIngest(
         val current = groups.get(gid)
 
         if (current == null) {
+            if (refusesGroup(gid)) {
+                return Result(Outcome.REJECTED_NOT_PERMITTED, gid, "group left on this account (not rejoined)")
+            }
             // Rule 2, gate one. Without it, a broadcast re-creates a group we LEFT.
             if (!GroupUpdateAuthorizer.isSelfInRoster(selfAddress(), incoming.memberKeys)) {
                 return Result(Outcome.REJECTED_NOT_IN_ROSTER, gid, "we are not in the roster of an unknown group")
+            }
+            // __GROUP_E2E_V2_2026_09_23__ an admin evicted us: a stale roster still naming us must
+            // not walk us back in (spec §5.1 evictedMemberKeys).
+            if (incoming.isEvicted(selfAddress())) {
+                return Result(Outcome.REJECTED_NOT_IN_ROSTER, gid, "we were evicted from this group")
             }
             // Rule 2, gate two. `authorize` cannot run this check for a group we do not
             // hold — there is no local roster for "sender-not-a-member" to consult — so the
@@ -187,6 +202,22 @@ class GroupIngest(
             ?: return Result(Outcome.REJECTED_MALFORMED, null, "minimal update with no groupId")
         val current = groups.get(gid)
             ?: return Result(Outcome.REJECTED_UNKNOWN_GROUP, gid, "minimal update for a group we do not hold")
+
+        // __GROUP_E2E_V2_2026_09_23__ spec §5.3 rule 4: `member_removed` naming the SENDER itself is
+        // a leave, accepted from any current member whatever the group type (the sender is the
+        // authenticated envelope `from`, so nobody can leave on someone else's behalf).
+        if (update is MinimalGroupUpdate.MemberRemoved &&
+            GroupIdentity.sameIdentity(update.memberPublicKey, sender)
+        ) {
+            if (!current.isMember(sender)) return Result(Outcome.NO_CHANGE, gid, "not a member")
+            val remaining = current.members.filterNot { GroupIdentity.sameIdentity(it.publicKey, sender) }
+            val admins = GroupUpdateAuthorizer.restampAdminSet(current.adminKeys, remaining.map { it.publicKey })
+                .map(GroupIdentity::canonicalIdentity).toSet()
+            groups.put(current.copy(members = remaining.map {
+                it.copy(isAdmin = GroupIdentity.canonicalIdentity(it.publicKey) in admins)
+            }))
+            return Result(Outcome.UPDATED, gid, "${sender.take(12)}… left")
+        }
 
         // A minimal update carries no roster, so `apply` has nothing to merge. Ask the
         // authorizer what this sender is allowed to change instead: comparing the current
@@ -264,6 +295,7 @@ class GroupIngest(
     private fun created(update: MinimalGroupUpdate.Created, sender: String): Result {
         val gid = GroupIdentity.canonicalGroupId(update.groupId)
         if (groups.get(gid) != null) return Result(Outcome.NO_CHANGE, gid, "already have this group")
+        if (refusesGroup(gid)) return Result(Outcome.REJECTED_NOT_PERMITTED, gid, "group left on this account (not rejoined)")
         if (!GroupUpdateAuthorizer.isSelfInRoster(selfAddress(), update.memberKeys)) {
             return Result(Outcome.REJECTED_NOT_IN_ROSTER, gid, "we are not in the roster of a created group")
         }

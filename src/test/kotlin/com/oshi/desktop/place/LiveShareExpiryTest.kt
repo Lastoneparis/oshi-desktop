@@ -122,6 +122,19 @@ class LiveShareExpiryTest {
     }
 
     @Test
+    fun `fresh session ids cannot grow live-share state without bound`() {
+        val tracker = LiveShareTracker(maxSessions = 2)
+        tracker.observe(ping(t0, t0 + fifteenMin, sessionId = "old", isUpdate = false), t0)
+        tracker.observe(ping(t0 + 1, t0 + fifteenMin, sessionId = "middle", isUpdate = false), t0 + 1)
+        tracker.observe(ping(t0 + 2, t0 + fifteenMin, sessionId = "new", isUpdate = false), t0 + 2)
+
+        assertEquals(2, tracker.sessions().size)
+        assertNull("the oldest untrusted session id is evicted first", tracker.session("old"))
+        assertNotEquals(null, tracker.session("middle"))
+        assertNotEquals(null, tracker.session("new"))
+    }
+
+    @Test
     fun `pruning drops only the sessions that have ended`() {
         // The desktop's pruneExpiredPeerLocations (LocationSharingManager.swift:758-767).
         val tracker = LiveShareTracker()

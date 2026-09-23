@@ -62,13 +62,19 @@ import java.io.File
  *
  * ============================================================ THREAT MODEL
  *
- * Plaintext on disk, same posture as [MessageStore] — see that class's doc comment for
- * the full justification. A contact's address and alias are lower-sensitivity than
- * message content, but not zero: an alias can itself be identifying information, and
- * this file is protected by the same OS-permissions tier ([DesktopPaths]), not by
- * encryption.
+ * __LOCAL_DATA_AT_REST_2026_09_22__ Encrypted at rest when [atRestKey] is given, which
+ * `OshiClient` always does: the file becomes a [SealedJsonFile] envelope (AES-256-GCM, key
+ * = HKDF subkey [LocalDataKeys.CONTACTS] of a vault entry). A legacy plaintext file is read
+ * once and rewritten sealed through the verified write (temp, fsync, decrypt-back compare,
+ * atomic move); if that fails the plaintext stays and the upgrade is retried on next open.
+ * A sealed file with no key, or one that fails authentication, throws [ContactStoreException]
+ * — it never reads as "no contacts", so nothing can overwrite it with an empty list.
+ * With a null key (tests, pre-vault tools) the file is plaintext, as before.
  */
-class ContactStore(private val file: File = DesktopPaths.file("contacts.json")) {
+class ContactStore(
+    private val file: File = DesktopPaths.file("contacts.json"),
+    private val atRestKey: ByteArray? = null,
+) {
 
     enum class VerificationState(val wire: String) {
         UNVERIFIED("unverified"), VERIFIED("verified"), SAFETY_NUMBER_CHANGED("changed");
@@ -86,10 +92,22 @@ class ContactStore(private val file: File = DesktopPaths.file("contacts.json")) 
         val verification: VerificationState = VerificationState.UNVERIFIED,
         val blocked: Boolean = false,
         val avatarRef: String? = null,
+        /**
+         * __SHARED_NICKNAME_2026_09_22__ The nickname the PEER shares about themselves
+         * (`displayName` of their `📸PROFILE_UPDATE📸`), already sanitized by
+         * [com.oshi.desktop.msg.PeerNickname.sanitize]. Kept apart from [displayName], which
+         * is OUR alias for them: a peer renaming themselves must never overwrite what the
+         * user of this machine chose, and [seen]'s hint path never writes here.
+         */
+        val sharedNickname: String? = null,
     ) {
         init {
             require(address.isNotBlank()) { "contact address must not be blank" }
         }
+
+        /** The name to draw: local alias, else shared nickname, else [fallback]. */
+        fun label(fallback: String): String =
+            com.oshi.desktop.msg.PeerNickname.resolve(displayName, sharedNickname, fallback)
     }
 
     @Volatile
@@ -137,6 +155,18 @@ class ContactStore(private val file: File = DesktopPaths.file("contacts.json")) 
     @Synchronized
     fun setDisplayName(address: String, name: String?) = mutate(address) { it.copy(displayName = name) }
 
+    /**
+     * __SHARED_NICKNAME_2026_09_22__ Store (or clear, with null) the peer's shared nickname.
+     * No-op on an unknown contact, and no rewrite of the file when nothing changed — a peer
+     * re-sends the same profile update on every first contact.
+     */
+    @Synchronized
+    fun setSharedNickname(address: String, name: String?): Contact? {
+        val existing = load()[address] ?: return null
+        if (existing.sharedNickname == name) return existing
+        return mutate(address) { it.copy(sharedNickname = name) }
+    }
+
     @Synchronized
     fun setVerification(address: String, state: VerificationState) = mutate(address) { it.copy(verification = state) }
 
@@ -167,9 +197,14 @@ class ContactStore(private val file: File = DesktopPaths.file("contacts.json")) 
     private fun load(): MutableMap<String, Contact> {
         cache?.let { return it }
         val map = LinkedHashMap<String, Contact>()
-        if (file.isFile) {
+        val read = try {
+            SealedJsonFile.read(file, atRestKey, LocalDataKeys.CONTACTS)
+        } catch (e: Exception) {
+            throw ContactStoreException("contacts file is not readable: ${file.absolutePath}", e)
+        }
+        if (read != null) {
             val o = try {
-                JSONObject(file.readText(Charsets.UTF_8))
+                JSONObject(read.json)
             } catch (e: Exception) {
                 // Unlike KeyVault, this is not secret material where "read as empty"
                 // risks minting a new identity over an existing one — but silently
@@ -185,14 +220,23 @@ class ContactStore(private val file: File = DesktopPaths.file("contacts.json")) 
             }
         }
         cache = map
-        return map
+        // Every row parsed (a bad one throws above), so the sealed copy loses nothing.
+        if (read != null && !read.sealed && atRestKey != null) {
+            runCatching { persist(map) } // failure leaves the plaintext file; retried next open
+        }
+        return cache ?: map
+    }
+
+    private fun serialize(map: Map<String, Contact>): String {
+        val arr = JSONArray()
+        for (c in map.values.sortedBy { it.address }) arr.put(toJson(c))
+        return JSONObject().put("v", 1).put("contacts", arr).toString()
     }
 
     private fun persist(map: Map<String, Contact>) {
-        val arr = JSONArray()
-        for (c in map.values.sortedBy { it.address }) arr.put(toJson(c))
-        val json = JSONObject().put("v", 1).put("contacts", arr).toString()
-        AtomicFile.write(file, json.toByteArray(Charsets.UTF_8))
+        SealedJsonFile.write(file, atRestKey, LocalDataKeys.CONTACTS, serialize(map)) { back ->
+            JSONObject(back).getJSONArray("contacts").length() == map.size
+        }
         cache = LinkedHashMap(map)
     }
 
@@ -204,6 +248,7 @@ class ContactStore(private val file: File = DesktopPaths.file("contacts.json")) 
         put("verification", c.verification.wire)
         if (c.blocked) put("blocked", true)
         c.avatarRef?.let { put("avatarRef", it) }
+        c.sharedNickname?.let { put("sharedNickname", it) }
     }
 
     private fun parseContact(o: JSONObject): Contact = Contact(
@@ -214,6 +259,8 @@ class ContactStore(private val file: File = DesktopPaths.file("contacts.json")) 
         verification = VerificationState.fromWire(o.optString("verification", "")),
         blocked = o.optBoolean("blocked", false),
         avatarRef = o.optString("avatarRef", "").ifEmpty { null },
+        // Absent in every file written before __SHARED_NICKNAME_2026_09_22__.
+        sharedNickname = o.optString("sharedNickname", "").ifEmpty { null },
     )
 }
 

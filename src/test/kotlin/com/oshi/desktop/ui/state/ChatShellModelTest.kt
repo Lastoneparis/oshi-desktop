@@ -2,7 +2,9 @@ package com.oshi.desktop.ui.state
 
 import com.oshi.desktop.DesktopIdentity
 import com.oshi.desktop.app.WiringFixture
+import com.oshi.desktop.crypto.SafetyNumber
 import com.oshi.desktop.msg.ControlPrefix
+import com.oshi.desktop.msg.TypingPayload
 import com.oshi.desktop.store.DeliveryStatus
 import com.oshi.desktop.store.Message
 import com.oshi.desktop.store.TimestampSource
@@ -14,6 +16,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.Executor
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * PARITY.md row 1.1 — the window's state layer, with no window.
@@ -211,6 +214,25 @@ class ChatShellModelTest {
         )
     }
 
+    /** A local toast is useful only when it does not duplicate the thread being read. */
+    @Test
+    fun `desktop notification is private and only fires for another incoming thread`() {
+        val alice = fx.client("alice")
+        val bob = fx.client("bob")
+        val notifications = AtomicInteger()
+        val m = ChatShellModel(alice, direct, notifications::incrementAndGet)
+            .also { models += it; it.attach() }
+
+        // No sender or plaintext is passed to the notifier; it gets a signal only.
+        m.onInbound(inbound(alice.address, bob.address, "n1", "not a notification preview"))
+        assertEquals(1, notifications.get())
+
+        // The conversation now being read gets neither unread badge nor redundant toast.
+        m.select(bob.address)
+        m.onInbound(inbound(alice.address, bob.address, "n2", "already visible"))
+        assertEquals(1, notifications.get())
+    }
+
     /**
      * PARITY.md row 0.21: a blocked peer is WITHHELD from the conversation list, never
      * deleted. `OshiClient` exposes both readers and only one of them applies the block;
@@ -381,7 +403,7 @@ class ChatShellModelTest {
      * media fan-out anywhere in this client).
      */
     @Test
-    fun `a group composer sends text and refuses attachments, for a stated reason`() {
+    fun `a group composer sends text and offers attachments (group media fan-out)`() {
         val me = fx.client("me")
         me.groups.put(group("g1", me.address, listOf(unpublishedAddress())))
         me.messages.append(inbound(me.address, "g1", "g-m1", "hello group"))
@@ -393,11 +415,9 @@ class ChatShellModelTest {
         assertEquals(ConversationKind.GROUP, thread.kind)
         assertTrue("a group composer must send text — sendGroupText is the same call /group send makes",
             thread.composer.enabled)
-        assertFalse("a group must not offer an attachment", thread.composer.attachEnabled)
-        assertTrue(
-            "the refusal has to say WHY, not merely be disabled",
-            thread.composer.attachDisabledReason.orEmpty().contains("no group media fan-out"),
-        )
+        // __GROUP_E2E_V2_2026_09_23__ OshiClient.sendGroupFile (GROUP_E2E_V2_SPEC §4).
+        assertTrue("a group offers attachments now that group media fans out", thread.composer.attachEnabled)
+        assertNull(thread.composer.attachDisabledReason)
     }
 
     /**
@@ -424,6 +444,63 @@ class ChatShellModelTest {
             notice.text.contains("0 of 2"))
     }
 
+    @Test
+    fun `creating a group makes its definition visible before its first message`() {
+        val me = fx.client("me")
+        val peer = fx.client("peer")
+        me.contacts.seen(peer.address, System.currentTimeMillis())
+        val m = model(me)
+
+        m.createGroup("Weekend plans", listOf(peer.address))
+
+        val created = m.state.conversations.single { it.kind == ConversationKind.GROUP }
+        assertEquals("Weekend plans", created.label)
+        assertEquals(0, created.messageCount)
+        assertEquals(created.id, m.state.selectedId)
+        assertEquals(Severity.OK, m.state.notice!!.severity)
+        assertTrue(me.groups.get(created.id)!!.isMember(peer.address))
+        assertTrue("the creator alone may receive a rename control", m.state.thread!!.groupAdmin)
+        assertEquals(setOf(me.address, peer.address), m.state.thread!!.groupMembers.map { it.address }.toSet())
+        assertTrue(m.state.thread!!.groupMembers.single { it.self }.isAdmin)
+
+        m.renameGroup(created.id, "Sunday plans")
+        assertEquals("Sunday plans", m.state.thread!!.title)
+        assertEquals("Sunday plans", me.groups.get(created.id)!!.name)
+        assertEquals(Severity.OK, m.state.notice!!.severity)
+    }
+
+    @Test
+    fun `a group admin can add a known contact and remove that other member from the roster`() {
+        val me = fx.client("me")
+        val initial = fx.client("initial")
+        val candidate = fx.client("candidate")
+        me.contacts.seen(initial.address, System.currentTimeMillis())
+        me.contacts.seen(candidate.address, System.currentTimeMillis())
+        val m = model(me)
+
+        m.createGroup("Plans", listOf(initial.address))
+        val groupId = m.state.thread!!.conversationId
+        assertEquals(listOf(candidate.address), m.state.thread!!.groupCandidates.map { it.address })
+
+        m.addGroupMember(groupId, candidate.address)
+        assertTrue(me.groups.get(groupId)!!.isMember(candidate.address))
+        assertFalse(m.state.thread!!.groupCandidates.any { it.address == candidate.address })
+        assertEquals(Severity.OK, m.state.notice!!.severity)
+
+        m.setGroupMemberAdmin(groupId, candidate.address, true)
+        assertTrue(me.groups.get(groupId)!!.isAdmin(candidate.address))
+        assertTrue(m.state.thread!!.groupMembers.single { it.address == candidate.address }.isAdmin)
+        assertEquals(Severity.OK, m.state.notice!!.severity)
+
+        m.setGroupMemberAdmin(groupId, candidate.address, false)
+        assertFalse(me.groups.get(groupId)!!.isAdmin(candidate.address))
+
+        m.removeGroupMember(groupId, candidate.address)
+        assertFalse(me.groups.get(groupId)!!.isMember(candidate.address))
+        assertTrue(m.state.thread!!.groupCandidates.any { it.address == candidate.address })
+        assertEquals(Severity.OK, m.state.notice!!.severity)
+    }
+
     /**
      * A safety number exists for a 1:1 conversation and for nothing else.
      *
@@ -448,6 +525,24 @@ class ChatShellModelTest {
         assertEquals("a group must carry none", "", m.state.thread!!.safetyNumber)
     }
 
+    @Test
+    fun `safety verification requires the peer QR payload and records a mismatch`() {
+        val me = fx.client("me")
+        val peer = fx.client("peer")
+        fx.seedIncoming(me, peer.address, "m1", "hi")
+        me.contacts.seen(peer.address, System.currentTimeMillis())
+        val m = model(me)
+
+        assertFalse(m.verifySafetyNumber(peer.address, "SAFETY:v1:not-the-keys"))
+        assertEquals(Severity.ERROR, m.state.notice!!.severity)
+        assertFalse(m.state.contacts.single { it.address == peer.address }.verified)
+
+        val payload = SafetyNumber.qrPayload(me.address, peer.address)
+        assertTrue(m.verifySafetyNumber(peer.address, "  $payload  "))
+        assertEquals(Severity.OK, m.state.notice!!.severity)
+        assertTrue(m.state.contacts.single { it.address == peer.address }.verified)
+    }
+
     /**
      * Pasting a code adds a contact and opens the conversation, and sends nothing.
      *
@@ -466,6 +561,195 @@ class ChatShellModelTest {
         assertNotNull("the contact has to be recorded, or the list draws a raw key", me.contacts.get(peer))
         assertTrue("adding a contact must not send anything", me.messages.messages(peer).isEmpty())
         assertEquals(Severity.OK, m.state.notice!!.severity)
+    }
+
+    @Test
+    fun `the scheduled queue is surfaced as local delivery intent`() {
+        val me = fx.client("me")
+        val peer = fx.client("peer")
+        val m = model(me)
+        val queued = me.scheduler.schedule(peer.address, "Later", System.currentTimeMillis() + 60_000)
+
+        m.refresh()
+        val row = m.state.scheduled.single()
+        assertEquals(queued.id, row.id)
+        assertEquals(peer.address, row.recipient)
+        assertEquals("Later", row.content)
+        assertEquals("pending", row.status)
+        assertFalse("a direct schedule must not draw as a group", row.group)
+    }
+
+    @Test
+    fun `cancelling a pending scheduled row retains it as cancelled`() {
+        val me = fx.client("me")
+        val peer = fx.client("peer")
+        val m = model(me)
+        val queued = me.scheduler.schedule(peer.address, "Later", System.currentTimeMillis() + 60_000)
+
+        m.cancelScheduled(queued.id)
+
+        assertEquals("cancelled", m.state.scheduled.single().status)
+        assertEquals(Severity.OK, m.state.notice!!.severity)
+        m.cancelScheduled(queued.id)
+        assertEquals(Severity.ERROR, m.state.notice!!.severity)
+    }
+
+    @Test
+    fun `a known unblocked contact can receive a scheduled message from the window model`() {
+        val me = fx.client("me")
+        val peer = fx.client("peer")
+        me.contacts.seen(peer.address, System.currentTimeMillis())
+        val m = model(me)
+
+        m.scheduleMessage(peer.address, "Later", 60_000)
+
+        assertEquals("Later", m.state.scheduled.single().content)
+        assertEquals(peer.address, m.state.scheduled.single().recipient)
+        assertEquals(Severity.OK, m.state.notice!!.severity)
+    }
+
+    @Test
+    fun `a group this account belongs to can receive a scheduled message from the window model`() {
+        val me = fx.client("me")
+        val peer = fx.client("peer")
+        me.contacts.seen(peer.address, System.currentTimeMillis())
+        val m = model(me)
+        m.createGroup("Plans", listOf(peer.address))
+        val groupId = m.state.thread!!.conversationId
+
+        m.scheduleMessage(groupId, "Later together", 60_000, isGroup = true)
+
+        assertEquals(groupId, m.state.scheduled.single().recipient)
+        assertTrue(m.state.scheduled.single().group)
+        assertEquals(Severity.OK, m.state.notice!!.severity)
+    }
+
+    @Test
+    fun `editing a pending scheduled row changes only its pending local content`() {
+        val me = fx.client("me")
+        val peer = fx.client("peer")
+        val m = model(me)
+        val queued = me.scheduler.schedule(peer.address, "Original", System.currentTimeMillis() + 60_000)
+
+        m.editScheduled(queued.id, "Revised")
+
+        assertEquals("Revised", m.state.scheduled.single().content)
+        assertEquals(Severity.OK, m.state.notice!!.severity)
+        m.cancelScheduled(queued.id)
+        m.editScheduled(queued.id, "Too late")
+        assertEquals("Revised", m.state.scheduled.single().content)
+        assertEquals(Severity.ERROR, m.state.notice!!.severity)
+    }
+
+    @Test
+    fun `a direct thread reaction uses the client local first reaction state`() {
+        val me = fx.client("me")
+        val peer = fx.client("peer")
+        fx.seedIncoming(me, peer.address, "m1", "Hello")
+        val m = model(me)
+        m.select(peer.address)
+
+        m.react("m1", "👍")
+
+        assertTrue(m.state.thread!!.messages.single().reactions.contains("👍"))
+        assertEquals(Severity.OK, m.state.notice!!.severity)
+    }
+
+    @Test
+    fun `typing state is an ephemeral direct-thread transition and never a message row`() {
+        val me = fx.client("me")
+        val peer = fx.client("peer")
+        val m = model(me)
+        m.select(peer.address)
+
+        m.typingChanged(peer.address, true)
+        m.typingChanged(peer.address, true) // Debounced: no second send is attempted.
+        m.typingChanged(peer.address, false)
+
+        assertTrue(m.state.thread!!.messages.isEmpty())
+        assertNull(m.state.notice)
+    }
+
+    @Test
+    fun `receipt privacy switches are reflected in the window state and the real client`() {
+        val me = fx.client("me")
+        val m = model(me)
+
+        m.setReceiptPrivacy(delivery = false, read = false)
+
+        assertFalse(me.deliveryReceiptsEnabled)
+        assertFalse(me.readReceiptsEnabled)
+        assertFalse(m.state.deliveryReceiptsEnabled)
+        assertFalse(m.state.readReceiptsEnabled)
+    }
+
+    @Test
+    fun `device sync failures are shown in account state rather than disappearing`() {
+        val me = fx.client("me")
+        val m = model(me)
+
+        // WiringFixture intentionally has no /v2/sync route. The important UI contract is
+        // that a failed network operation has a visible, named outcome in Account.
+        m.syncPushContacts()
+
+        assertEquals(Severity.ERROR, m.state.syncNotice?.severity)
+        assertTrue(m.state.syncNotice?.text?.contains("Could not archive contacts") == true)
+        assertFalse(m.state.busy)
+    }
+
+    @Test
+    fun `an inbound typing control appears in the selected direct thread and clears on stop`() {
+        val me = fx.client("me")
+        val peer = fx.client("peer")
+        val m = model(me)
+        m.select(peer.address)
+
+        fx.inbound(me, peer.address, TypingPayload.encode(peer.address, true, System.currentTimeMillis()))
+
+        assertTrue(m.state.thread!!.peerTyping)
+        assertTrue(m.state.thread!!.messages.isEmpty())
+
+        fx.inbound(me, peer.address, TypingPayload.encode(peer.address, false, System.currentTimeMillis()))
+
+        assertFalse(m.state.thread!!.peerTyping)
+    }
+
+    @Test
+    fun `a direct thread can edit and delete its own message locally first`() {
+        val me = fx.client("me")
+        val peer = fx.client("peer")
+        fx.seedOutgoing(me, peer.address, "m1", "Original")
+        val m = model(me)
+        m.select(peer.address)
+
+        m.editMessage("m1", "Revised")
+
+        assertEquals("Revised", m.state.thread!!.messages.single().body)
+        assertTrue(m.state.thread!!.messages.single().edited)
+        assertEquals(Severity.OK, m.state.notice!!.severity)
+
+        m.deleteMessage("m1")
+
+        assertTrue(m.state.thread!!.messages.single().deleted)
+        assertEquals("(deleted)", m.state.thread!!.messages.single().body)
+        assertEquals(Severity.OK, m.state.notice!!.severity)
+    }
+
+    @Test
+    fun `a scheduled run refreshes the queue without replacing its existing callback`() {
+        val me = fx.client("me")
+        val peer = fx.client("peer")
+        val now = System.currentTimeMillis()
+        var priorRuns = 0
+        me.onScheduledRun = { priorRuns++ }
+        val m = model(me)
+        val queued = me.scheduler.schedule(peer.address, "Later", now + 60_000, nowMs = now)
+
+        me.tick(now + 61_000)
+
+        assertEquals("the REPL callback must remain connected", 1, priorRuns)
+        assertEquals("sent", m.state.scheduled.single { it.content == "Later" }.status)
+        assertEquals(queued.id, me.scheduled.all().single().id)
     }
 
     /**
@@ -540,7 +824,7 @@ class ChatShellModelTest {
 
     /** An attach into a group is refused by the model, before any file is read. */
     @Test
-    fun `attaching into a group is refused and nothing is uploaded`() {
+    fun `attaching into a group nobody can reach is not drawn as sent and names who must update`() {
         val me = fx.client("me")
         me.groups.put(group("g4", me.address, listOf(unpublishedAddress())))
 
@@ -549,7 +833,8 @@ class ChatShellModelTest {
         m.attach(java.io.File.createTempFile("oshi-attach", ".txt").apply { writeText("x"); deleteOnExit() })
 
         assertEquals(Severity.ERROR, m.state.notice!!.severity)
-        assertTrue(m.state.notice!!.text.contains("no group media fan-out"))
+        // GROUP_E2E_V2_SPEC §6: no legacy fallback; the member is named via group.member_must_update.
+        assertTrue(m.state.notice!!.text, m.state.notice!!.text.contains("must update OSHI"))
     }
 
     private fun group(
