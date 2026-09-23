@@ -1,5 +1,6 @@
 package com.oshi.desktop.msg
 
+import com.oshi.desktop.i18n.catalogKey
 import com.oshi.desktop.call.CallEndReason
 
 /**
@@ -31,12 +32,12 @@ object CallSummary {
     /** The row for a finished call, or null for a call that leaves no row. */
     fun forEndedCall(outgoing: Boolean, connected: Boolean, reason: CallEndReason, durationSeconds: Long): String =
         when {
-            connected -> ControlPrefix.CALL_SUMMARY + (if (outgoing) OUT + "call.outgoing" else IN + "call.incoming") +
+            connected -> ControlPrefix.CALL_SUMMARY + (if (outgoing) OUT + catalogKey("call.outgoing") else IN + catalogKey("call.incoming")) +
                 "|" + duration(durationSeconds)
             outgoing -> ControlPrefix.CALL_SUMMARY + OUT +
-                (if (reason == CallEndReason.DECLINED) "call.declined" else "call.no.answer")
-            reason == CallEndReason.DECLINED -> ControlPrefix.CALL_SUMMARY + IN + "call.declined"
-            else -> ControlPrefix.MISSED_CALL + MISSED + "call.missed"
+                (if (reason == CallEndReason.DECLINED) catalogKey("call.declined") else catalogKey("call.no.answer"))
+            reason == CallEndReason.DECLINED -> ControlPrefix.CALL_SUMMARY + IN + catalogKey("call.declined")
+            else -> ControlPrefix.MISSED_CALL + MISSED + catalogKey("call.missed")
         }
 
     /** `MessageManager.callDurationText`: `m:ss`, `h:mm:ss` from an hour, never negative. */

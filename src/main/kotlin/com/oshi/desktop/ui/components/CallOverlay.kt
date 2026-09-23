@@ -1,5 +1,6 @@
 package com.oshi.desktop.ui.components
 
+import com.oshi.desktop.i18n.catalogKey
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -127,13 +128,13 @@ fun CallOverlay(
 private fun MicBlockedHint(screen: CallScreen) {
     if (!screen.micBlocked) return
     val os = System.getProperty("os.name").orEmpty().lowercase()
-    val key = when {
-        os.contains("win") -> "desktop.call.mic_blocked.windows"
-        os.contains("mac") -> "desktop.call.mic_blocked.mac"
-        else -> "desktop.call.mic_blocked.other"
+    val text = when {
+        os.contains("win") -> dt("desktop.call.mic_blocked.windows")
+        os.contains("mac") -> dt("desktop.call.mic_blocked.mac")
+        else -> dt("desktop.call.mic_blocked.other")
     }
     Text(
-        dt(key), fontSize = 12.sp, color = Color(0xFFFFB4AE), textAlign = TextAlign.Center,
+        text, fontSize = 12.sp, color = Color(0xFFFFB4AE), textAlign = TextAlign.Center,
         modifier = Modifier.widthIn(max = 520.dp).padding(bottom = OshiTheme.md),
     )
 }
@@ -149,7 +150,7 @@ private fun StatusLine(screen: CallScreen, nowMs: () -> Long) {
             Audio.NONE -> dt("desktop.call.audio.none")
             Audio.FLOWING -> t("call.state.on_call")
         }
-        Phase.ENDED -> t(screen.endedKey ?: "call.ended.hungup")
+        Phase.ENDED -> t(screen.endedKey ?: catalogKey("call.ended.hungup"))
     }
     Text(text, fontSize = 15.sp, color = Color.White.copy(alpha = 0.85f), textAlign = TextAlign.Center)
 

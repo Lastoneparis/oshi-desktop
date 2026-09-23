@@ -123,7 +123,7 @@ internal object MacNotification {
         if (!osName.lowercase(Locale.ROOT).contains("mac") || !executable) return null
         val script = if (sound == null) "display notification (item 2 of argv) with title (item 1 of argv)"
         else "display notification (item 2 of argv) with title (item 1 of argv) sound name (item 3 of argv)"
-        return listOf(osascript.toString(), "-e", "on run argv", "-e", script, "-e", "end run", "OSHI", body) +
+        return listOf("/usr/bin/osascript", "-e", "on run argv", "-e", script, "-e", "end run", "OSHI", body) +
             listOfNotNull(sound)
     }
 
@@ -159,7 +159,7 @@ internal object LinuxDesktopNotification {
     ): List<String>? {
         if (!osName.lowercase(Locale.ROOT).contains("linux") || !executable) return null
         return listOf(
-            notifySend.toString(),
+            "/usr/bin/notify-send",
             "--app-name=OSHI",
             "--urgency=$urgency",
             "OSHI",

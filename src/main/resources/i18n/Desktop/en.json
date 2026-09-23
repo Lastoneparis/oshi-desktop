@@ -1,7 +1,6 @@
 {
   "desktop.call.audio.connecting": "Connecting audio…",
   "desktop.call.audio.none": "Connected — no audio devices on this machine",
-  "desktop.call.audio.flowing": "Audio flowing both ways",
   "desktop.call.problem": "Why: %@",
   "desktop.call.mic_blocked.windows": "The other person can't hear you: your microphone is sending pure silence. Open Windows Settings → Privacy & security → Microphone and turn on \"Let desktop apps access your microphone\".",
   "desktop.call.mic_blocked.mac": "The other person can't hear you: your microphone is sending pure silence. Open System Settings → Privacy & Security → Microphone and allow OSHI.",

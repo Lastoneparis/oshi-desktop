@@ -43,6 +43,8 @@ object SourceKeys {
         // t("key") / t("key", arg) — the short wrapper in Strings.kt
         Regex("""(?<![A-Za-z0-9_.])t\s*\(\s*"([^"\\]+)""""),
         Regex("""Strings\s*\.\s*(?:get|format|lookup)\s*\(\s*"([^"\\]+)""""),
+        // catalogKey("call.missed") — a key stored as data and rendered later with t().
+        Regex("""(?<![A-Za-z0-9_.])catalogKey\s*\(\s*"([^"\\]+)""""),
         // Named-argument spellings, e.g. `Strings.get(key = "chat.send")`.
         //
         // The lookbehind is what makes this an ARGUMENT rather than an assignment, and it

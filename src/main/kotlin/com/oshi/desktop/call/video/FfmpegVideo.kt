@@ -65,10 +65,33 @@ object FfmpegVideo {
         loaded?.let { return it }
         val r = runCatching {
             avutil.av_log_set_level(avutil.AV_LOG_ERROR)
-            avdevice.avdevice_register_all()
+            // Touch the codec library the call actually needs (encode/decode/scale).
+            // libavdevice is NOT loaded here — see [loadDevices].
+            avcodec.avcodec_find_decoder(avcodec.AV_CODEC_ID_H264)
             Unit
         }
         loaded = r
+        return r
+    }
+
+    @Volatile private var devicesLoaded: Result<Unit>? = null
+
+    /**
+     * libavdevice — the camera inputs (avfoundation / dshow / v4l2) — loaded separately and
+     * only when a camera is opened.
+     *
+     * It has native dependencies the codecs do not (on Linux: ALSA, X11/xcb, libv4l), and
+     * on a machine without one of them JavaCPP reports `no jniavdevice in
+     * java.library.path`. Measured on GitHub's ubuntu-latest: loading it inside [load]
+     * turned that into "the video library did not load" and switched off the WHOLE video
+     * path — this client could not even decode the peer's picture, nor send a synthetic
+     * one. A machine that cannot open a camera can still show the other person's video.
+     */
+    @Synchronized
+    fun loadDevices(): Result<Unit> {
+        devicesLoaded?.let { return it }
+        val r = load().mapCatching { avdevice.avdevice_register_all() }
+        devicesLoaded = r
         return r
     }
 
@@ -339,7 +362,9 @@ class CameraCapture(
     override val deviceName: String
 
     init {
-        FfmpegVideo.load().getOrThrow()
+        FfmpegVideo.loadDevices().onFailure {
+            throw CameraUnavailable("the camera library did not load on this machine (${it.javaClass.simpleName}: ${it.message})")
+        }
         val os = System.getProperty("os.name").orEmpty().lowercase()
         val (fmtName, device) = when {
             os.contains("mac") -> "avfoundation" to "default:none"
@@ -465,7 +490,7 @@ class CameraCapture(
          * Empty when there is none — never throws, so a CI runner with no camera can call it.
          */
         fun dshowCameras(): List<Pair<String, String>> = runCatching {
-            FfmpegVideo.load().getOrThrow()
+            FfmpegVideo.loadDevices().getOrThrow()
             val input = avformat.av_find_input_format("dshow") ?: return emptyList()
             val list = org.bytedeco.ffmpeg.avdevice.AVDeviceInfoList(null)
             val n = avdevice.avdevice_list_input_sources(input, null as String?, null as AVDictionary?, list)

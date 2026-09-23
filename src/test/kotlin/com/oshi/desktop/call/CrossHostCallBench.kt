@@ -177,7 +177,11 @@ class CrossHostCallBench {
                 }
             }
             val v = lane.video() ?: error("$name: a video call opened no video session")
-            waitFor("$name first remote picture", 20_000) { v.remoteFrameCount > 0 }
+            // Not fatal here: a peer with no working encoder is diagnosed by the checks below,
+            // which print every counter first. Failing now hid the audio half of the result.
+            runCatching { waitFor("$name first remote picture", 20_000) { v.remoteFrameCount > 0 } }
+                .onFailure { println("[cross] $name: no remote picture after 20 s — measuring anyway") }
+            val r0 = lane.mediaDiagnostics().framesRefused
             val f0 = v.remoteFrameCount; val a0 = lane.mediaDiagnostics().framesAccepted; val h0 = heard.get()
             Thread.sleep(holdMs)
             val d = lane.mediaDiagnostics()
@@ -202,7 +206,8 @@ class CrossHostCallBench {
                     "camera=${v.cameraRunning} problem=${v.cameraProblem} | received over ${secs}s: " +
                     "$pics pictures (${"%.1f".format(pics / secs)} fps, ${v.remoteFrame?.width}x${v.remoteFrame?.height}), " +
                     "$audio audio frames accepted, $tone non-silent frames played | sent ${d.framesSent} audio, " +
-                    "${v.sender.framesSent} video frames",
+                    "${v.sender.framesSent} video frames | refused ${d.framesRefused - r0} frames, " +
+                    "via :8089 ${lane.media?.relayReceived?.get()} rx / ${lane.media?.relaySent?.get()} tx, ws tx ${lane.media?.wsSent?.get()}",
             )
             check(v.cameraRunning) { "$name: our synthetic camera/encoder did not run: ${v.cameraProblem}" }
             check(pics >= secs * 10) { "$name: fewer than 10 fps of the peer's video decoded ($pics in ${secs}s)" }

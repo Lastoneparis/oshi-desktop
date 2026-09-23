@@ -335,6 +335,15 @@ class CallLane(
         private set
 
     /**
+     * The phones' in-band hang-up (`0x0D` on the media path, [com.oshi.desktop.call.media.InBandCallEnd]):
+     * how many ended a call here, and how many copies we sent when WE hung up.
+     */
+    @Volatile var inBandEndsApplied: Int = 0
+        private set
+    @Volatile var inBandEndsSent: Int = 0
+        private set
+
+    /**
      * The media leg of the call that is up, or null.
      *
      * Guarded by [mediaLock] on every write, because it is written from the signalling
@@ -707,6 +716,29 @@ class CallLane(
     }
 
     /**
+     * The peer hung up ON THE MEDIA PATH — an authenticated in-band `0x0D` opened under this
+     * call's session key (only the peer holds it), so it is fed to the state machine exactly
+     * as the peer's signalled `callEnd` would be: same current-peer and callId gates, same
+     * iOS grace windows, same `Ended` event and the same call-history row. Idempotent: once
+     * the call has ended the machine refuses it as WRONG_STATE.
+     */
+    internal fun onInBandCallEnd(callId: String, reason: CallEndReason, nowMs: Long = System.currentTimeMillis()) {
+        synchronized(drive) {
+            val peer = machine.peer ?: return
+            if (machine.callId != callId || machine.state != CallState.IN_CALL) return
+            val packet = CallPacket.Decoded(CallPacket.Type.CALL_END, nowMs, reason.wire.toByteArray(Charsets.UTF_8))
+            val decision = machine.onPacket(from = peer, packet = packet, nowMs = nowMs, envelopeCallId = callId)
+            val refusal = apply(decision, nowMs)
+            if (refusal == CallRefusal.NONE) {
+                inBandEndsApplied++
+                log("call: $callId ended by the peer's in-band hang-up (${reason.wire})")
+            } else {
+                log("call: $callId in-band hang-up not applied — $refusal")
+            }
+        }
+    }
+
+    /**
      * Release the media leg and its timer, from anywhere, any number of times.
      *
      * Public because teardown must be reachable on every path a caller can reach — a
@@ -781,6 +813,7 @@ class CallLane(
                 fresh.onLocalCandidates = { candidates ->
                     sendCandidates(action.peer, action.callId, candidates)
                 }
+                fresh.onInBandCallEnd = { reason -> onInBandCallEnd(action.callId, reason) }
                 // May throw; `CallMediaLeg.start` releases both halves before it does.
                 // The machine's clock, not the wall clock: in production they are the same
                 // value and in a test they must not be two different ones, or the watchdog
@@ -864,7 +897,20 @@ class CallLane(
 
     private fun perform(action: CallAction, nowMs: Long) {
         when (action) {
-            is CallAction.Send -> deliver(action, nowMs)
+            is CallAction.Send -> {
+                // WE are ending a live call: tell the peer on the media path too, as both
+                // phones do, BEFORE StopMedia closes the leg. A remote-driven end emits no
+                // Send, so this never echoes a hang-up back to the peer that sent it.
+                if (action.type == CallPacket.Type.CALL_END) {
+                    val live = leg
+                    if (live != null && !live.isClosed) {
+                        val reason = CallEndReason.fromWire(String(action.payload, Charsets.UTF_8))
+                            ?: CallEndReason.HUNG_UP
+                        inBandEndsSent += runCatching { live.sendInBandCallEnd(reason) }.getOrDefault(0)
+                    }
+                }
+                deliver(action, nowMs)
+            }
 
             is CallAction.StartRinging -> onEvent(
                 CallEvent.Ringing(

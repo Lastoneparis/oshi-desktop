@@ -1,0 +1,86 @@
+{
+  "description": "Design §3. PSK = HKDF-SHA256(ikm=IK, salt='OSHI-DEVSYNC-v1', info='noise-psk', 32). DISC = same with info='mdns-tag'. deviceId = SHA-256('OSHI-DEVSYNC-id' || DK_pub)[0..16], 32 lowercase hex. mdnsTag = hex(HMAC-SHA256(DISC, 't' || u64be(floor(unix/3600))))[0..16]. IK is the RAW 32-byte X25519 private key as stored (NOT clamped).",
+  "account": {
+    "ikPriv": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+    "ikPub": "07a37cbc142093c8b755dc1b10e86cb426374ad16aa853ed0bdfc0b2b86d1c7c",
+    "psk": "a3ba18c7b34435583c1535d872d6c051e5e33b306bb23370f2eee88715d0c311",
+    "disc": "8e077f1d96da3dd2788b806b07cea222b81eff5dd0b3c73f438dcddd3f9be5aa"
+  },
+  "otherAccount": {
+    "ikPriv": "184bf5c3d5d3cc7da88256c37f51d20b0229dd5322815eaa26502dc4dc765be2",
+    "psk": "afce4f54a1993f2bcf0a33b9618c96e5d8932376ba80be4a905ffe102dca961e"
+  },
+  "devices": {
+    "A": {
+      "priv": "67e63f31eb1db74e4ce8d16c1bb8c2925f300f0a76fa828320173c95ee43dea4",
+      "pub": "3f8309f1dd5edccc23a7b34f0788fc550c8891709c50d3472a91fd70363b5c1d",
+      "deviceId": "0fe3cd484d463b601afefc0a7025bdde",
+      "dskSeed": "bb9f1188c03caaac56481c3287fcba94043e8141340a5bdc7eac36eb281d1cf5",
+      "dsk": "YLVCaCFuj8wHGLmwM3xZ5nF9yHalFc0T18Wa7mUf4fA="
+    },
+    "B": {
+      "priv": "da488115323d3fcc218121cf48970897ceb21c873156ff546d25032c5aa2731b",
+      "pub": "4147e7d3b6b76eb6f703c2b010380aa0df4f9716f8474e8aee88dddb5f7bdc45",
+      "deviceId": "e3ab5fca521294a7c856de7367bd1bae",
+      "dskSeed": "2d49ce5d2de3875989abc03a81e9d2c4364858c8e5d9e332048253f4b7a4f449",
+      "dsk": "W4Ws6A11deccQwcm3e6rU4gGT1xMqSJ9RF/QWpE2K90="
+    },
+    "C": {
+      "priv": "a610db99c42b277df45f5af783bd29e162a08d869e21573b51cb70150516157d",
+      "pub": "9cf261858a41023fe1d254774e5cd9973aa3c13c598f4af68425695b7104c036",
+      "deviceId": "148b8a629ea3402177cdd6d0bfc4691b",
+      "dskSeed": "f8ecad166995ae4bea37918af847910698384af6ab5c738e1f77139f6800ae9d",
+      "dsk": "H/eEAN4i8Mstr4NCHJ3pCf3BtJbVe3hFyrjnUCHSIlQ="
+    }
+  },
+  "mdnsTags": [
+    {
+      "unixSeconds": 0,
+      "hour": 0,
+      "tag": "0bc9658e07cd3006"
+    },
+    {
+      "unixSeconds": 1758585600,
+      "hour": 488496,
+      "tag": "1ddf41c27f7559fc"
+    },
+    {
+      "unixSeconds": 1758589199,
+      "hour": 488496,
+      "tag": "1ddf41c27f7559fc"
+    },
+    {
+      "unixSeconds": 1758589200,
+      "hour": 488497,
+      "tag": "c80b6f2ca646ff4b"
+    },
+    {
+      "unixSeconds": 1790000000,
+      "hour": 497222,
+      "tag": "433dde09c1e1efcc"
+    }
+  ],
+  "sas": [
+    {
+      "handshakeHash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "code": "704596"
+    },
+    {
+      "handshakeHash": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "code": "305527"
+    },
+    {
+      "handshakeHash": "47644f3d462349713cb37c16a36a3bc2146b914cfc940258cb12b189af9d9f68",
+      "code": "825817"
+    },
+    {
+      "handshakeHash": "115d02c94d5206687c351ebdd6b3c16a2af47859c5a246b1812c84f7f9088c8a",
+      "code": "522339"
+    },
+    {
+      "handshakeHash": "fdd3f89168cf704c8d56c3e0d24ddd914765f7e56430582e7c036df0463704a3",
+      "code": "737003"
+    }
+  ],
+  "sasDescription": "code = u32be(HKDF-SHA256(ikm=h, salt=empty (= 32 zero bytes), info='OSHI-DEVSYNC-sas', L=32)[0..4]) mod 1_000_000, zero-padded to 6 digits. h = the final Noise handshake hash (after message 3)."
+}

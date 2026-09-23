@@ -1,0 +1,144 @@
+{
+  "version": 2,
+  "platform": "fixture",
+  "exportedAt": "2026-09-22T10:00:00.000Z",
+  "account": {
+    "publicKey": "B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9/AsrhtHHw="
+  },
+  "contacts": [
+    { "publicKey": "gbY32PzSxtpjWeaWMROhFw3nleS3JbhNHgtM/Z7FjOk=", "alias": "Bob" },
+    { "publicKey": "TCbZB0wn2J7eWScMCsFLceBxsVI5UZ91R0svO6Y0gfU=", "alias": "Carol", "nickname": "C" }
+  ],
+  "conversations": [
+    {
+      "id": "direct:gbY32PzSxtpjWeaWMROhFw3nleS3JbhNHgtM/Z7FjOk=",
+      "kind": "direct",
+      "peerPublicKey": "gbY32PzSxtpjWeaWMROhFw3nleS3JbhNHgtM/Z7FjOk="
+    },
+    {
+      "id": "group:5B0E7C1A-3F2D-4E8B-9A61-2C7D4F0B8E13",
+      "kind": "group",
+      "groupId": "5B0E7C1A-3F2D-4E8B-9A61-2C7D4F0B8E13",
+      "groupName": "Team"
+    },
+    {
+      "id": "x:future",
+      "kind": "channel",
+      "futureField": "readers must skip kinds they do not know"
+    }
+  ],
+  "messages": [
+    {
+      "id": "6F1C2A3B-0000-4000-8000-000000000001",
+      "conversation": "direct:gbY32PzSxtpjWeaWMROhFw3nleS3JbhNHgtM/Z7FjOk=",
+      "direction": "out",
+      "senderPublicKey": "B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9/AsrhtHHw=",
+      "timestamp": "2026-09-20T08:00:00.000Z",
+      "text": "Hello Bob",
+      "status": "read",
+      "read": true
+    },
+    {
+      "id": "6f1c2a3b-0000-4000-8000-000000000002",
+      "conversation": "direct:gbY32PzSxtpjWeaWMROhFw3nleS3JbhNHgtM/Z7FjOk=",
+      "direction": "in",
+      "senderPublicKey": "gbY32PzSxtpjWeaWMROhFw3nleS3JbhNHgtM/Z7FjOk=",
+      "timestamp": "2026-09-20T08:01:30.250Z",
+      "text": "Hi! été 👋",
+      "status": "delivered",
+      "read": false,
+      "replyToId": "6F1C2A3B-0000-4000-8000-000000000001",
+      "futureField": { "ignored": true }
+    },
+    {
+      "id": "6F1C2A3B-0000-4000-8000-000000000003",
+      "conversation": "direct:gbY32PzSxtpjWeaWMROhFw3nleS3JbhNHgtM/Z7FjOk=",
+      "direction": "in",
+      "senderPublicKey": "gbY32PzSxtpjWeaWMROhFw3nleS3JbhNHgtM/Z7FjOk=",
+      "timestamp": "2026-09-20T08:02:00Z",
+      "status": "delivered",
+      "read": true,
+      "media": {
+        "type": "image",
+        "fileName": "dot.png",
+        "mime": "image/png",
+        "dataBase64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="
+      }
+    },
+    {
+      "id": "6F1C2A3B-0000-4000-8000-000000000004",
+      "conversation": "direct:gbY32PzSxtpjWeaWMROhFw3nleS3JbhNHgtM/Z7FjOk=",
+      "direction": "out",
+      "senderPublicKey": "B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9/AsrhtHHw=",
+      "timestamp": "2026-09-20T08:03:00.000Z",
+      "text": "See you at 9",
+      "status": "delivered",
+      "read": false,
+      "edited": { "text": "See you at 10", "at": "2026-09-20T08:04:00.000Z" }
+    },
+    {
+      "id": "6F1C2A3B-0000-4000-8000-000000000005",
+      "conversation": "direct:gbY32PzSxtpjWeaWMROhFw3nleS3JbhNHgtM/Z7FjOk=",
+      "direction": "in",
+      "senderPublicKey": "gbY32PzSxtpjWeaWMROhFw3nleS3JbhNHgtM/Z7FjOk=",
+      "timestamp": "2026-09-20T08:05:00.000Z",
+      "status": "delivered",
+      "read": true,
+      "deleted": true
+    },
+    {
+      "id": "6F1C2A3B-0000-4000-8000-000000000006",
+      "conversation": "direct:gbY32PzSxtpjWeaWMROhFw3nleS3JbhNHgtM/Z7FjOk=",
+      "direction": "out",
+      "senderPublicKey": "B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9/AsrhtHHw=",
+      "timestamp": "2026-09-20T08:06:00.000Z",
+      "status": "failed",
+      "read": false,
+      "viewOnce": true,
+      "media": { "type": "video", "fileName": "clip.mp4", "mime": "video/mp4", "omitted": "viewOnce" }
+    },
+    {
+      "id": "7A000000-0000-4000-8000-000000000001",
+      "conversation": "group:5B0E7C1A-3F2D-4E8B-9A61-2C7D4F0B8E13",
+      "direction": "in",
+      "senderPublicKey": "TCbZB0wn2J7eWScMCsFLceBxsVI5UZ91R0svO6Y0gfU=",
+      "senderName": "Carol",
+      "timestamp": "2026-09-21T12:00:00.000Z",
+      "text": "group hello",
+      "status": "delivered",
+      "read": true,
+      "reactions": { "👍": ["B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9/AsrhtHHw="] }
+    },
+    {
+      "id": "7A000000-0000-4000-8000-000000000002",
+      "conversation": "group:5B0E7C1A-3F2D-4E8B-9A61-2C7D4F0B8E13",
+      "direction": "out",
+      "senderPublicKey": "B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9/AsrhtHHw=",
+      "timestamp": "2026-09-21T12:01:00.000Z",
+      "text": "group reply",
+      "status": "sent",
+      "read": true,
+      "replyToId": "7A000000-0000-4000-8000-000000000001"
+    },
+    {
+      "id": "9F000000-0000-4000-8000-000000000001",
+      "conversation": "x:future",
+      "direction": "in",
+      "senderPublicKey": "TCbZB0wn2J7eWScMCsFLceBxsVI5UZ91R0svO6Y0gfU=",
+      "timestamp": "2026-09-21T13:00:00.000Z",
+      "text": "belongs to a conversation kind this reader does not know",
+      "status": "delivered",
+      "read": true
+    },
+    {
+      "id": "9F000000-0000-4000-8000-000000000002",
+      "conversation": "direct:does-not-exist",
+      "direction": "in",
+      "senderPublicKey": "TCbZB0wn2J7eWScMCsFLceBxsVI5UZ91R0svO6Y0gfU=",
+      "timestamp": "2026-09-21T13:00:00.000Z",
+      "text": "references a conversation that is not declared: invalid",
+      "status": "delivered",
+      "read": true
+    }
+  ]
+}

@@ -2,6 +2,9 @@ package com.oshi.desktop.call
 
 import com.oshi.desktop.call.media.CallAudio
 import com.oshi.desktop.call.media.CallAudioSession
+import com.oshi.desktop.call.media.CallMediaFrame
+import com.oshi.desktop.call.media.InBandCallEnd
+import com.oshi.desktop.call.media.ReplayWindow
 import com.oshi.desktop.call.transport.HolePunch
 import com.oshi.desktop.call.transport.IceCandidate
 import com.oshi.desktop.call.transport.IceCandidateType
@@ -256,6 +259,13 @@ class CallMediaLeg internal constructor(
      */
     private fun deliver(sealed: ByteArray): Boolean {
         tap?.invoke(sealed)
+        // The phones' in-band hang-up (sealed `0x0D`) before anything else: it is neither
+        // video control (whose `0x0D` is the nine-byte cleartext toggle, never this size)
+        // nor audio, and the audio session would count it as a refused frame and drop it.
+        if (InBandCallEnd.looksLike(sealed)) {
+            onInBandEnd(sealed)
+            return true
+        }
         // Video and video control first: `0xF1`, the 9-byte cleartext `0x0B/0x0C/0x0D`
         // and the sealed `0x0E/0x0F`. None of them is audio, and handing `0x0E` to the
         // audio session would burn its sequence number in the audio replay window.
@@ -264,6 +274,53 @@ class CallMediaLeg internal constructor(
         if (audio.onFrame(sealed)) framesAccepted.incrementAndGet()
         else framesRefused.incrementAndGet()
         return true
+    }
+
+    private fun onInBandEnd(sealed: ByteArray) {
+        val opened = InBandCallEnd.decode(spec.sessionKey, sealed)
+        // Our OWN hang-up reflected back at us opens under the same key; the direction bit
+        // in the salt is what tells it apart (see CallMediaFrame.txSalt).
+        val reflected = opened != null &&
+            opened.nonceSalt.contentEquals(CallMediaFrame.txSalt(spec.nonceSalt, spec.isCaller))
+        if (opened == null || reflected || !inBandReplay.accept(opened.seq)) {
+            inBandEndsRefused.incrementAndGet()
+            return
+        }
+        if (closed.get() || !inBandFired.compareAndSet(false, true)) return
+        inBandEndsAccepted.incrementAndGet()
+        log("call: ${spec.callId} the peer hung up in-band (${opened.reason.wire})")
+        val cb = onInBandCallEnd
+        Thread({ runCatching { cb(opened.reason) } }, "oshi-call-inband-end").apply { isDaemon = true; start() }
+    }
+
+    /**
+     * Tell the peer we hung up ON THE MEDIA PATH, as both phones do on every local hang-up
+     * (iOS `sendInBandCallEnd`, Android `sendInBandCallEnd`): [InBandCallEnd.BURST] copies,
+     * each sealed with a fresh counter from the shared audio sequence, over every carrier
+     * that is up — the selected pair, `:8089` when registered, and the WebSocket relay when
+     * P2P is not the live carrier. Must run BEFORE the leg is closed.
+     *
+     * @return how many copies left on at least one carrier.
+     */
+    fun sendInBandCallEnd(reason: CallEndReason): Int {
+        if (closed.get()) return 0
+        val audio = audioSession ?: return 0
+        val now = System.currentTimeMillis()
+        var sent = 0
+        repeat(InBandCallEnd.BURST) {
+            val packet = runCatching {
+                InBandCallEnd.encode(spec.sessionKey, spec.nonceSalt, spec.isCaller, audio.nextSequence(), reason)
+            }.getOrNull() ?: return sent
+            var any = false
+            if (selected != null && runCatching { socket.sendSealed(packet) }.getOrDefault(false)) any = true
+            val relay = udpRelay
+            if (relay != null && relay.usable(now) && runCatching { relay.send(packet) }.getOrDefault(false)) any = true
+            val ws = wsRelay
+            if (!p2pHealthy(now) && ws != null && ws.usable(now) && runCatching { ws.send(packet) }.getOrDefault(false)) any = true
+            if (any) sent++
+        }
+        log("call: ${spec.callId} in-band hang-up sent ($sent/${InBandCallEnd.BURST}, ${reason.wire})")
+        return sent
     }
 
     /**
@@ -329,6 +386,23 @@ class CallMediaLeg internal constructor(
      * way and a peer that missed the first one still learns everything from the second.
      */
     var onLocalCandidates: (List<IceCandidate>) -> Unit = {}
+
+    /**
+     * The peer hung up and said so ON THE MEDIA PATH — the phones' in-band `0x0D`, see
+     * [InBandCallEnd]. Fired at most once per leg, on its own thread (the receive thread
+     * must not tear down the socket it is reading from). [CallLane] feeds it to the state
+     * machine as the peer's `callEnd`, so the same grace windows and the same history row
+     * apply as to the signalled one.
+     */
+    @Volatile
+    var onInBandCallEnd: (CallEndReason) -> Unit = {}
+
+    /** In-band hang-ups that opened and were acted on (0 or 1) / refused (forged, replayed, reflected). */
+    val inBandEndsAccepted = AtomicLong()
+    val inBandEndsRefused = AtomicLong()
+
+    private val inBandReplay = ReplayWindow()
+    private val inBandFired = AtomicBoolean(false)
 
     val isClosed: Boolean get() = closed.get()
 

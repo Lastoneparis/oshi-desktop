@@ -1,5 +1,6 @@
 package com.oshi.desktop.ui.state
 
+import com.oshi.desktop.i18n.catalogKey
 import com.oshi.desktop.call.CallEndReason
 import com.oshi.desktop.call.CallLane
 import com.oshi.desktop.call.CallRefusal
@@ -110,7 +111,7 @@ class CallScreenModel(
                         it.copy(
                             phase = Phase.ENDED,
                             endedAtMs = clock(),
-                            endedKey = if (d.refusal == CallRefusal.BLOCKED) "call.error.blocked" else "call.ended.network",
+                            endedKey = if (d.refusal == CallRefusal.BLOCKED) catalogKey("call.error.blocked") else catalogKey("call.ended.network"),
                             problem = if (d.refusal == CallRefusal.BLOCKED) null else d.why,
                         )
                     }
@@ -307,13 +308,13 @@ class CallScreenModel(
 
         /** The iOS key for why a call ended, from where the user was when it did. */
         fun endedKeyFor(reason: CallEndReason, wasConnected: Boolean, outgoing: Boolean, problem: String?): String = when {
-            problem != null && reason in setOf(CallEndReason.NETWORK_ERROR, CallEndReason.CONNECTION_LOST) -> "call.ended.network"
-            reason == CallEndReason.DECLINED -> "call.ended.declined"
-            reason == CallEndReason.NO_ANSWER -> if (outgoing) "call.ended.noanswer" else "call.missed"
-            !wasConnected && !outgoing && reason != CallEndReason.ANSWERED_ELSEWHERE -> "call.missed"
-            reason == CallEndReason.NETWORK_ERROR -> "call.ended.network"
-            reason == CallEndReason.PEER_DISCONNECTED || reason == CallEndReason.CONNECTION_LOST -> "call.ended.disconnected"
-            else -> "call.ended.hungup"
+            problem != null && reason in setOf(CallEndReason.NETWORK_ERROR, CallEndReason.CONNECTION_LOST) -> catalogKey("call.ended.network")
+            reason == CallEndReason.DECLINED -> catalogKey("call.ended.declined")
+            reason == CallEndReason.NO_ANSWER -> if (outgoing) catalogKey("call.ended.noanswer") else catalogKey("call.missed")
+            !wasConnected && !outgoing && reason != CallEndReason.ANSWERED_ELSEWHERE -> catalogKey("call.missed")
+            reason == CallEndReason.NETWORK_ERROR -> catalogKey("call.ended.network")
+            reason == CallEndReason.PEER_DISCONNECTED || reason == CallEndReason.CONNECTION_LOST -> catalogKey("call.ended.disconnected")
+            else -> catalogKey("call.ended.hungup")
         }
     }
 }
