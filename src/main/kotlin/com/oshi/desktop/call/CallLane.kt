@@ -816,6 +816,7 @@ class CallLane(
         val spec = CallMediaSpec(
             action.callId, action.sessionKey, action.nonceSalt, action.isCaller, video = machine.isVideo,
             wbAdpcm = action.wbAdpcm,
+            opus = action.opus,
             selfKey = myAddress, peerKey = action.peer,
             wsUpgradeHeaders = transport::webSocketUpgradeHeaders,
             // __CALL_MEDIA_AUTH_DESKTOP_2026_09_23__ contract §2: this call's relay token.
@@ -857,6 +858,22 @@ class CallLane(
         }
 
         opened.audio?.muted = muted
+        // __VIDEO_PLI_SIGNAL_2026_09_23__ Every keyframe request the video half puts on the
+        // media channel also goes out as a sealed call signal (≤ 1/s): iOS up to b145 reads
+        // `0x0B` ONLY there. Typed `keyframeRequest` so the call server budgets it as one
+        // (__CALL_VIDEO_SIGNAL_2026_09_23__). Posted off the socket thread, never blocking
+        // media, and a refusal (a 429 during a storm) is logged, never shown as a problem.
+        opened.video?.signalKeyframeRequest = {
+            val send = CallAction.Send(
+                peer = action.peer,
+                type = CallPacket.Type.REQUEST_KEYFRAME,
+                payload = ByteArray(0),
+                envelopeType = KEYFRAME_REQUEST_ENVELOPE_TYPE,
+                callId = action.callId,
+            )
+            Thread({ runCatching { deliver(send, System.currentTimeMillis(), quiet = true) } }, "oshi-pli-signal")
+                .apply { isDaemon = true; start() }
+        }
         synchronized(mediaLock) {
             leg = opened
             if (mediaProbeIntervalMs > 0) mediaTimer = startProbeTimer()
@@ -978,7 +995,7 @@ class CallLane(
         }
     }
 
-    private fun deliver(send: CallAction.Send, nowMs: Long): CallSignalClient.Post {
+    private fun deliver(send: CallAction.Send, nowMs: Long, quiet: Boolean = false): CallSignalClient.Post {
         val peerKey = ContactQr.canonicalAddress(send.peer)?.let { Base64.getDecoder().decode(it) }
         if (peerKey == null) {
             sendFailures++
@@ -1001,6 +1018,10 @@ class CallLane(
             senderDeviceId = deviceId,
         )
         val post = transport.sendSignal(envelope, nowMs)
+        if (post is CallSignalClient.Post.Refused && quiet) {
+            log("call: ${send.type} for ${send.callId} not delivered — ${post.code}: ${post.reason}")
+            return post
+        }
         if (post is CallSignalClient.Post.Refused) {
             sendFailures++
             log("call: could not send ${send.type} for ${send.callId} — ${post.code}: ${post.reason}")
@@ -1028,6 +1049,9 @@ class CallLane(
     }
 
     companion object {
+        /** __CALL_VIDEO_SIGNAL_2026_09_23__ the envelope `type` of an in-call keyframe request. */
+        const val KEYFRAME_REQUEST_ENVELOPE_TYPE = "keyframeRequest"
+
 
         /**
          * The sentence every surface that starts a call **on the media-less path** is

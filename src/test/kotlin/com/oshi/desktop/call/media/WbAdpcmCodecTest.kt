@@ -84,8 +84,9 @@ class WbAdpcmCodecTest {
     @Test fun `offer advertises slot 4 and a five-byte phone tail parses with the callId intact`() {
         val id = "3F2504E0-4F89-11D3-9A0C-0305E82C3301"
         val body = CallOffer(ByteArray(32) { 7 }, byteArrayOf(1, 2, 3, 4), id, supportsVideo = true, supportsWbAdpcm = true).encode()
-        assertEquals(36 + id.length + 5, body.size)
-        assertEquals(0x10.toByte(), body.last())
+        // __OPUS_CODEC_2026_09_23__ six slots now: WB is the second to last, Opus (0x00 here) last.
+        assertEquals(36 + id.length + 6, body.size)
+        assertEquals(0x10.toByte(), body[body.size - 2])
         val back = CallOffer.decode(body)!!
         assertEquals(id, back.callId)
         assertTrue(back.supportsWbAdpcm)
@@ -106,7 +107,7 @@ class WbAdpcmCodecTest {
 
     @Test fun `accept carries WB at index 4 and a legacy accept does not`() {
         val a = CallAccept(supportsVideo = true, supportsWbAdpcm = true).encode()
-        assertArrayEquals(byteArrayOf(0, 0, 0, 8, 0x10), a)
+        assertArrayEquals(byteArrayOf(0, 0, 0, 8, 0x10, 0), a)   // + index 5 = Opus (not asked here)
         assertTrue(CallAccept.decode(a).supportsWbAdpcm)
         assertTrue(CallAccept.decode(byteArrayOf(0, 0, 4, 8, 0x10)).supportsWbAdpcm)   // iOS
         assertFalse(CallAccept.decode(byteArrayOf(0, 0, 4, 8)).supportsWbAdpcm)

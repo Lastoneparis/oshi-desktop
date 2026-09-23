@@ -62,7 +62,7 @@ class SleepInhibitorTest {
     fun `linux cameras are the video nodes, in numeric order, named from sysfs when it can`() {
         val dev = Files.createTempDirectory("dev").toFile()
         listOf("video10", "video2", "video0", "vhci", "videoX").forEach { File(dev, it).createNewFile() }
-        val cams = CallDevices.linuxCameras(dev).map { it.first.substringAfterLast('/') }
+        val cams = CallDevices.linuxCameras(dev).map { File(it.first).name }   // File, not '/': Windows CI
         assertEquals(listOf("video0", "video2", "video10"), cams)
         dev.deleteRecursively()
     }

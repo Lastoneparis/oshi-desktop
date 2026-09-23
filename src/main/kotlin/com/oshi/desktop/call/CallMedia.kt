@@ -704,6 +704,8 @@ data class CallMediaSpec(
     val signedGet: ((path: String) -> Map<String, String>)? = null,
     /** __WB_ADPCM_CODEC_2026_09_23__ the peer advertised 0x18 — TX it instead of 0x15. */
     val wbAdpcm: Boolean = false,
+    /** __OPUS_CODEC_2026_09_23__ the peer advertised 0x19 — TX Opus (preferred over 0x18). */
+    val opus: Boolean = false,
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -778,7 +780,7 @@ object CallMedia {
                     datagram = datagram,
                     audioFor = { send ->
                         CallAudioSession(spec.sessionKey, spec.nonceSalt, spec.isCaller, send)
-                            .also { it.useWbAdpcm = spec.wbAdpcm }
+                            .also { it.useWbAdpcm = spec.wbAdpcm; it.useOpus = spec.opus }
                     },
                     videoFor = { send, nextSeq ->
                         CallVideoSession(spec.sessionKey, spec.nonceSalt, spec.isCaller, send, nextSeq, log = log)

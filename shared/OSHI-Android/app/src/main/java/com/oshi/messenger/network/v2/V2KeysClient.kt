@@ -33,11 +33,15 @@ data class FetchedBundle(
  */
 @Singleton
 class V2KeysClient @Inject constructor(
+    private val coverSettings: CoverSettings,
     private val signer: V2Signer,
     private val cryptoManager: CryptoManager,
     private val prekeyStore: V2PrekeyStore,
 ) {
     private val client = OkHttpClient.Builder()
+        .addInterceptor(coverSettings.interceptor())
+        .followRedirects(false)
+        .followSslRedirects(false)
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
@@ -58,6 +62,9 @@ class V2KeysClient @Inject constructor(
                 put("userKey", userKey)
                 put("identityKey", userKey)   // == identity (X3DH IK is the legacy X25519 identity)
                 put("signingKey", signingKey)
+                // __LEGACY_COMPAT_2026_09_23__ advertise "reads v2 groups" so iOS/Android senders in
+                // the compat window skip the legacy group copy for us (server stores 0..0xFFFF).
+                put("caps", GroupLegacyCompat.MY_CAPS)
                 put("signedPreKey", JSONObject().apply {
                     put("keyId", spk.keyId)
                     put("key", b64(spk.pair.pub))
@@ -69,7 +76,13 @@ class V2KeysClient @Inject constructor(
                     }
                 })
             }
-            val bodyBytes = body.toString().toByteArray(Charsets.UTF_8)
+            // __MAILBOX_BOOTSTRAP_2026_09_23__ Android's org.json writes every "/" as "\\/". The live
+            // /v2/keys route hashes JSON.stringify(parsed body) instead of the bytes received, so
+            // an escaped slash made EVERY Android publish fail verification: stored, but graced
+            // ("invalid-signature-grace") and never bound userKey→signingKey — a fresh Android
+            // identity stayed "unbound" on every route. Send the canonical spelling (base64 and
+            // UUIDs only here: no backslash can precede a slash legitimately).
+            val bodyBytes = body.toString().replace("\\/", "/").toByteArray(Charsets.UTF_8)
             val path = "/v2/keys/publish"
             val headers = signer.sign("POST", path, bodyBytes)  // hash = the exact bytes sent
             val req = Request.Builder()
@@ -113,6 +126,8 @@ class V2KeysClient @Inject constructor(
                     Log.w("V2KeysClient", "identityKey != address — possible key substitution"); return@withContext null
                 }
                 val opk = json.optJSONObject("oneTimePreKey")
+                // __LEGACY_COMPAT_2026_09_23__ remember the peer's caps (absent ⇒ 0 = old build).
+                GroupLegacyCompat.notePeerCaps(peerUserKey, json.optInt("caps", 0))
                 FetchedBundle(
                     identityKey = identityKey,
                     signingKey = signingKey,

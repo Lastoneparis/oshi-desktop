@@ -217,8 +217,11 @@ internal object BotSealFixtures {
         val f = listOf(
             File(System.getProperty("oshi.repo.root") ?: "..", "ServerPatches/bot_e2e/test/vectors.json"),
             File("ServerPatches/bot_e2e/test/vectors.json"),
-        ).firstOrNull { it.isFile } ?: error("vectors.json not found (ServerPatches/bot_e2e/test/vectors.json)")
-        return JSONObject(f.readText())
+        ).firstOrNull { it.isFile }
+        // The vectors live with the (private) server patch. In the standalone public repo they
+        // are absent: skip, like the other cross-tree parity tests, rather than fail.
+        org.junit.Assume.assumeTrue("ServerPatches/bot_e2e/test/vectors.json not in this checkout", f != null)
+        return JSONObject(f!!.readText())
     }
 
     fun outerOf(envelope: String): JSONObject =

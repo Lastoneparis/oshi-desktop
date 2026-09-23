@@ -127,8 +127,22 @@ tasks.named<ProcessResources>("processResources") {
     }
 }
 
+/**
+ * __OPUS_CODEC_2026_09_23__ Concentus 1.0.2 — the pure-Java Opus port — vendored as SOURCE at
+ * the monorepo root (`Vendor/concentus`, pinned release, sha256 + PGP verified, see
+ * `Vendor/README-OSHI.md`) and compiled by this build: no prebuilt jar, no native library per
+ * OS, so Windows, Linux and macOS run the same bytecode as Android. Override with
+ * `-PoshiConcentusRoot=...` when the layout differs.
+ */
+val vendoredConcentus: String = providers.gradleProperty("oshiConcentusRoot").orNull
+    ?: rootDir.parentFile.resolve("Vendor/concentus/src/main/java").takeIf { it.isDirectory }?.absolutePath
+    // THE PUBLIC CHECKOUT: the same pinned source, copied to `Vendor/concentus` at the repo root
+    // (source + LICENSE + README-OSHI.md only — still no prebuilt jar).
+    ?: rootDir.resolve("Vendor/concentus/src/main/java").absolutePath
+
 sourceSets {
     main {
+        java.srcDir(vendoredConcentus)
         kotlin.srcDir(sharedV2Sources)
         kotlin.srcDir(sharedServiceSources)
         kotlin.srcDir(sharedEncryptionSources)
@@ -161,6 +175,13 @@ sourceSets {
             // `com.oshi.desktop.call.CallRatingClient`, which holds the same state in
             // `DesktopPaths` and calls straight into this policy.
             "**/CallRatingPolicy.kt",
+            // __VIDEO_REORDER_2026_09_23__ / __VIDEO_ABR_2026_09_23__ The video receive
+            // reorder window and the send-side rate ladder. No imports at all; shared so the
+            // phone and the desktop reassemble, skip, ask for keyframes and step bitrate by the
+            // SAME rules — a drift here would never fail to compile, it would just be a
+            // desktop that freezes where the phone does not.
+            "**/VideoReorderReassembler.kt",
+            "**/VideoRateController.kt",
             // __DEVSYNC_DIRECT_2026_09_22__ The own-device sync core
             // (docs/OSHI_DEVICE_SYNC_DIRECT.md): Noise XXpsk0, framing, diff/merge, linked-device
             // registry, sessions, LAN + relay plumbing. The whole `network/v2/devsync/` package is

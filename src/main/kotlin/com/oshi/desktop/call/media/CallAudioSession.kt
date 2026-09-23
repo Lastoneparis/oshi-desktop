@@ -257,6 +257,15 @@ open class CallAudioSession(
     /** __WB_POSTFILTER_2026_09_23__ receiver-side ADPCM hiss removal (see [WbPostFilter]). */
     private val wbRxPostFilter = WbPostFilter()
 
+    /**
+     * __OPUS_CODEC_2026_09_23__ Send 0x19 (Opus, ≤ 300 B/datagram, PESQ-WB ~4.2) — preferred
+     * over 0x18 when the peer advertised it, and flipped on by the first 0x19 received. The
+     * codec is Concentus compiled from `Vendor/concentus` (see [OpusCallEncoder]).
+     */
+    @Volatile var useOpus: Boolean = false
+    private var opusTx: OpusCallEncoder? = null
+    private var opusRx: OpusCallDecoder? = null
+
     /** Sealed frames handed to the socket. The outbound half of "audio is flowing". */
     val framesSent = java.util.concurrent.atomic.AtomicLong()
 
@@ -332,6 +341,15 @@ open class CallAudioSession(
         if (!replay.accept(decoded.seq)) return false
         // 0x05 AAC-ELD and 0x16 OshiCodec authenticate fine and are not decodable here.
         // Dropping them is correct; playing the compressed bytes as PCM is white noise.
+        if (decoded.audioType == CallMediaFrame.TYPE_OPUS) {
+            val dec = opusRx ?: OpusCallDecoder().also { opusRx = it }
+            val frames = dec.decode(decoded.pcm)
+            if (frames.isEmpty()) return false
+            useOpus = true
+            // Recovered / concealed frames first, then the new one — all in play order.
+            for (f in frames) playback.offer(f.le())
+            return true
+        }
         if (decoded.audioType == CallMediaFrame.TYPE_WB_ADPCM) {
             val pcm = WbAdpcmCodec.decodeToPcm48(decoded.pcm, wbRxResampler, wbRxPostFilter)
             if (pcm.isEmpty()) return false
@@ -359,6 +377,16 @@ open class CallAudioSession(
                 else consecutiveSilentFrames.set(0)
             }
             val pcm = if (muted) ByteArray(buf.size) else buf.copyOf()
+            if (useOpus) {
+                // One 20 ms read in ⇒ one payload out (older frames ride inside for recovery).
+                val enc = opusTx ?: OpusCallEncoder().also { opusTx = it }
+                val payloads = runCatching { enc.encodePcm48(pcm) }.getOrDefault(emptyList())
+                for (p in payloads) {
+                    val sealed = CallMediaFrame.encode(sessionKey, baseSalt, isCaller, sequence.next(), CallMediaFrame.TYPE_OPUS, p)
+                    if (runCatching { send(sealed) }.isSuccess) framesSent.incrementAndGet()
+                }
+                continue
+            }
             val wb = useWbAdpcm
             val sealed = CallMediaFrame.encode(
                 sessionKey, baseSalt, isCaller, sequence.next(),

@@ -54,22 +54,33 @@ mkdir -p "$M/network/v2/devsync" "$M/network/encryption" "$M/service" "$A/test/r
 cp "$J"/network/v2/{OSHICryptoV2,OSHICryptoV2Streaming,OSHIRatchetV2,V2Session,V2FileKeyMessage,V2RetryBudget}.kt "$M/network/v2/"
 cp "$J"/network/v2/devsync/*.kt "$M/network/v2/devsync/"
 cp "$J"/network/encryption/{PostQuantumKEM,RatchetSecurityMode}.kt "$M/network/encryption/"
-cp "$J"/service/{LlamaCpp,CallRatingPolicy}.kt "$M/service/"
+cp "$J"/service/{LlamaCpp,CallRatingPolicy,VideoReorderReassembler,VideoRateController}.kt "$M/service/"
+# Read by parity tests only, never compiled (they import android.* — the CI positive control).
+cp "$J"/network/v2/V2KeysClient.kt "$M/network/v2/"
+cp "$J"/service/LocalLLMManager.kt "$M/service/"
 cp "$SRC"/OSHI-Android/app/src/test/resources/*.json "$A/test/resources/"
 # GIF & sticker pack (byte-identical to iOS) — bundled into the installer on purpose.
 rsync -a --delete "$SRC/OSHI-Android/app/src/main/assets/GifPack" "$SRC/OSHI-Android/app/src/main/assets/StickerPack" "$A/main/assets/"
-if grep -l '^import android\.' "$M"/network/v2/*.kt "$M"/network/v2/devsync/*.kt \
-     "$M"/network/encryption/{PostQuantumKEM,RatchetSecurityMode}.kt "$M"/service/{LlamaCpp,CallRatingPolicy}.kt; then
+if grep -l '^import android\.' "$M"/network/v2/{OSHICryptoV2,OSHICryptoV2Streaming,OSHIRatchetV2,V2Session,V2FileKeyMessage,V2RetryBudget}.kt \
+     "$M"/network/v2/devsync/*.kt "$M"/network/encryption/{PostQuantumKEM,RatchetSecurityMode}.kt \
+     "$M"/service/{LlamaCpp,CallRatingPolicy,VideoReorderReassembler,VideoRateController}.kt; then
   echo "ABORT: android.* import in a shared source the desktop compiles" >&2; exit 1; fi
 
-echo "== 3/6 test fixtures"
+echo "== 3/6 test fixtures + vendored Opus (Concentus) SOURCE"
 mkdir -p "$PUB/docs/fixtures"
 rsync -a --exclude __pycache__ "$SRC/docs/fixtures/" "$PUB/docs/fixtures/"
+# Concentus 1.0.2 (BSD-3-Clause): .java sources + LICENSE + provenance README. Never a jar.
+mkdir -p "$PUB/Vendor"
+rsync -a --delete --include='*/' --include='*.java' --include='LICENSE' --exclude='*' \
+  "$SRC/Vendor/concentus/" "$PUB/Vendor/concentus/"
+cp "$SRC/Vendor/README-OSHI.md" "$PUB/Vendor/README-OSHI.md"
+if find "$PUB/Vendor" -type f ! -name '*.java' ! -name LICENSE ! -name README-OSHI.md | grep -q .; then
+  echo "ABORT: non-source file under Vendor/" >&2; exit 1; fi
 
 echo "== 4/6 secret / private-file scan"
 cd "$PUB"
 git add -A
-BAD=$(git diff --cached --name-only | grep -Ei '\.(pem|jks|keystore|p12|key|mov|mp4|pyc)$|google-services|local\.properties' || true)
+BAD=$(git diff --cached --name-only | grep -Ei '\.(pem|jks|keystore|p12|key|mov|mp4|pyc|jar|class|so|dll|dylib|a)$|google-services|local\.properties|ServerPatches/' | grep -v '^gradle/wrapper/gradle-wrapper\.jar$' || true)
 [ -z "$BAD" ] || { echo "ABORT: private files staged:"; echo "$BAD"; exit 1; }
 if git diff --cached -U0 | grep -E '^\+' | grep -Ei 'OshiTurn2026|static-auth-secret|BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{30,}|AIza[0-9A-Za-z_-]{30,}|/Users/[A-Za-z]+/'; then
   echo "ABORT: possible secret or personal path in the diff" >&2; exit 1; fi

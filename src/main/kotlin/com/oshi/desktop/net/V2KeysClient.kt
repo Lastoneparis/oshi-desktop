@@ -136,6 +136,8 @@ class V2KeysClient(
                 }
             })
             deviceId?.let { put("deviceId", it) }
+            // __LEGACY_COMPAT_2026_09_23__ "reads v2 groups": phones skip the legacy group copy for us.
+            put("caps", V2ConfigGate.CAP_GROUP_V2)
         }
         return body.toString().toByteArray(Charsets.UTF_8)
     }

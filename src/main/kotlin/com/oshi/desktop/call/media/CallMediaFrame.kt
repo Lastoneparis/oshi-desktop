@@ -112,6 +112,9 @@ object CallMediaFrame {
     /** `0x18` — wideband IMA-ADPCM 16 kHz ([WbAdpcmCodec]); emitted when the peer advertised 0x10. */
     const val TYPE_WB_ADPCM = 0x18
 
+    /** `0x19` — Opus 48 kHz ([OpusCallEncoder]); emitted when the peer advertised 0x20. */
+    const val TYPE_OPUS = 0x19
+
     /** type(1) + seq(8). */
     const val HEADER_SIZE = 9
 
