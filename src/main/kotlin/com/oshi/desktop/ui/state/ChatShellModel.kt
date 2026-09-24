@@ -596,7 +596,13 @@ class ChatShellModel(
      * group media fan-out on this client at all — `sendGroupText` carries text — so an attach
      * button that appeared to work in a group would upload a blob nobody receives.
      */
-    fun attach(file: File, mediaType: MediaType? = null, discardAfterSend: Boolean = false) {
+    fun attach(
+        file: File,
+        mediaType: MediaType? = null,
+        discardAfterSend: Boolean = false,
+        /** __VIDEO_NOTE_2026_09_24__ send as a round video note (the file is a sealed MP4 kept for our own bubble). */
+        videoNote: com.oshi.desktop.media.VideoNoteWire.Meta? = null,
+    ) {
         val target = synchronized(lock) {
             val id = selectedId
             val composer = composerFor(id)
@@ -623,9 +629,9 @@ class ChatShellModel(
         worker.execute {
             val result = try {
                 // __GROUP_E2E_V2_2026_09_23__ group media: one sealed file, one blob per member (spec §4).
-                if (group) client.sendGroupFile(target, file)?.let(::groupSendResult)
+                if (group) client.sendGroupFile(target, file, videoNote = videoNote)?.let(::groupSendResult)
                     ?: SendResult(dt("desktop.group.media.refused"), Severity.ERROR, keepDraft = false)
-                else directSendResult(client.sendFile(target, file, mediaType))
+                else directSendResult(client.sendFile(target, file, mediaType, videoNote))
             } catch (e: Exception) {
                 if (discardAfterSend) runCatching { file.delete() }
                 synchronized(lock) {
@@ -1524,6 +1530,10 @@ class ChatShellModel(
             // __DESKTOP_CALL_UI_2026_09_23__ a call-history row carries a KEY; draw it localized.
             com.oshi.desktop.msg.CallSummary.isCallSummary(m.content) -> com.oshi.desktop.msg.CallSummary.render(m.content!!) { t(it) }
             env != null -> env.content
+            // __VIDEO_NOTE_2026_09_24__ a round note has no caption box (spec §4): its `content`
+            // is the informative filename, which the circle must not print under itself.
+            m.videoNote && m.mediaType == com.oshi.desktop.store.MediaType.VIDEO &&
+                (m.content == null || m.content.endsWith(".mp4", ignoreCase = true)) -> ""
             m.mediaRef != null -> m.content.orEmpty()
             else -> m.content ?: "(deleted)"
         },
@@ -1544,6 +1554,8 @@ class ChatShellModel(
         edited = m.editedAtMs != null,
         deleted = m.isDeletedForEveryone,
         reactions = m.reactions.keys.sorted().joinToString(""),
+        videoNote = !m.isDeletedForEveryone && m.videoNote && m.mediaType == com.oshi.desktop.store.MediaType.VIDEO,
+        mediaDurationMs = m.mediaDurationMs,
     )
     }
 
@@ -1554,6 +1566,8 @@ class ChatShellModel(
         com.oshi.desktop.msg.ReplyEnvelope.isWrapped(m.content) ->
             com.oshi.desktop.msg.ReplyEnvelope.unwrap(m.content)?.content ?: m.content.orEmpty()
         com.oshi.desktop.msg.CallSummary.isCallSummary(m.content) -> com.oshi.desktop.msg.CallSummary.render(m.content!!) { t(it) }
+        // __VIDEO_NOTE_2026_09_24__ spec §4: the list says "Video message", not a filename.
+        m.videoNote && m.mediaType == com.oshi.desktop.store.MediaType.VIDEO -> t("videonote.title")
         m.mediaRef != null -> "[${m.mediaType?.wire ?: "file"}] " + m.content.orEmpty()
         else -> m.content.orEmpty()
     }.replace('\n', ' ').take(80)
@@ -1795,6 +1809,10 @@ data class MessageRow(
     val forwardedFrom: String? = null,
     /** __MENTIONS_2026_09_23__ `@name` targets, highlighted in the bubble (MentionWire). */
     val mentions: List<com.oshi.desktop.group.MentionWire.Mention> = emptyList(),
+    /** __VIDEO_NOTE_2026_09_24__ draw [attachment] as a round video note (VIDEO_NOTE_SPEC §4). */
+    val videoNote: Boolean = false,
+    /** The note's announced duration, when the sender stated one; else read from the file. */
+    val mediaDurationMs: Long? = null,
 )
 
 /** A reply's quote block, and the composer's "replying to" banner. */

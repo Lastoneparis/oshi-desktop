@@ -616,6 +616,8 @@ private fun MessagesDestination(
                             onAttach = { onPickFile()?.let { model.attach(it) } },
                             onVoiceNote = { model.attach(it.file, it.mediaType, discardAfterSend = true) },
                             onGif = { model.attach(it, com.oshi.desktop.store.MediaType.IMAGE) },   // __GIF_PACK_2026_09_23__
+                            // __VIDEO_NOTE_2026_09_24__ the sealed MP4 stays as our own bubble (not discarded).
+                            onVideoNote = { file, meta -> model.attach(file, com.oshi.desktop.store.MediaType.VIDEO, videoNote = meta) },
                             onRenameGroup = { model.renameGroup(thread.conversationId, it) },
                             onReact = model::react,
                             onEditMessage = model::editMessage,

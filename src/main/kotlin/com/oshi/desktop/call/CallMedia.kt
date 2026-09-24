@@ -16,6 +16,7 @@ import com.oshi.desktop.call.transport.RelayTokenSource
 import com.oshi.desktop.call.transport.StunBinding
 import com.oshi.desktop.call.transport.TlsLink
 import com.oshi.desktop.call.transport.TurnClient
+import com.oshi.desktop.call.transport.TxCarrierPolicy
 import com.oshi.desktop.call.transport.TurnLink
 import com.oshi.desktop.call.transport.UdpLink
 import com.oshi.desktop.call.transport.WsRelayClient
@@ -193,7 +194,11 @@ class CallMediaLeg internal constructor(
         object : MediaSocket.Listener {
 
             override fun onSealedMedia(sealed: ByteArray, from: InetSocketAddress): Boolean {
+                // Test seam: a direct path whose pings/pongs work but whose MEDIA never
+                // arrives here — the one-way shape measured with a real Samsung.
+                if (dropInboundP2pMediaForTest) return true
                 lastP2pRxMs = System.currentTimeMillis()
+                rxP2p.incrementAndGet()
                 return deliver(sealed, viaP2p = true)
             }
 
@@ -243,9 +248,24 @@ class CallMediaLeg internal constructor(
     @Volatile private var lastP2pAudioRxMs = 0L
     @Volatile private var selectedSinceMs = 0L
 
-    /** Media handed to the :8089 relay / received from it. */
+    /** Media handed to the :8089 relay / received from it (either relay, for the latter). */
     val relaySent = AtomicLong()
     val relayReceived = AtomicLong()
+
+    /** Per-carrier counters: what left on the selected pair, what arrived on each carrier. */
+    val txP2p = AtomicLong()
+    val rxP2p = AtomicLong()
+    val rxUdpRelay = AtomicLong()
+    val rxWs = AtomicLong()
+
+    /** Test seam: swallow media arriving on the direct path (pings/pongs unaffected). */
+    @Volatile internal var dropInboundP2pMediaForTest = false
+
+    /** The phones' one-carrier-per-frame policy — see [TxCarrierPolicy]. */
+    internal val txPolicy = TxCarrierPolicy()
+
+    /** When the peer's media (audio, or any media on a leg without audio) last authenticated, on any carrier. */
+    @Volatile private var lastPeerMediaRxMs = 0L
 
     /** The TURN allocation this leg advertises, or null. */
     val turnAllocation: TurnClient.Allocation? get() = turn?.allocation
@@ -286,11 +306,16 @@ class CallMediaLeg internal constructor(
         // Video and video control first: `0xF1`, the 9-byte cleartext `0x0B/0x0C/0x0D`
         // and the sealed `0x0E/0x0F`. None of them is audio, and handing `0x0E` to the
         // audio session would burn its sequence number in the audio replay window.
-        if (videoSession?.onMedia(sealed) == true) return true
+        if (videoSession?.onMedia(sealed) == true) {
+            if (audioSession == null) lastPeerMediaRxMs = System.currentTimeMillis()
+            return true
+        }
         val audio = audioSession ?: return false
         if (audio.onFrame(sealed)) {
             framesAccepted.incrementAndGet()
-            if (viaP2p) lastP2pAudioRxMs = System.currentTimeMillis()
+            val now = System.currentTimeMillis()
+            lastPeerMediaRxMs = now
+            if (viaP2p) lastP2pAudioRxMs = now
             if (diagRxFirst.compareAndSet(false, true)) {
                 log("DIAG_RX_AUDIO_FIRST | path=${if (viaP2p) "p2p" else "relay"} | size=${sealed.size} | decryptOk=true")
             }
@@ -384,52 +409,92 @@ class CallMediaLeg internal constructor(
     }
 
     /**
-     * THE CARRIER LADDER, the phones' order (`VoiceCallManager.swift` sendAudioPacket,
-     * `EnhancedCallManager.kt` `AudioTxPrimary { P2P, UDP_RELAY, WS }`):
+     * THE CARRIER LADDER: ONE carrier per frame, the phones' policy ([TxCarrierPolicy],
+     * iOS `chooseAudioTxPrimary`, Android `AudioTxPrimary`). P2P only while P2P is
+     * delivering the peer's AUDIO to us; else the relay or WebSocket relay that is
+     * delivering; else a blackout rotation; else availability. The previous carrier is
+     * mirrored for two seconds after each change.
      *
-     *  1. **P2P** — the selected pair, direct or through our TURN allocation — whenever
-     *     one is selected.
-     *  2. **The :8089 relay** when P2P is not healthy: no pair selected, or a pair
-     *     selected for more than [P2P_GRACE_MS] that has not delivered media for
-     *     [P2P_STALE_MS] (Android's `p2pCanCarryAudio`, the "pongs fine, black-holes media"
-     *     fix). Both may carry the same packet during a hand-over; the receiver's replay
-     *     windows drop the duplicate, which is why the phones mirror too.
-     *  3. **The WebSocket relay** when P2P is not healthy and `:8089` is not usable (no
-     *     register ack inside [UdpRelayClient.STALE_MS] — every UDP datagram to the server
-     *     blocked). The server bridges carriers, so the peer receives on whichever one IT
-     *     registered — `:8089` first, its WebSocket otherwise.
+     * It used to send on the selected pair ALWAYS and add the relay when P2P went quiet.
+     * The phone then kept receiving our direct audio, kept its own P2P "healthy" and kept
+     * sending direct into a path that never reached us — measured with a real iPhone
+     * (CONNECTION_LOST) and a real Samsung (5 frames/s, "signal faible") on 2026-09-23.
      */
     fun sendMedia(sealed: ByteArray): Boolean {
         val now = System.currentTimeMillis()
-        val sel = selected
-        var sent = false
-        if (sel != null) sent = socket.sendSealed(sealed)
         val isVideo = sealed.isNotEmpty() && (sealed[0].toInt() and 0xFF) == VideoMediaFrame.TYPE_VIDEO
-        if (if (isVideo || audioSession == null) p2pHealthy(now) else p2pAudioHealthy(now)) {
-            diagTx("P2P", isVideo, sealed.size)
-            return sent
+        val audioLed = audioSession != null
+        // Video follows audio's decision (it must not advance the blackout rotation);
+        // a video-only leg decides on its own evidence.
+        val primary = if (isVideo && audioLed) {
+            txPolicy.current ?: txPolicy.choose(now, evidence(now, forAudio = true), advance = false)
+        } else {
+            txPolicy.choose(now, evidence(now, forAudio = audioLed))
         }
-        val relay = udpRelay
-        if (relay != null && relay.usable(now)) {
-            if (relay.send(sealed)) { relaySent.incrementAndGet(); sent = true }
-            diagTx("UDP_RELAY", isVideo, sealed.size)
-            return sent
-        }
-        val ws = wsRelay
-        if (ws != null && ws.usable(now)) {
-            if (ws.send(sealed)) { wsSent.incrementAndGet(); sent = true }
-            diagTx("WS_RELAY", isVideo, sealed.size)
-        } else if (sel != null) {
-            diagTx("P2P_UNVERIFIED", isVideo, sealed.size)
-        }
+        var sent = primary != null && sendOn(primary, sealed)
+        val mirror = txPolicy.mirror(now)
+        // The mirror copy goes out WITHOUT the DIAG_TX log: logging it made the diagnostics
+        // read every mirrored packet as a carrier switch (hundreds of phantom "switches").
+        if (mirror != null && mirror != primary && sendOnCarrier(mirror, sealed)) sent = true
         return sent
     }
 
-    /** [p2pHealthy] for audio: the pair must be carrying AUDIO, not just any media. */
+    private fun sendOn(carrier: TxCarrierPolicy.Carrier, sealed: ByteArray): Boolean {
+        val isVideo = sealed.isNotEmpty() && (sealed[0].toInt() and 0xFF) == VideoMediaFrame.TYPE_VIDEO
+        diagTx(carrier.name, isVideo, sealed.size)
+        return sendOnCarrier(carrier, sealed)
+    }
+
+    private fun sendOnCarrier(carrier: TxCarrierPolicy.Carrier, sealed: ByteArray): Boolean = when (carrier) {
+        TxCarrierPolicy.Carrier.P2P ->
+            (selected != null && runCatching { socket.sendSealed(sealed) }.getOrDefault(false)).also { if (it) txP2p.incrementAndGet() }
+        TxCarrierPolicy.Carrier.UDP_RELAY -> {
+            val r = udpRelay
+            (r != null && runCatching { r.send(sealed) }.getOrDefault(false)).also { if (it) relaySent.incrementAndGet() }
+        }
+        TxCarrierPolicy.Carrier.WS -> {
+            val w = wsRelay
+            (w != null && runCatching { w.send(sealed) }.getOrDefault(false)).also { if (it) wsSent.incrementAndGet() }
+        }
+    }
+
+    private fun evidence(now: Long, forAudio: Boolean): TxCarrierPolicy.Evidence {
+        val relay = udpRelay
+        val ws = wsRelay
+        return TxCarrierPolicy.Evidence(
+            p2pHealthy = if (forAudio) p2pAudioHealthy(now) else p2pHealthy(now),
+            // A pair that has delivered NOTHING since its grace ended is not probed in a
+            // blackout: re-sending on it keeps the peer's P2P "healthy" (it still receives
+            // us) and the peer never leaves it — the deadlock CarrierConvergenceTest caught.
+            p2pPlausible = selected != null &&
+                (now - selectedSinceMs < P2P_GRACE_MS || (lastP2pRxMs > 0 && now - lastP2pRxMs < P2P_QUIET_KEEP_MS)),
+            relayUsable = relay?.usable(now) == true,
+            relayDelivering = relay?.delivering(now, TxCarrierPolicy.LIVENESS_MS) == true,
+            wsAvailable = ws != null,
+            wsUsable = ws?.usable(now) == true,
+            wsDelivering = ws?.delivering(now, TxCarrierPolicy.LIVENESS_MS) == true,
+            anythingArriving = lastPeerMediaRxMs > 0 && now - lastPeerMediaRxMs < TxCarrierPolicy.LIVENESS_MS,
+        )
+    }
+
+    /** One line for diagnostics: the chosen carrier and every per-carrier counter. */
+    fun carrierStats(): String =
+        "tx=${txPolicy.current ?: "none"} switches=${txPolicy.switches} " +
+            "p2p tx/rx=${txP2p.get()}/${rxP2p.get()} udpRelay tx/rx=${relaySent.get()}/${rxUdpRelay.get()} " +
+            "ws tx/rx=${wsSent.get()}/${rxWs.get()}"
+
+    /**
+     * [p2pHealthy] for audio: the pair must be carrying the peer's AUDIO — unless the peer
+     * is sending no audio anywhere (a muted Android sends only a keep-alive every 3 s), in
+     * which case a pair that still delivers packets stays healthy.
+     */
     private fun p2pAudioHealthy(now: Long): Boolean {
         if (selected == null) return false
         if (now - selectedSinceMs < P2P_GRACE_MS) return true
-        return lastP2pAudioRxMs > 0 && now - lastP2pAudioRxMs < P2P_STALE_MS
+        if (lastP2pAudioRxMs > 0 && now - lastP2pAudioRxMs < P2P_STALE_MS) return true
+        val audioElsewhere = lastPeerMediaRxMs > 0 && now - lastPeerMediaRxMs < P2P_STALE_MS
+        if (audioElsewhere) return false
+        return lastP2pRxMs > 0 && now - lastP2pRxMs < P2P_QUIET_KEEP_MS
     }
 
     private fun p2pHealthy(now: Long): Boolean {
@@ -545,6 +610,7 @@ class CallMediaLeg internal constructor(
                     r.onPayload = { payload ->
                         if (!closed.get()) {
                             relayReceived.incrementAndGet()
+                            rxUdpRelay.incrementAndGet()
                             deliver(payload)
                         }
                     }
@@ -560,6 +626,7 @@ class CallMediaLeg internal constructor(
                     w.onPayload = { payload ->
                         if (!closed.get()) {
                             relayReceived.incrementAndGet()
+                            rxWs.incrementAndGet()
                             deliver(payload)
                         }
                     }
@@ -713,6 +780,13 @@ class CallMediaLeg internal constructor(
         /** Android `P2P_INBOUND_STALE_MS`: no media on P2P for this long = unhealthy. */
         const val P2P_STALE_MS = 2_000L
 
+        /**
+         * A pair that delivered ANY packet this recently is kept while the peer sends no
+         * audio at all (muted Android keep-alive every 3 s), and is still probed in a
+         * blackout. Longer than the 3 s keep-alive, shorter than the path watchdog.
+         */
+        const val P2P_QUIET_KEEP_MS = 4_000L
+
         /** How recent relay media must be for the watchdog to count the relay as a path. */
         const val RELAY_LIVENESS_MS = 5_000L
 
@@ -835,7 +909,7 @@ object CallMedia {
                     datagram = datagram,
                     audioFor = { send ->
                         CallAudioSession(spec.sessionKey, spec.nonceSalt, spec.isCaller, send)
-                            .also { it.useWbAdpcm = spec.wbAdpcm; it.useOpus = spec.opus }
+                            .also { it.useWbAdpcm = spec.wbAdpcm; it.useOpus = spec.opus; it.log = log }
                     },
                     videoFor = { send, nextSeq ->
                         CallVideoSession(spec.sessionKey, spec.nonceSalt, spec.isCaller, send, nextSeq, log = log)

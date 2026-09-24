@@ -189,6 +189,14 @@ sourceSets {
             // this build already reads. The Android seams (`CallDiag`, `CallLogKey`) are NOT
             // included: they are Context + Keystore.
             "**/CallFileLogger.kt",
+            // __VIDEO_NOTE_2026_09_24__ The round-video-note wire rules (docs/VIDEO_NOTE_SPEC.md):
+            // `service/media/VideoNote.kt` — key names, the true-or-absent emit rule, the tolerant
+            // duration read, the group merge and the 15 s cap. Only `org.json`, no `android.*`.
+            // Shared because the shared `V2FileKeyMessage.kt` now calls it, and because a copy of
+            // a receiver rule that drifted would never fail to compile — it would just draw a
+            // round bubble on one platform and a square one on another.
+            // (relative to the shared `service/` srcDir, hence no `**/` prefix)
+            "media/VideoNote.kt",
             // __DEVSYNC_DIRECT_2026_09_22__ The own-device sync core
             // (docs/OSHI_DEVICE_SYNC_DIRECT.md): Noise XXpsk0, framing, diff/merge, linked-device
             // registry, sessions, LAN + relay plumbing. The whole `network/v2/devsync/` package is
@@ -551,12 +559,19 @@ dependencies {
 
     // PARITY.md row 2.1. OPT-IN — see the WEBRTC block above for the whole justification
     // and for why the SHIPPING media path needs none of this.
+    //
+    // __CALL_APM_2026_09_23__ ALWAYS ON, for ONE class: `dev.onvoid.webrtc.media.audio.
+    // AudioProcessing` — WebRTC's audio-processing module (AEC3 echo canceller, noise
+    // suppression, AGC2), used by `call/media/EchoControl.kt` on the shipping PCM path. No
+    // WebRTC transport, SDP or codec is used: the `call/webrtc/**` sources stay excluded
+    // unless -PwithWebRtc=true. Why: the desktop had NO echo control, and a real iPhone
+    // call (2026-09-23) heard its own voice back plus the Mac's mic hiss; the iPhone uses
+    // Apple's voice processing (`VoiceCallManager.swift:9645`). Where no native exists
+    // (windows-aarch64), EchoControl logs it and the call keeps the raw path.
     val nativeClassifier = webrtcNativeClassifier
-    if (withWebRtc) {
-        implementation("dev.onvoid.webrtc:webrtc-java:$webrtcVersion")
-        if (nativeClassifier != null) {
-            implementation("dev.onvoid.webrtc:webrtc-java:$webrtcVersion:$nativeClassifier")
-        }
+    implementation("dev.onvoid.webrtc:webrtc-java:$webrtcVersion")
+    if (nativeClassifier != null) {
+        implementation("dev.onvoid.webrtc:webrtc-java:$webrtcVersion:$nativeClassifier")
     }
     if (withWebRtc && nativeClassifier == null) {
         logger.warn(

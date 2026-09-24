@@ -1193,8 +1193,14 @@ class OshiClient(
      *        every photo, clip and voice note this client sent arrived on a phone as a
      *        file attachment: no thumbnail, no player, "Download" instead of an image.
      */
-    fun sendFile(peerAddress: String, file: File, mediaType: MediaType? = null): SendOutcome {
-        val mime = probeMime(file)
+    fun sendFile(
+        peerAddress: String,
+        file: File,
+        mediaType: MediaType? = null,
+        /** __VIDEO_NOTE_2026_09_24__ a round video note (docs/VIDEO_NOTE_SPEC.md); null = ordinary. */
+        videoNote: com.oshi.desktop.media.VideoNoteWire.Meta? = null,
+    ): SendOutcome {
+        val mime = if (videoNote != null) com.oshi.desktop.media.VideoNoteWire.MIME else probeMime(file)
         return sendMedia(
             peerAddress = peerAddress,
             // Through the vault: a GIF from GifOutbox is sealed at rest (a user's own file
@@ -1202,8 +1208,9 @@ class OshiClient(
             bytes = mediaVault.openStream(file).use { it.readBytes() },
             filename = file.name,
             mime = mime,
-            mediaType = mediaType ?: MediaType.forMime(mime),
+            mediaType = if (videoNote != null) MediaType.VIDEO else mediaType ?: MediaType.forMime(mime),
             localRef = file.absolutePath,
+            videoNote = videoNote,
         )
     }
 
@@ -1239,6 +1246,7 @@ class OshiClient(
         mime: String,
         mediaType: MediaType,
         localRef: String?,
+        videoNote: com.oshi.desktop.media.VideoNoteWire.Meta? = null,
     ): SendOutcome {
         if (BlockPolicy.outgoingText(contacts, peerAddress) == BlockPolicy.Outbound.REFUSE_BLOCKED) {
             return SendOutcome.BLOCKED
@@ -1263,6 +1271,9 @@ class OshiClient(
             filename = filename,
             mime = mime,
             mediaType = com.oshi.desktop.gif.GifWire.label(mediaType, mime),   // __GIF_PACK_2026_09_23__
+            // __VIDEO_NOTE_2026_09_24__ spec §2.A, on the SHARED key message: `true` or absent.
+            videoNote = if (videoNote != null && mediaType == MediaType.VIDEO) true else null,
+            durationMs = videoNote?.takeIf { mediaType == MediaType.VIDEO }?.wireDurationMs,
         )
         val sent = router.sendText(peerAddress, key.toBytes(), msgId)
         if (sent) messagePush.wakeDirect(peerAddress, msgId)   // __DESKTOP_MESSAGE_PUSH_2026_09_23__
@@ -1280,6 +1291,8 @@ class OshiClient(
                 sentAtSource = TimestampSource.LOCAL_CLOCK,
                 deliveryStatus = if (sent) DeliveryStatus.SENT else DeliveryStatus.FAILED,
                 transport = if (sent) "relay-v2" else "none",
+                videoNote = videoNote != null && mediaType == MediaType.VIDEO,
+                mediaDurationMs = videoNote?.durationMs?.takeIf { mediaType == MediaType.VIDEO },
             )
         )
         contacts.seen(peerAddress, now)
@@ -1770,13 +1783,20 @@ class OshiClient(
      * the `v2file` key JSON + `groupMessage` (media stripped). Over the blob cap ⇒ refused.
      * Never inline, never IPFS. No self copy (devsync brings media).
      */
-    fun sendGroupFile(groupId: String, file: File, caption: String? = null): GroupSendReport? {
+    fun sendGroupFile(
+        groupId: String,
+        file: File,
+        caption: String? = null,
+        /** __VIDEO_NOTE_2026_09_24__ spec §2.B: flagged in the v2file JSON AND the GroupMessage. */
+        videoNote: com.oshi.desktop.media.VideoNoteWire.Meta? = null,
+    ): GroupSendReport? {
         val g = groups.get(groupId) ?: return null
         if (!config.isEnabledCached()) return null
         val bytes = mediaVault.openStream(file).use { it.readBytes() }   // sealed GIF or a user's own file
         if (bytes.isEmpty() || bytes.size > V2BlobClient.MAX_PLAINTEXT_BYTES) return null
-        val mime = probeMime(file)
+        val mime = if (videoNote != null) com.oshi.desktop.media.VideoNoteWire.MIME else probeMime(file)
         val mediaType = MediaType.forMime(mime)
+        val note = videoNote?.takeIf { mediaType == MediaType.VIDEO }
         val groupType = when (mediaType) {
             MediaType.IMAGE -> GroupMessageWire.GroupMediaType.PHOTO
             MediaType.VIDEO -> GroupMessageWire.GroupMediaType.VIDEO
@@ -1791,6 +1811,7 @@ class OshiClient(
                 messageId = msgId, groupId = g.groupId, senderPublicKey = address,
                 body = "", timestampUnixMillis = now, mediaType = groupType,
                 plaintextContent = caption?.takeIf { it.isNotEmpty() }, mediaFileName = file.name,
+                videoNote = note,
             )
         )
         val enc = OSHICryptoV2.encryptFile(bytes, file.name, mime)
@@ -1801,6 +1822,8 @@ class OshiClient(
                 blobId = blobId, fileKey = enc.fileKey, fileNonce = enc.fileNonce,
                 chunkCount = enc.chunks.size, manifest = enc.manifest, filename = file.name,
                 mime = mime, mediaType = groupType.raw, groupMessage = groupMessage,
+                // __VIDEO_NOTE_2026_09_24__ spec §2.B: in the key message AND in the GroupMessage.
+                videoNote = if (note != null) true else null, durationMs = note?.wireDurationMs,
             ).toBytes()
         }
         messagePush.wakeGroup(report.reached, g.groupId, msgId)   // __DESKTOP_MESSAGE_PUSH_2026_09_23__ §2.5 media
@@ -1818,6 +1841,8 @@ class OshiClient(
                 sentAtSource = TimestampSource.LOCAL_CLOCK,
                 deliveryStatus = if (report.delivered) DeliveryStatus.SENT else DeliveryStatus.FAILED,
                 transport = if (report.sent > 0) "relay-v2" else "none",
+                videoNote = note != null,
+                mediaDurationMs = note?.durationMs,
             )
         )
         groups.put(g.copy(lastActivityUnixMillis = now))
@@ -2178,7 +2203,8 @@ class OshiClient(
         //    `v2file` key on it is GROUP media (§4), never 1:1 media.
         if (!inbound.groupId.isNullOrBlank()) {
             val key = V2FileKeyMessage.parse(text)
-            if (key != null) receiveGroupMedia(inbound, key) else receiveGroupMessage(inbound)
+            if (key != null) receiveGroupMedia(inbound, key, com.oshi.desktop.media.VideoNoteWire.fromKey(key))
+            else receiveGroupMessage(inbound)
             return
         }
 
@@ -2205,7 +2231,7 @@ class OshiClient(
         // 4. Media: a `{"kind":"v2file"}` key message. Parsed before the control catalog
         //    because it carries no sentinel at all and would otherwise read as prose.
         V2FileKeyMessage.parse(text)?.let { key ->
-            receiveMedia(inbound, key)
+            receiveMedia(inbound, key, com.oshi.desktop.media.VideoNoteWire.fromKey(key))
             return
         }
 
@@ -2512,7 +2538,11 @@ class OshiClient(
      * the §3 checks run BEFORE any download, then the bytes are fetched from THIS member's blob
      * and sealed at rest like 1:1 media.
      */
-    private fun receiveGroupMedia(inbound: V2Inbound, key: V2FileKeyMessage) {
+    private fun receiveGroupMedia(
+        inbound: V2Inbound,
+        key: V2FileKeyMessage,
+        videoNote: com.oshi.desktop.media.VideoNoteWire.Meta? = null,
+    ) {
         val payload = key.groupMessage?.let { GroupMessageWire.decodeFromEnvelope(it) }
         if (payload == null || payload.isSystem) {
             log("client: group media key without a usable groupMessage from ${inbound.from.take(12)}… — dropped")
@@ -2555,6 +2585,11 @@ class OshiClient(
             sentAtSource = TimestampSource.RELAY_ENVELOPE_MS,
             deliveryStatus = DeliveryStatus.DELIVERED,
             transport = "relay-v2",
+            // __VIDEO_NOTE_2026_09_24__ spec rule 5: either location flags it (the key message's
+            // copy was already merged with the GroupMessage's by `VideoNoteWire.fromKey`).
+            videoNote = mediaType == MediaType.VIDEO && (videoNote ?: payload.videoNote) != null,
+            mediaDurationMs = (videoNote?.durationMs ?: payload.videoNote?.durationMs)
+                ?.takeIf { mediaType == MediaType.VIDEO },
         )
         val outcome = messages.append(stored)
         contacts.seen(inbound.from, inbound.ts)
@@ -2597,7 +2632,11 @@ class OshiClient(
      * no `mediaRef` — the message EXISTS and its bytes do not, and those are two different
      * facts.
      */
-    private fun receiveMedia(inbound: V2Inbound, key: V2FileKeyMessage) {
+    private fun receiveMedia(
+        inbound: V2Inbound,
+        key: V2FileKeyMessage,
+        videoNote: com.oshi.desktop.media.VideoNoteWire.Meta? = null,
+    ) {
         val safeName = key.filename.replace(Regex("[^A-Za-z0-9._-]"), "_").take(120).ifEmpty { "file" }
         val out = File(mediaDir, "${inbound.msgId.take(8)}-$safeName")
         val written = blobs.downloadAndDecryptToFile(
@@ -2665,6 +2704,9 @@ class OshiClient(
             deliveryStatus = DeliveryStatus.DELIVERED,
             transport = "relay-v2",
             isViewOnce = key.isViewOnce == true,
+            // __VIDEO_NOTE_2026_09_24__ `VideoNoteWire.fromKey` already refused a flag on a non-video.
+            videoNote = videoNote != null,
+            mediaDurationMs = videoNote?.durationMs,
         )
         val outcome = messages.append(stored)
         contacts.seen(inbound.from, inbound.ts)

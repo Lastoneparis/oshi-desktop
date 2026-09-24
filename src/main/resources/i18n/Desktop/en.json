@@ -141,5 +141,13 @@
   "desktop.call.devices.default": "System default",
   "desktop.call.devices.next_call": "Microphone and speaker changes apply from your next call.",
   "desktop.call.devices.camera_default_only": "This Mac uses its default camera.",
-  "desktop.call.missed.notification": "Missed call"
+  "desktop.call.missed.notification": "Missed call",
+  "desktop.videonote.unavailable": "Video messages need a camera: %@",
+  "desktop.videonote.starting": "Opening the camera…",
+  "desktop.videonote.capped": "15-second limit reached",
+  "desktop.videonote.hint.recording": "Enter stops · Esc cancels",
+  "desktop.videonote.hint.preview": "Enter sends · Space plays · Esc discards",
+  "desktop.videonote.play": "Play video message",
+  "desktop.videonote.unplayable": "This video message could not be played on this computer.",
+  "desktop.videonote.missing": "Video message not on this computer any more."
 }

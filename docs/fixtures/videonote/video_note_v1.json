@@ -1,0 +1,72 @@
+{
+  "spec": "docs/VIDEO_NOTE_SPEC.md §1 receiver rules and §6 test vectors",
+  "note": "Each plaintext is the exact ratchet plaintext of a v2file key message. Every platform must derive isVideoNote/durationMs as listed (durationMs null = unknown) and must still decode the message as a media message.",
+  "vectors": [
+    {
+      "name": "1_spec_2A_note",
+      "plaintext": "{\"kind\":\"v2file\",\"blobId\":\"b_5f3c0a\",\"fileKey\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"fileNonce\":\"AAECAwQFBgc=\",\"chunkCount\":1,\"manifest\":\"AAECAwQFBgcICQoLDA0ODw==\",\"filename\":\"videonote_1758711234567.mp4\",\"mime\":\"video/mp4\",\"mediaType\":\"video\",\"videoNote\":true,\"durationMs\":12480}",
+      "isVideoNote": true,
+      "durationMs": 12480
+    },
+    {
+      "name": "2_keys_removed_normal_video",
+      "plaintext": "{\"kind\":\"v2file\",\"blobId\":\"b_5f3c0a\",\"fileKey\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"fileNonce\":\"AAECAwQFBgc=\",\"chunkCount\":1,\"manifest\":\"AAECAwQFBgcICQoLDA0ODw==\",\"filename\":\"videonote_1758711234567.mp4\",\"mime\":\"video/mp4\",\"mediaType\":\"video\"}",
+      "isVideoNote": false,
+      "durationMs": null
+    },
+    {
+      "name": "3_videoNote_false",
+      "plaintext": "{\"kind\":\"v2file\",\"blobId\":\"b_5f3c0a\",\"fileKey\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"fileNonce\":\"AAECAwQFBgc=\",\"chunkCount\":1,\"manifest\":\"AAECAwQFBgcICQoLDA0ODw==\",\"filename\":\"videonote_1758711234567.mp4\",\"mime\":\"video/mp4\",\"mediaType\":\"video\",\"videoNote\":false,\"durationMs\":12480}",
+      "isVideoNote": false,
+      "durationMs": null
+    },
+    {
+      "name": "4a_duration_over_cap_clamped",
+      "plaintext": "{\"kind\":\"v2file\",\"blobId\":\"b_5f3c0a\",\"fileKey\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"fileNonce\":\"AAECAwQFBgc=\",\"chunkCount\":1,\"manifest\":\"AAECAwQFBgcICQoLDA0ODw==\",\"filename\":\"videonote_1758711234567.mp4\",\"mime\":\"video/mp4\",\"mediaType\":\"video\",\"videoNote\":true,\"durationMs\":99999}",
+      "isVideoNote": true,
+      "durationMs": 15000
+    },
+    {
+      "name": "4b_duration_negative_unknown",
+      "plaintext": "{\"kind\":\"v2file\",\"blobId\":\"b_5f3c0a\",\"fileKey\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"fileNonce\":\"AAECAwQFBgc=\",\"chunkCount\":1,\"manifest\":\"AAECAwQFBgcICQoLDA0ODw==\",\"filename\":\"videonote_1758711234567.mp4\",\"mime\":\"video/mp4\",\"mediaType\":\"video\",\"videoNote\":true,\"durationMs\":-3}",
+      "isVideoNote": true,
+      "durationMs": null
+    },
+    {
+      "name": "4c_duration_float_rounded",
+      "plaintext": "{\"kind\":\"v2file\",\"blobId\":\"b_5f3c0a\",\"fileKey\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"fileNonce\":\"AAECAwQFBgc=\",\"chunkCount\":1,\"manifest\":\"AAECAwQFBgcICQoLDA0ODw==\",\"filename\":\"videonote_1758711234567.mp4\",\"mime\":\"video/mp4\",\"mediaType\":\"video\",\"videoNote\":true,\"durationMs\":1234.6}",
+      "isVideoNote": true,
+      "durationMs": 1235
+    },
+    {
+      "name": "4d_duration_string_unknown",
+      "plaintext": "{\"kind\":\"v2file\",\"blobId\":\"b_5f3c0a\",\"fileKey\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"fileNonce\":\"AAECAwQFBgc=\",\"chunkCount\":1,\"manifest\":\"AAECAwQFBgcICQoLDA0ODw==\",\"filename\":\"videonote_1758711234567.mp4\",\"mime\":\"video/mp4\",\"mediaType\":\"video\",\"videoNote\":true,\"durationMs\":\"abc\"}",
+      "isVideoNote": true,
+      "durationMs": null
+    },
+    {
+      "name": "5_flag_on_a_photo_ignored",
+      "plaintext": "{\"kind\":\"v2file\",\"blobId\":\"b_5f3c0a\",\"fileKey\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"fileNonce\":\"AAECAwQFBgc=\",\"chunkCount\":1,\"manifest\":\"AAECAwQFBgcICQoLDA0ODw==\",\"filename\":\"p.jpg\",\"mime\":\"image/jpeg\",\"mediaType\":\"image\",\"videoNote\":true,\"durationMs\":12480}",
+      "isVideoNote": false,
+      "durationMs": null
+    },
+    {
+      "name": "5b_flag_on_image_mediaType_with_video_mime_ignored",
+      "plaintext": "{\"kind\":\"v2file\",\"blobId\":\"b_5f3c0a\",\"fileKey\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"fileNonce\":\"AAECAwQFBgc=\",\"chunkCount\":1,\"manifest\":\"AAECAwQFBgcICQoLDA0ODw==\",\"filename\":\"videonote_1758711234567.mp4\",\"mime\":\"video/mp4\",\"mediaType\":\"image\",\"videoNote\":true}",
+      "isVideoNote": false,
+      "durationMs": null
+    },
+    {
+      "name": "6_group_both_locations",
+      "plaintext": "{\"kind\":\"v2file\",\"blobId\":\"b_5f3c0a\",\"fileKey\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"fileNonce\":\"AAECAwQFBgc=\",\"chunkCount\":1,\"manifest\":\"AAECAwQFBgcICQoLDA0ODw==\",\"filename\":\"videonote_1758711234567.mp4\",\"mime\":\"video/mp4\",\"mediaType\":\"video\",\"videoNote\":true,\"durationMs\":9030,\"groupMessage\":\"eyJpZCI6IjdGMUMyQTlFLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwMSIsImdyb3VwSWQiOiJBMUIyQzNENC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMEEiLCJzZW5kZXJQdWJsaWNLZXkiOiJjMlZ1WkdWeSIsImVuY3J5cHRlZENvbnRlbnQiOiIiLCJ0aW1lc3RhbXAiOjc4MDQwNDAzNC41LCJpc1JlYWQiOmZhbHNlLCJtZXNzYWdlQ2hhaW5JbmRleCI6MCwibWVkaWFUeXBlIjoidmlkZW8iLCJtZWRpYUZpbGVOYW1lIjoidmlkZW9ub3RlXzE3NTg3MTEyMzQ1NjcubXA0IiwicGxhaW50ZXh0Q29udGVudCI6IiIsInZpZGVvTm90ZSI6dHJ1ZSwiZHVyYXRpb25NcyI6OTAzMH0=\"}",
+      "isVideoNote": true,
+      "durationMs": 9030
+    },
+    {
+      "name": "7_group_inner_only",
+      "plaintext": "{\"kind\":\"v2file\",\"blobId\":\"b_5f3c0a\",\"fileKey\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"fileNonce\":\"AAECAwQFBgc=\",\"chunkCount\":1,\"manifest\":\"AAECAwQFBgcICQoLDA0ODw==\",\"filename\":\"videonote_1758711234567.mp4\",\"mime\":\"video/mp4\",\"mediaType\":\"video\",\"groupMessage\":\"eyJpZCI6IjdGMUMyQTlFLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwMSIsImdyb3VwSWQiOiJBMUIyQzNENC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMEEiLCJzZW5kZXJQdWJsaWNLZXkiOiJjMlZ1WkdWeSIsImVuY3J5cHRlZENvbnRlbnQiOiIiLCJ0aW1lc3RhbXAiOjc4MDQwNDAzNC41LCJpc1JlYWQiOmZhbHNlLCJtZXNzYWdlQ2hhaW5JbmRleCI6MCwibWVkaWFUeXBlIjoidmlkZW8iLCJtZWRpYUZpbGVOYW1lIjoidmlkZW9ub3RlXzE3NTg3MTEyMzQ1NjcubXA0IiwicGxhaW50ZXh0Q29udGVudCI6IiIsInZpZGVvTm90ZSI6dHJ1ZSwiZHVyYXRpb25NcyI6OTAzMH0=\"}",
+      "isVideoNote": true,
+      "durationMs": 9030
+    }
+  ]
+}

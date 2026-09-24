@@ -134,6 +134,8 @@ object GroupMessageWire {
         val systemMessageData: Map<String, String>? = null,
         /** __MENTIONS_2026_09_23__ optional `mentions` key, see [MentionWire]. Unfiltered on decode. */
         val mentions: List<MentionWire.Mention> = emptyList(),
+        /** __VIDEO_NOTE_2026_09_24__ spec §2.B/§2.D: `videoNote`/`durationMs` next to `mediaType`. */
+        val videoNote: com.oshi.desktop.media.VideoNoteWire.Meta? = null,
     ) {
         val isSystem: Boolean get() = systemMessageType != null || senderPublicKey == SYSTEM_SENDER
     }
@@ -188,6 +190,11 @@ object GroupMessageWire {
         // (Android's own note, GroupManager.kt:2305-2311).
         if (msg.mediaType != null) {
             msg.plaintextContent?.takeIf { it.isNotEmpty() }?.let { json.str("plaintextContent", it) }
+        }
+        // __VIDEO_NOTE_2026_09_24__ only `true`, only on a video, never `false` (VIDEO_NOTE_SPEC §1).
+        if (msg.mediaType == GroupMediaType.VIDEO) msg.videoNote?.let { note ->
+            json.bool(com.oshi.desktop.media.VideoNoteWire.KEY_VIDEO_NOTE, true)
+            note.wireDurationMs?.let { json.int(com.oshi.desktop.media.VideoNoteWire.KEY_DURATION_MS, it) }
         }
         // Android compatibility keys. iOS's CodingKeys omit all three, so they are inert
         // there; Android reads `content`.
@@ -267,6 +274,7 @@ object GroupMessageWire {
                 d.keys().asSequence().mapNotNull { k -> (d.opt(k) as? String)?.let { k to it } }.toMap()
             },
             mentions = MentionWire.parse(o.opt(MentionWire.FIELD)),
+            videoNote = com.oshi.desktop.media.VideoNoteWire.read(o, o.opt("mediaType") as? String, null),
         )
     }
 

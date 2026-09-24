@@ -24,6 +24,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="${SRC:-$(cd "$HERE/../.." && pwd)}"
 PUB="${PUB:-$HOME/oshi-desktop-public}"
 BRANCH="${BRANCH:-feat/windows-calls-video}"
+BASE="${BASE:-main}"          # public branch a NEW $BRANCH starts from (e.g. release/1.3.0)
 [ "$BRANCH" = "main" ] && { echo "refusing to push main" >&2; exit 1; }
 export JAVA_HOME="${JAVA_HOME:-/opt/homebrew/opt/openjdk@21}"
 
@@ -33,13 +34,13 @@ git -C "$PUB" fetch -q origin --tags
 if git -C "$PUB" ls-remote --exit-code --heads origin "$BRANCH" >/dev/null; then
   git -C "$PUB" checkout -q -B "$BRANCH" "origin/$BRANCH"   # add commits on top, no force
 else
-  git -C "$PUB" checkout -q -B "$BRANCH" origin/main
+  git -C "$PUB" checkout -q -B "$BRANCH" "origin/$BASE"
 fi
 
 echo "== 1/6 desktop sources (the public repo root IS the desktop project)"
 rsync -a --delete \
   --exclude='.git' --exclude='.github' --exclude='LICENSE' --exclude='.gitignore' \
-  --exclude='shared' --exclude='docs' --exclude='build' --exclude='.gradle' --exclude='.kotlin' \
+  --exclude='shared' --exclude='docs' --exclude='Vendor' --exclude='build' --exclude='.gradle' --exclude='.kotlin' \
   --exclude='local.properties' --exclude='*.pem' --exclude='*.jks' --exclude='*.keystore' \
   --exclude='*.p12' --exclude='*.key' --exclude='.DS_Store' --exclude='*.log' \
   "$SRC/OSHI-Desktop/" "$PUB/"
@@ -56,6 +57,9 @@ cp "$J"/network/v2/devsync/*.kt "$M/network/v2/devsync/"
 cp "$J"/network/encryption/{PostQuantumKEM,RatchetSecurityMode}.kt "$M/network/encryption/"
 cp "$J"/service/{LlamaCpp,CallRatingPolicy,VideoReorderReassembler,VideoRateController}.kt "$M/service/"
 cp "$J"/service/diag/CallFileLogger.kt "$M/service/diag/"
+# Round video notes (after 1.3.0): `media/VideoNote.kt` in the build.gradle.kts include list.
+mkdir -p "$M/service/media"
+cp "$J"/service/media/VideoNote.kt "$M/service/media/"
 # Read by parity tests only, never compiled (they import android.* — the CI positive control).
 cp "$J"/network/v2/V2KeysClient.kt "$M/network/v2/"
 cp "$J"/service/LocalLLMManager.kt "$M/service/"
@@ -67,7 +71,7 @@ rsync -a --delete "$SRC/OSHI-Android/app/src/test/resources/call_log" "$A/test/r
 rsync -a --delete "$SRC/OSHI-Android/app/src/main/assets/GifPack" "$SRC/OSHI-Android/app/src/main/assets/StickerPack" "$A/main/assets/"
 if grep -l '^import android\.' "$M"/network/v2/{OSHICryptoV2,OSHICryptoV2Streaming,OSHIRatchetV2,V2Session,V2FileKeyMessage,V2RetryBudget}.kt \
      "$M"/network/v2/devsync/*.kt "$M"/network/encryption/{PostQuantumKEM,RatchetSecurityMode}.kt \
-     "$M"/service/{LlamaCpp,CallRatingPolicy,VideoReorderReassembler,VideoRateController}.kt \
+     "$M"/service/{LlamaCpp,CallRatingPolicy,VideoReorderReassembler,VideoRateController}.kt "$M"/service/media/VideoNote.kt \
      "$M"/service/diag/CallFileLogger.kt; then
   echo "ABORT: android.* import in a shared source the desktop compiles" >&2; exit 1; fi
 

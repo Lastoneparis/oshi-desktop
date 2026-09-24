@@ -190,7 +190,10 @@ class StringsFileTest {
         // (`map_open_with_title`, rewritten `map_open_preference`) and the call-diagnostics /
         // report strings landed in all 34 languages.
         // 4053 → 4054 on 2026-09-24: `call.error.unavailable` (__BLOCKED_BY_PEER_2026_09_24__).
-        assertEquals("en Localizable key count", 4054, en.localizable.size)
+        // 4054 → 4074 on 2026-09-24: __VIDEO_NOTE_2026_09_24__ the 20 `videonote.*` keys of the
+        // round video messages (docs/VIDEO_NOTE_SPEC.md), added to the iOS source in all 34
+        // languages; catalogs regenerated with `./gradlew i18nExtract` in the same change.
+        assertEquals("en Localizable key count", 4074, en.localizable.size)
         assertEquals("en InfoPlist key count", 16, en.infoPlist.size)
         assertEquals("Messages", en.localizable["tab.messages"])
         // Spot-check a value with an escape and one with a bare percent.
