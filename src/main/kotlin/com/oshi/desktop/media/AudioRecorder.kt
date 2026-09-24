@@ -64,7 +64,7 @@ import javax.sound.sampled.LineUnavailableException
  */
 class AudioRecorder(
     private val devices: AudioDevices = AudioDevices.JavaSound,
-    private val workDir: File = com.oshi.desktop.store.DesktopPaths.file("media"),
+    private val workDir: File = com.oshi.desktop.store.DesktopPaths.file(com.oshi.desktop.store.MediaVault.SCRATCH_DIR_NAME),
     private val format: AudioFormat = VoiceNoteFormat.CAPTURE_FORMAT,
     private val maxCaptureBytes: Long = VoiceNoteFormat.MAX_CAPTURE_BYTES,
     private val minDurationMs: Long = VoiceNoteFormat.MIN_DURATION_MS,

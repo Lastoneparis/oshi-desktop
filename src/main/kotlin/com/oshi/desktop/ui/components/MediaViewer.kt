@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.ProvidableCompositionLocal
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -37,8 +38,12 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.oshi.desktop.media.AudioPlayer
+import com.oshi.desktop.media.PlaybackEnd
+import com.oshi.desktop.media.PlaybackStart
 import com.oshi.desktop.store.MediaType
 import com.oshi.desktop.ui.OshiTheme
+import java.awt.EventQueue
 import java.io.File
 import org.jetbrains.skia.Codec
 import org.jetbrains.skia.Data
@@ -50,8 +55,9 @@ import org.jetbrains.skia.Image as SkiaImage
  * ============================================================ WHAT IT CLOSES
  *
  * PARITY.md rows 0.15 and 1.4. The blob path has been decrypting inbound media straight to
- * `OshiClient.mediaDir` since row 0.15 went green — a photograph from a phone lands on this
- * disk as an ordinary file — and until this file existed, nothing in the window opened one.
+ * `OshiClient.mediaDir` since row 0.15 went green — since 2026-09-22 SEALED at rest
+ * (`MediaVault`, "OSHIMED1"), so every read below goes through the vault and decrypts in
+ * memory — and until this file existed, nothing in the window opened one.
  * `MessageBubble` draws a 250pt thumbnail inside the bubble; a thumbnail is not a viewer.
  * This is the full-size look, and it is the ONLY place in the window that reads media bytes
  * for a size the user chose rather than a size the layout chose.
@@ -84,19 +90,15 @@ import org.jetbrains.skia.Image as SkiaImage
  *
  * ============================================================ IT NEVER PLAYS ANYTHING
  *
- * No video playback, no audio playback, and no path here that could grow one by accident. A
- * video or a voice note opens [NoPlayerPanel] — the file, where it is, and the sentence
- * "this window does not play it" — because a user who can see the file and read why is
- * better served than one staring at a dead triangle.
+ * Video playback is not implemented. A video opens [NoPlayerPanel] — the file, where it is,
+ * and the sentence "this window does not play it" — because a user who can see the file and
+ * read why is better served than one staring at a dead triangle. Voice notes use the existing
+ * [AudioPlayer] backend: it opens JDK-readable audio directly and asks the configured
+ * transcoder for a temporary WAV when a phone-recorded m4a needs it.
  *
- * **The claim is scoped to this window, and deliberately.** Checked 2026-09-11 rather than
- * copied: nothing under `com.oshi.desktop.ui` starts playback of anything. The CLIENT is a
- * different story and the difference matters — `com.oshi.desktop.media.AudioPlayer` and
- * `VoiceNotes` exist, transcode an m4a the JDK refuses, and are referenced by nothing
- * outside their own tests; `AudioPlayer`'s own note says no sound has ever been produced by
- * it on any machine. So "this window has no player" is true, "this project can never play
- * audio" would not be, and a `DesktopLimits` row that says the second would be stale the day
- * somebody wires the first. Nothing in this file decodes a video FILE, and this viewer is
+ * `AudioPlayer` has unit coverage with a fake render device, but no test has opened a real
+ * speaker. This panel reports the backend's named failures instead of promising a sound that
+ * this machine cannot produce. Nothing in this file decodes a video file, and this viewer is
  * not the place to start: it would be a codec, a clock and a device, none of which a still
  * viewer has any business owning.
  *
@@ -234,9 +236,9 @@ object MediaViewerLimits {
      * One decimal, in `Locale.ROOT`, and the locale is not an oversight.
      *
      * `"%.1f".format(x)` uses the DEFAULT locale, so on a French machine this window would
-     * print "1,0 MB" and "2,3 megapixels" inside sentences that are otherwise English — the
-     * window is not localised at all (PARITY.md row 1.5; the REPL's 12 keys are the only
-     * translated surface). Half-localising a number inside an English sentence is worse than
+     * print "1,0 MB" and "2,3 megapixels" inside sentences that may otherwise be English —
+     * the media viewer's own prose is desktop-only English even though other window strings
+     * use the shared catalogs (PARITY.md row 1.5). Half-localising a number inside an English sentence is worse than
      * not localising it, and it made a ceiling this file states in its own message
      * unsearchable. Caught by `MediaViewerTest` on a machine whose default locale is fr_FR.
      */
@@ -399,8 +401,12 @@ object MediaViewerLoader {
      */
     fun load(
         path: String,
-        probe: (String) -> Long? = { File(it).takeIf { f -> f.isFile }?.length() },
-        read: (String) -> ByteArray = { File(it).readBytes() },
+        // __LOCAL_DATA_AT_REST_2026_09_22__ plaintext size and bytes through the media vault:
+        // a sealed attachment is decrypted in memory (after the size gates), never to disk.
+        probe: (String) -> Long? = { com.oshi.desktop.store.MediaVault.lengthOf(File(it)) },
+        read: (String) -> ByteArray = {
+            com.oshi.desktop.store.MediaVault.readAny(File(it), MediaViewerLimits.MAX_FILE_BYTES)
+        },
     ): MediaLoad {
         val size = probe(path)
             ?: return MediaLoad.Refused("Not on this disk", MediaViewerLimits.NOT_A_FILE)
@@ -577,6 +583,11 @@ fun WithMediaViewer(content: @Composable () -> Unit) {
  */
 @Composable
 fun MediaViewerOverlay(target: MediaViewerTarget, onClose: () -> Unit) {
+    // One overlay means one player. Creating it here rather than in every bubble preserves
+    // the phones' one-note-at-a-time rule, and disposal stops a note before navigation can
+    // leave an invisible speaker running.
+    val audio = remember(target.path) { AudioPlayer() }
+    DisposableEffect(audio) { onDispose { audio.stop() } }
     // A scrim that swallows the click that dismisses it. `indication = null` because a
     // ripple on a full-screen scrim reads as the surface itself being a control.
     val scrim = remember { MutableInteractionSource() }
@@ -601,16 +612,19 @@ fun MediaViewerOverlay(target: MediaViewerTarget, onClose: () -> Unit) {
                 .padding(OshiTheme.lg),
             verticalArrangement = Arrangement.spacedBy(OshiTheme.md),
         ) {
-            val playable = target.kind == MediaType.VIDEO || target.kind == MediaType.AUDIO
-            val load = remember(target.path, playable) {
-                if (playable) null else MediaViewerLoader.load(target.path)
+            // Video and audio do not go through the still-image loader. In particular, an
+            // unopened voice note must not be read merely because its viewer is visible.
+            val isStillImage = target.kind == MediaType.IMAGE
+            val load = remember(target.path, isStillImage) {
+                if (isStillImage) MediaViewerLoader.load(target.path) else null
             }
 
             ViewerHeader(target, load, onClose)
             Hairline()
 
             when {
-                playable -> NoPlayerPanel(target)
+                target.kind == MediaType.VIDEO -> NoPlayerPanel(target)
+                target.kind == MediaType.AUDIO -> AudioPlayerPanel(target, audio)
                 load is MediaLoad.Ready -> ReadyPanel(load)
                 load is MediaLoad.Refused -> RefusedPanel(load)
                 else -> RefusedPanel(MediaLoad.Refused("Nothing to open", MediaViewerLimits.NOT_A_FILE))
@@ -707,7 +721,7 @@ private fun RefusedPanel(load: MediaLoad.Refused) {
 }
 
 /**
- * A video or a voice note: named, located, and explicitly not played.
+ * A video: named, located, and explicitly not played.
  *
  * The file is NOT read here at all — not a byte. There is nothing this window could do with
  * the contents, and reading a stranger's MP4 into memory to display its size would be work
@@ -737,14 +751,79 @@ private fun NoPlayerPanel(target: MediaViewerTarget) {
             color = Ink.strong,
         )
         Text(
-            "Nothing in this window plays audio or video, and it will not pretend otherwise " +
-                "with a play button that produces silence. The file is decrypted on this " +
-                "disk and is not touched by this panel; open it in a player that has the " +
-                "codecs. PARITY.md rows 1.4 and 2.1.",
+            "Nothing in this window plays video, and it will not pretend otherwise " +
+                "with a play button that produces silence. The file is stored encrypted on " +
+                "this disk and is not touched by this panel; use \"Open in another app\" " +
+                "below for a player that has the codecs. PARITY.md rows 1.4 and 2.1.",
             fontSize = 11.sp,
             color = Ink.soft,
         )
         Spacer(Modifier.height(OshiTheme.xxs))
+    }
+}
+
+/**
+ * The one media player this window can truthfully offer: a decrypted voice note. The player
+ * owns decoding and its worker thread; this composable only translates its named outcomes
+ * back onto the AWT event queue before changing Compose state.
+ */
+@Composable
+private fun AudioPlayerPanel(target: MediaViewerTarget, player: AudioPlayer) {
+    var playing by remember(target.path) { mutableStateOf(false) }
+    var note by remember(target.path) { mutableStateOf<String?>(null) }
+    val file = remember(target.path) { File(target.path) }
+
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(OshiTheme.radiusSm)
+            .background(OshiTheme.surface)
+            .padding(OshiTheme.lg),
+        verticalArrangement = Arrangement.spacedBy(OshiTheme.sm),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        GlyphIcon(Glyph.FILE, Ink.soft, 34.dp)
+        Text(
+            "Voice note",
+            style = OshiTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = Ink.strong,
+        )
+        Text(
+            "Playback decrypts this note to a temporary file that is deleted afterwards. " +
+                "A phone-format m4a may be decoded to a temporary WAV first; if this machine has no usable audio device or " +
+                "decoder, the reason is shown here.",
+            fontSize = 11.sp,
+            color = Ink.soft,
+        )
+        TextAction(if (playing) "Stop playback" else "Play voice note") {
+            if (playing) {
+                player.stop()
+                playing = false
+                note = "Stopped."
+            } else {
+                when (val start = player.play(file) { end ->
+                    EventQueue.invokeLater {
+                        playing = false
+                        note = when (end) {
+                            PlaybackEnd.Completed -> "Finished."
+                            PlaybackEnd.Stopped -> "Stopped."
+                            is PlaybackEnd.Failed -> "Playback stopped: ${end.detail}"
+                        }
+                    }
+                }) {
+                    is PlaybackStart.Started -> {
+                        playing = true
+                        note = null
+                    }
+                    is PlaybackStart.Failure -> {
+                        playing = false
+                        note = start.reason.message
+                    }
+                }
+            }
+        }
+        note?.let { Text(it, fontSize = 11.sp, color = Ink.soft) }
     }
 }
 
@@ -765,8 +844,17 @@ private fun ViewerFooter(target: MediaViewerTarget) {
         // longer resolved still offered "Show in folder" (seen in
         // `build/screens/viewer-04-video.png`), which is a button that can only apologise.
         val here = remember(target.path) { File(target.path).isFile }
+        // __LOCAL_DATA_AT_REST_2026_09_22__ A sealed attachment is ciphertext on disk:
+        // revealing it in a file manager would hand over a file nothing else can open. It
+        // gets the two things a person actually wanted from "show in folder" instead —
+        // open it in another app (via a scratch copy) or save a decrypted copy where they
+        // choose. Still never for view-once.
+        val sealed = remember(target.path) { com.oshi.desktop.store.MediaVault.isSealed(File(target.path)) }
+        if (sealed && here && !target.viewOnce) {
+            SealedMediaActions(target) { problem = it }
+        }
         val reveal = FolderReveal.action
-        if (reveal != RevealAction.NONE && !target.viewOnce && here) {
+        if (reveal != RevealAction.NONE && !target.viewOnce && here && !sealed) {
             Text(
                 reveal.label,
                 style = OshiTheme.typography.bodyMedium,
@@ -781,6 +869,94 @@ private fun ViewerFooter(target: MediaViewerTarget) {
             )
         }
         problem?.let { Text(it, fontSize = 11.sp, color = OshiTheme.danger) }
+    }
+}
+
+@Composable
+private fun SealedMediaActions(target: MediaViewerTarget, onProblem: (String?) -> Unit) {
+    var working by remember(target.path) { mutableStateOf(false) }
+    Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm)) {
+        if (MediaExport.canOpenExternally) {
+            TextAction("Open in another app") {
+                if (!working) {
+                    working = true
+                    MediaExport.inBackground({ MediaExport.openExternally(File(target.path)) }) {
+                        working = false; onProblem(it)
+                    }
+                }
+            }
+        }
+        TextAction("Save a decrypted copy…") {
+            val dest = MediaExport.chooseDestination(target.fileName)
+            if (dest != null && !working) {
+                working = true
+                MediaExport.inBackground({ MediaExport.saveCopy(File(target.path), dest) }) {
+                    working = false; onProblem(it)
+                }
+            }
+        }
+    }
+}
+
+/**
+ * __LOCAL_DATA_AT_REST_2026_09_22__ The only two ways plaintext of a sealed attachment
+ * leaves this process on purpose.
+ *
+ *  - [openExternally] decrypts to `media-tmp/` (the vault's scratch dir) and hands that path
+ *    to the OS. This process cannot know when the other app is done with it, so the copy is
+ *    deleted at client close, at JVM exit, and by the sweep at the next start — not sooner.
+ *  - [saveCopy] streams a decrypted copy to a path the USER picked. That is an export; it is
+ *    theirs and is not tracked or deleted.
+ *
+ * Both stream (one chunk in memory) and delete their own output on a failed decrypt.
+ */
+object MediaExport {
+    val canOpenExternally: Boolean by lazy {
+        try {
+            java.awt.Desktop.isDesktopSupported() &&
+                java.awt.Desktop.getDesktop().isSupported(java.awt.Desktop.Action.OPEN)
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /** Null on success, or a sentence to put on screen. */
+    fun openExternally(file: File): String? = try {
+        val vault = com.oshi.desktop.store.MediaVault.current()
+            ?: return "No media key is loaded in this window, so the attachment cannot be decrypted."
+        java.awt.Desktop.getDesktop().open(vault.decryptToScratch(file))
+        null
+    } catch (t: Throwable) {
+        "Could not open a decrypted copy (${t.javaClass.simpleName}: ${t.message ?: "no detail"})."
+    }
+
+    /** Null on success, or a sentence to put on screen. */
+    fun saveCopy(file: File, dest: File): String? = try {
+        val vault = com.oshi.desktop.store.MediaVault.current()
+            ?: return "No media key is loaded in this window, so the attachment cannot be decrypted."
+        vault.decryptTo(file, dest)
+        null
+    } catch (t: Throwable) {
+        "The copy was not saved (${t.javaClass.simpleName}: ${t.message ?: "no detail"}); nothing was left at ${dest.path}."
+    }
+
+    fun chooseDestination(suggested: String): File? = try {
+        val dialog = java.awt.FileDialog(null as java.awt.Frame?, "Save a decrypted copy", java.awt.FileDialog.SAVE)
+        dialog.file = suggested
+        dialog.isVisible = true
+        val name = dialog.file
+        val dir = dialog.directory
+        if (name == null || dir == null) null else File(dir, name)
+    } catch (_: Throwable) {
+        null
+    }
+
+    /** Runs [work] off the event thread and delivers its result back on it. */
+    fun inBackground(work: () -> String?, done: (String?) -> Unit) {
+        Thread({
+            val result = runCatching(work).getOrElse { "Failed: ${it.javaClass.simpleName}" }
+            EventQueue.invokeLater { done(result) }
+        }, "oshi-media-export").apply { isDaemon = true; start() }
     }
 }
 

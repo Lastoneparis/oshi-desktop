@@ -213,5 +213,13 @@ object Strings {
  */
 fun t(key: String): String = Strings.get(key)
 
+/**
+ * A catalog key held as DATA and rendered later with [t] — a call summary written on the
+ * wire as `📞↗️call.outgoing|0:12`, or the reason a call ended kept in UI state. It returns
+ * [key] unchanged; it exists so `SourceKeys.ACCESSORS` sees the key and the catalog audit
+ * holds every locale to it, exactly as if it were a `t("…")` call.
+ */
+fun catalogKey(key: String): String = key
+
 /** `t` with arguments. Same wrapper caveat, same scanner entry. */
 fun t(key: String, vararg args: Any?): String = Strings.format(key, *args)

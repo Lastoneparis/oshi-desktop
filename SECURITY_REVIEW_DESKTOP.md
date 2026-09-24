@@ -80,6 +80,14 @@ a 413", `:60`).
 contact-card read at a few kilobytes (a vCard with one key in it is ~200 bytes) rather than
 reading an unbounded file into a String.
 
+**Resolved 2026-09-22.** The desktop receiver now authenticates and checks the manifest's
+declared plaintext size before it creates the destination file or fetches a chunk, then writes
+through a second 200 MB cap while decrypting. This bounds disk use even if authenticated
+manifest metadata and decrypted chunks disagree; the failed transfer deletes any partial file.
+It also rejects a manifest whose `chunkCount` is not exactly the positive-size chunk geometry
+the shipped senders produce, before an attacker can turn phantom empty chunks into a request
+loop. The existing contact-card branch independently limits its in-memory read to 64 KiB.
+
 ---
 
 ### C2 — HIGH — An `Error` out of the poll task silently and permanently stops message delivery
@@ -103,6 +111,11 @@ fire. For a messenger this is the worst possible failure mode: it is indistingui
 **Fix** `catch (t: Throwable)` on the scheduled body, log it, and keep the schedule alive
 (re-submit, or wrap so the runnable can never throw). This is a three-line change and it
 de-fangs an entire class of ingest bug, including ones not yet written.
+
+**Resolved 2026-09-22.** The V2 poll body now runs inside `PollGuard`, which catches every
+`Throwable` and makes its own logging best-effort, so a failed log call cannot terminate the
+schedule either. `PollGuardTest` injects an `OutOfMemoryError` and also demonstrates with a
+real fixed-delay executor that guarded polling continues after the failure.
 
 ---
 
@@ -143,6 +156,13 @@ paragraph in `MessageStore.kt`; (b) say it in the UI, next to where the account 
 says closing the window stops delivery; (c) if it is ever to be fixed properly, the vault
 already holds a master key — a second derived key over the message log is the obvious shape,
 and the NDJSON append design survives per-line sealing.
+
+**Partially resolved 2026-09-22.** Message journals are now individually AES-256-GCM sealed
+with a distinct random history key stored in `KeyVault`; the filename is authenticated as
+additional data, and legacy plaintext journals are migrated atomically after a successful
+read. The UI and storage documentation now state this accurately. Contacts, groups, scheduled
+messages, and decrypted attachments remain plaintext, so full-disk encryption is still needed
+to protect those local files.
 
 ---
 
@@ -266,6 +286,12 @@ thing as live malware, and the fix is one line.
 that is absent. On Linux, prefer `/usr/bin/secret-tool`, as the macOS backend already does
 for `/usr/bin/security` (`:78`).
 
+**Resolved 2026-09-22.** `WindowsDpapiStore` now resolves that `SystemRoot` PowerShell path
+first (with `WINDIR` as the Windows environment-name fallback), and `LinuxSecretToolStore`
+resolves `/usr/bin/secret-tool` first. Both retain the documented PATH fallback solely for
+stripped-down installations where the system binary is genuinely absent. Hermetic tests prove
+the trusted path wins even when a PATH lookup returns an attacker-controlled candidate.
+
 ---
 
 ### C8 — LOW — An attacker-chosen `blobId` goes unencoded into a path this client signs
@@ -293,6 +319,12 @@ comment above it asserts it does not exist.
 **Fix** Either percent-encode the segment or validate `blobId` against `[A-Za-z0-9._-]{1,128}`
 at parse time, and correct the doc comment either way.
 
+**Resolved 2026-09-22.** `V2BlobClient` now validates that grammar (and rejects the two
+literal dot segments) before every route construction, including resume, chunk download and
+streaming decrypt. It also refuses a status response whose echoed id differs from the requested
+id. The regression test supplies traversal and query syntax to every public blob operation and
+proves the relay receives no signed request.
+
 ---
 
 ### C9 — LOW today, latent — Three unbounded/overflowing paths in code that has no caller yet
@@ -315,12 +347,21 @@ Callers then do `out.write(frameData, 4, 0x7FFFFFFF)` (`:252`) or
 `VideoReceiveSession.onPacket` has no `try` around it. Use `len.toLong()` or
 `len > frameData.size - o - 4`.
 
+**Resolved 2026-09-22.** The walker now uses the subtraction form before any offset is
+constructed. A `0x7fffffff` AVCC length is exercised through every public consumer and yields
+the safe empty/no-slice result rather than an out-of-bounds callback.
+
 **C9b — `VideoReassembler.inFlight` grows without bound.** `call/media/VideoFragment.kt:154`
 (the map), `:191-195` (the only eviction). Eviction removes an entry only when the arriving
 frame is *newer* (`dist in 1..32768`). A peer sending fragments with strictly **decreasing**
 `frameId` — 40000, 39999, … — evicts nothing, completes nothing, and never trips the `LATE`
 guard at `:183` (which needs a completed frame first). Up to 65 536 entries, each with an
 `arrayOfNulls<ByteArray>(255)` plus a retained payload. Needs a cap or a TTL.
+
+**Resolved 2026-09-22.** Reassembly now caps unfinished frames at 32 and replaces the oldest
+arrival when that cap is reached, requesting a keyframe to recover the reference chain. The
+regression test feeds 33 decreasing, partial frame IDs — the sequence that bypasses normal
+newer-frame eviction — and proves the map stays at 32.
 
 **C9c — `LoRaReassembler.pending` has a TTL but no cap.** `lora/LoRaFrame.kt:243,257,263`.
 A fresh random 32-bit `msgId` per frame mints an entry held for the full 180 s, and this
@@ -329,6 +370,11 @@ happens in `LoRaInbound.oshiChunk` (`lora/LoRaInbound.kt:143`) **before** `isAdd
 throttles it; over the **TCP** path (`LoRaLink.pump`, `lora/LoRaLink.kt:167`, a plaintext
 unauthenticated socket to `meshtasticd`) a hostile or MITM'd bridge feeds it at line rate.
 Needs a `MAX_PENDING` eviction alongside the TTL.
+
+**Resolved 2026-09-22.** The reassembler now retains at most 64 incomplete messages and
+deterministically evicts the oldest arrival after its normal TTL sweep. The test uses a smaller
+injected cap and three fresh partial IDs, proving an unauthenticated TCP bridge cannot grow the
+pending map without bound.
 
 **Reachability, verified.** `VideoReceiveSession`, `VideoReassembler` and `CallAudioSession`
 have **no production call site** — grep finds them only in `src/test`. This matches PARITY
@@ -353,6 +399,11 @@ adds an entry per message that nothing ever removes. Bounded by message rate and
 lifetime, so it is slow — but it is unbounded, and it is the only in-memory map on the
 message ingest path with no ceiling. A cap on `sessions.size` (evicting oldest) closes it.
 
+**Resolved 2026-09-22.** `LiveShareTracker` retains at most 128 sessions and evicts the
+oldest insertion when an untrusted new `sessionId` would exceed the cap. A regression test
+uses a cap of two with three live shares, proving the oldest is evicted and the two newer
+sessions remain addressable.
+
 ---
 
 ### C11 — LOW — `Base64.decode` can throw out of the secret-store read paths
@@ -366,6 +417,10 @@ diagnostic on stdout — the `IllegalArgumentException` escapes as itself rather
 `VerifiedSecretStore.put`'s read-back too. This is a diagnosability defect rather than an
 exploit, but it lands on the one code path where an unclear error means "your account will
 not open".
+
+**Resolved 2026-09-22.** All three backends now pass command output through one decoder that
+returns a missing entry for blank output but wraps malformed Base64 in `SecretStoreException`,
+naming the backend and retaining the original cause. The regression test covers both answers.
 
 ---
 
@@ -396,6 +451,9 @@ Listed because they are cheap to check, not because I am asserting them.
   `V2ConfigGate:53`, `BotQueueClient:88` and `LegacySyncClient:73` do not set it and rely on
   `NEVER` being the builder default — which it is today. The invariant is correct and
   undocumented at three of four sites.
+
+  **Resolved 2026-09-22.** `BotQueueClient` and `LegacySyncClient` already declared the policy;
+  `V2ConfigGate` now does too. All four desktop HTTP clients explicitly use `Redirect.NEVER`.
 - **S5 — Linux keyring with an empty password.** On an auto-login desktop the GNOME login
   keyring is commonly created unlocked with no password, in which case `secret-tool` "storage"
   gives the master key no protection at rest at all. This is a property of the platform, not
@@ -502,15 +560,10 @@ Recorded so nobody re-reviews it, and so the report is not read as "only bad thi
 
 ## 5. If only three things get fixed
 
-1. **C2** — `catch (t: Throwable)` on the poll body and keep the schedule alive. Three lines,
-   and it turns every present and future ingest bug from "the app silently stops receiving
-   messages forever" into "one message failed".
-2. **C1** — a receive-side size ceiling, and a length cap before `readText()` on a contact
-   card. The constant already exists in the file; it is simply only used on the way out.
-3. **C3** — at minimum correct `DesktopPaths.kt:51-52` and write the missing paragraph in
-   `MessageStore.kt`, and tell the user in the UI that message history is not encrypted at
-   rest. A wrong comment about encryption is worse than no comment, because it is the one a
-   reviewer stops at.
+1. **C3 (remaining scope)** — contacts, groups, scheduled messages, and decrypted attachments
+   still need at-rest protection; message history is already sealed.
+2. **C5.1** — publish a signed `SHA256SUMS` next to the download.
+3. **S5** — make the Linux keyring's empty-password posture visible to the user.
 
-If a fourth slot exists, it is **C5.1**: publish a signed `SHA256SUMS` next to the download.
+The former C1 and C2 priorities are resolved above.
 It costs nothing and it is the only integrity signal an early user will have.

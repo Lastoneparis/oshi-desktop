@@ -52,6 +52,11 @@ class V2ConfigGate(
 
     private val http: HttpClient = HttpClient.newBuilder()
         .connectTimeout(Duration.ofSeconds(8))
+        // A rollout answer must come from the configured relay, not a redirect target.
+        // Keep this explicit beside the signed clients' identical policy.
+        .followRedirects(HttpClient.Redirect.NEVER)
+        // Plain http: no h2c upgrade (see V2Http — the v2 server 404s unknown upgrades).
+        .apply { if (baseUrl.startsWith("http://")) version(HttpClient.Version.HTTP_1_1) }
         .build()
 
     /** Dev/testing override. Forces V2 on for this process without touching the server. */
@@ -59,6 +64,39 @@ class V2ConfigGate(
 
     /** Pure, never-blocking read for the send path. */
     fun isEnabledCached(): Boolean = localOverride || cachedEnabled
+
+    /**
+     * __PER_DEVICE_MAILBOX_2026_09_23__ `/v2/config.device_mailbox_enabled` (default false).
+     * Fail-closed on the FIRST answer only; afterwards a failed fetch keeps the last value, so
+     * a blip in reachability does not flap this install between its device cursor and the
+     * legacy one (CLIENT_SPEC.md §3.1: a flag that turns false is honoured on the next
+     * successful read).
+     */
+    @Volatile var deviceMailboxEnabled: Boolean = System.getenv("OSHI_DEVICE_MAILBOX_FORCE") == "1"
+        private set
+
+    /** Tests / diagnostics. */
+    fun setDeviceMailboxEnabled(on: Boolean) { deviceMailboxEnabled = on }
+
+    /**
+     * __LEGACY_COMPAT_2026_09_23__ `/v2/config.group_legacy_compat` (default false; only a JSON
+     * `true` counts). While it is on (and before [GROUP_LEGACY_COMPAT_SUNSET_MS]), iOS and
+     * Android ALSO send the legacy group path to members on builds that cannot read v2 groups.
+     *
+     * Desktop reads it for parity and diagnostics only: Desktop has always been v2-only for
+     * groups (no IPFS, no Pinata, no `/api/queue` — GROUP_E2E_V2_SPEC §8), so old phones never
+     * received Desktop group traffic and "exactly as before" means sending nothing legacy here.
+     * What Desktop does do is announce [CAP_GROUP_V2] in its bundle (V2KeysClient), so phones
+     * never waste a legacy copy on a Desktop member.
+     */
+    @Volatile var groupLegacyCompat: Boolean = false
+        private set
+
+    /** The flag as the phones apply it: on AND before the compiled-in sunset. */
+    fun groupLegacyCompatActive(nowMs: Long = clock()): Boolean = isGroupLegacyCompatActive(groupLegacyCompat, nowMs)
+
+    /** Drop the TTL so the next [refresh] asks the server again (a 409 device-mailbox-disabled). */
+    fun invalidate() { cachedAt = 0L }
 
     /** TTL-bounded refresh. Drive this from the poll loop, not from a send. */
     fun refresh(userKey: String) {
@@ -85,6 +123,11 @@ class V2ConfigGate(
             decide(false, "HTTP ${resp.statusCode()} from $url")
         } else {
             val json = JSONObject(resp.body())
+            if (System.getenv("OSHI_DEVICE_MAILBOX_FORCE") != "1") {
+                deviceMailboxEnabled = json.optBoolean("device_mailbox_enabled", false)
+            }
+            // __LEGACY_COMPAT_2026_09_23__ strict: a string "true" or a 1 does not count.
+            groupLegacyCompat = json.opt("group_legacy_compat") == true
             val enabled = json.optBoolean("v2_enabled", false)
             val minBuild = json.optInt("min_build", Int.MAX_VALUE)
             val rollout = json.optInt("rollout_percent", 0)
@@ -111,6 +154,19 @@ class V2ConfigGate(
     companion object {
         /** This client's build number, for the server's `min_build` floor. */
         const val DESKTOP_BUILD = 1
+
+        /**
+         * __LEGACY_COMPAT_2026_09_23__ 2026-10-14T07:00:00Z = 09:00 Europe/Paris. After it the
+         * flag is ignored whatever the server says (`/v2/config` is unsigned: a replayed `true`
+         * must not downgrade anyone). Same constant on iOS and Android.
+         */
+        const val GROUP_LEGACY_COMPAT_SUNSET_MS = 1_791_961_200_000L
+
+        /** Prekey-bundle capability bit: "this build reads v2 groups" (iOS `Caps.groupV2`, Android `CAP_GROUP_V2`). */
+        const val CAP_GROUP_V2 = 1 shl 1
+
+        fun isGroupLegacyCompatActive(flag: Boolean?, nowMs: Long): Boolean =
+            flag == true && nowMs < GROUP_LEGACY_COMPAT_SUNSET_MS
 
         /** First 4 bytes of SHA-256(userKey), BIG-ENDIAN, mod 100. */
         fun bucket(userKey: String): Int {

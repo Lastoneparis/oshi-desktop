@@ -375,12 +375,28 @@ class CallStateMachineTest {
         assertEquals(CallEndReason.DECLINED, d.actions.filterIsInstance<CallAction.Log>().single().reason)
     }
 
-    /** iOS's 5 s post-dial grace (`:7076-7080`). Our own fan-out races itself. */
+    /**
+     * __DECLINE_NO_DIAL_GRACE_2026_09_23__ iOS's 5 s post-dial grace guards `callEnd` ONLY
+     * (`VoiceCallManager.swift:7322-7336`); both decline paths end the call at once
+     * (`:5603-5605`, `:7286-7289`). This test used to assert the opposite, and with it a
+     * callee who declined in under 5 s left the caller ringing for 45 s.
+     */
     @Test
-    fun `a decline inside the post-dial grace window is refused`() {
+    fun `a decline inside the first 5 s ends the call — the dial grace is callEnd only`() {
         val m = machine()
         m.startCall(peer, t0, newCallId = callId)
         val early = m.onPacket(peer, packet(CallPacket.Type.CALL_DECLINE, t0 + 1_000), t0 + 1_000, callId)
+        assertEquals(CallRefusal.NONE, early.refusal)
+        assertEquals(CallState.ENDED, early.state)
+        assertEquals(CallEndReason.DECLINED, early.actions.filterIsInstance<CallAction.Log>().single().reason)
+    }
+
+    /** The dial grace itself is still there, for `callEnd` (our own fan-out races itself). */
+    @Test
+    fun `a callEnd inside the post-dial grace window is still refused`() {
+        val m = machine()
+        m.startCall(peer, t0, newCallId = callId)
+        val early = m.onPacket(peer, packet(CallPacket.Type.CALL_END, t0 + 1_000), t0 + 1_000, callId)
         assertEquals(CallRefusal.GRACE_PERIOD, early.refusal)
         assertEquals(CallState.RINGING, early.state)
     }
@@ -502,6 +518,19 @@ class CallStateMachineTest {
 
         val d = machine(contacts).onPacket(urlSafe, offerPacket(), t0)
         assertEquals(CallRefusal.BLOCKED, d.refusal)
+    }
+
+    /** __BLOCKED_BY_PEER_2026_09_24__ a peer that told us it blocks us is not dialled. */
+    @Test
+    fun `dialling a peer that blocks us is refused as unavailable, with nothing to send`() {
+        val m = machine()
+        m.isBlockedBy = { it == peer }
+        val d = m.startCall(peer, t0, newCallId = callId)
+        assertEquals(CallRefusal.UNAVAILABLE, d.refusal)
+        assertEquals(CallState.IDLE, d.state)
+        assertTrue("no offer, no ring", d.actions.isEmpty())
+        m.isBlockedBy = { false }
+        assertEquals(CallState.RINGING, m.startCall(peer, t0, newCallId = callId).state)
     }
 
     @Test

@@ -182,6 +182,10 @@ sealed class CallAction {
         val nonceSalt: ByteArray,
         /** True when WE sent the offer. Decides which nonce salt direction is ours. */
         val isCaller: Boolean,
+        /** __WB_ADPCM_CODEC_2026_09_23__ the peer advertised 0x18: send it instead of 0x15. */
+        val wbAdpcm: Boolean = false,
+        /** __OPUS_CODEC_2026_09_23__ the peer advertised 0x19 (Opus): preferred over 0x18. */
+        val opus: Boolean = false,
     ) : CallAction() {
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
@@ -212,6 +216,13 @@ enum class CallRefusal {
 
     /** The peer is blocked. Nothing was sent back. See [BlockPolicy.incomingCall]. */
     BLOCKED,
+
+    /**
+     * __BLOCKED_BY_PEER_2026_09_24__ outgoing only: the peer told us (🚫BLOCKED🚫) that it
+     * blocks us. Not dialled — no offer, no VoIP push — and shown as "Contact unavailable".
+     * See [com.oshi.desktop.block.BlockedByPeerStore].
+     */
+    UNAVAILABLE,
 
     /** We are already in a call. See GLARE for why this is not always the answer. */
     BUSY,
@@ -370,6 +381,19 @@ class CallStateMachine(
     var state: CallState = CallState.IDLE
         private set
 
+    /**
+     * __BLOCKED_BY_PEER_2026_09_24__ "did this peer tell us it blocks us?" — consulted by
+     * [startCall] only. Default: nobody did.
+     */
+    @Volatile var isBlockedBy: (String) -> Boolean = { false }
+
+    /**
+     * __CALL_LOG_AT_REST_2026_09_23__ Observer for the sealed call log's
+     * `🔄 STATE CHANGE: a → b` line (iOS `callState.didSet`). Called on the driving
+     * thread, after the transition; must not call back into the machine.
+     */
+    var onStateChange: ((from: CallState, to: CallState) -> Unit)? = null
+
     /** The peer of the current call, or null. */
     var peer: String? = null
         private set
@@ -384,6 +408,14 @@ class CallStateMachine(
 
     /** True when the current call is video. */
     var isVideo: Boolean = false
+        private set
+
+    /** __WB_ADPCM_CODEC_2026_09_23__ the peer advertised WB-ADPCM (offer slot 4 / accept index 4). */
+    var peerWbAdpcm: Boolean = false
+        private set
+
+    /** __OPUS_CODEC_2026_09_23__ the peer advertised Opus (offer slot 5 / accept index 5). */
+    var peerOpus: Boolean = false
         private set
 
     /** The media key from the offer, once known. */
@@ -438,6 +470,7 @@ class CallStateMachine(
         if (store != null && BlockPolicy.outgoingCall(store, peerAddress) == BlockPolicy.Outbound.REFUSE_BLOCKED) {
             return CallDecision(state, refusal = CallRefusal.BLOCKED)
         }
+        if (isBlockedBy(peerAddress)) return CallDecision(state, refusal = CallRefusal.UNAVAILABLE)
 
         peer = peerAddress
         callId = newCallId
@@ -450,7 +483,7 @@ class CallStateMachine(
         lastAcceptAtMs = null
 
         val type = if (video) CallPacket.Type.VIDEO_CALL_REQUEST else CallPacket.Type.CALL_REQUEST
-        val offer = CallOffer(newSessionKey, newNonceSalt, newCallId).encode()
+        val offer = CallOffer(newSessionKey, newNonceSalt, newCallId, supportsVideo = true, supportsWbAdpcm = true, supportsOpus = true).encode()
 
         // CONNECTING first, then RINGING — both clients publish the intermediate state and
         // arm a 20 s watchdog on it (`:5744`/`:5766`, `:1375`/`:1377`). Collapsing the two
@@ -485,7 +518,7 @@ class CallStateMachine(
         enter(CallState.CONNECTING, nowMs)
         val actions = mutableListOf<CallAction>(
             CallAction.StopRinging,
-            CallAction.Send(p, type, CallAccept().encode(), CallSignalType.CALL_ACCEPT, id),
+            CallAction.Send(p, type, CallAccept(supportsVideo = true, supportsWbAdpcm = true, supportsOpus = true).encode(), CallSignalType.CALL_ACCEPT, id),
         )
         // The callee connects on sending the accept; the caller connects on receiving it.
         // Both clients do it this way, and the asymmetry is why the accept is
@@ -649,6 +682,8 @@ class CallStateMachine(
         isVideo = video
         sessionKey = offer.sessionKey
         nonceSalt = offer.nonceSalt
+        peerWbAdpcm = offer.supportsWbAdpcm
+        peerOpus = offer.supportsOpus
         connectedAtMs = null
         dialedAtMs = null
         enter(CallState.RINGING, nowMs)
@@ -678,7 +713,10 @@ class CallStateMachine(
         // offers neither OshiCodec nor AAC-ELD, so no negotiation outcome changes. Parsing
         // it anyway keeps the codec exercised and makes an empty legacy accept a tested
         // case rather than a discovered one.
-        CallAccept.decode(packet.payload)
+        // __WB_ADPCM_CODEC_2026_09_23__ except slot 4: WB-ADPCM is the one codec we share.
+        val acceptCaps = CallAccept.decode(packet.payload)
+        peerWbAdpcm = acceptCaps.supportsWbAdpcm
+        peerOpus = acceptCaps.supportsOpus
 
         val actions = mutableListOf<CallAction>(CallAction.StopRinging)
         connect(nowMs, actions)
@@ -701,10 +739,12 @@ class CallStateMachine(
         if (!isOutgoing || (state != CallState.RINGING && state != CallState.CONNECTING)) {
             return CallDecision(state, refusal = CallRefusal.WRONG_STATE)
         }
-        val dialed = dialedAtMs
-        if (dialed != null && nowMs - dialed < CallTimeouts.END_GRACE_AFTER_DIAL_MS) {
-            return CallDecision(state, refusal = CallRefusal.GRACE_PERIOD)
-        }
+        // __DECLINE_NO_DIAL_GRACE_2026_09_23__ NO post-dial grace here. iOS applies its 5 s
+        // window to `callEnd` only; a `callDecline` ends the call at once
+        // (`VoiceCallManager.swift:5603-5605`: `.callDecline` → `endCall(reason: .declined)`).
+        // With the grace, a callee who declined within 5 s — the usual case for a decline —
+        // was ignored, and the caller rang on for the full 45 s no-answer timeout. Found by
+        // `CallScreenModelTest.incomingDecline`, the first test that declined at human speed.
         val actions = mutableListOf<CallAction>(CallAction.StopRinging)
         finish(CallEndReason.DECLINED, nowMs, actions, connected = false)
         return CallDecision(state, actions)
@@ -844,7 +884,7 @@ class CallStateMachine(
         val key = sessionKey
         val salt = nonceSalt
         if (key != null && salt != null) {
-            actions.add(CallAction.StartMedia(peer!!, callId!!, key, salt, isOutgoing))
+            actions.add(CallAction.StartMedia(peer!!, callId!!, key, salt, isOutgoing, peerWbAdpcm, peerOpus))
         }
     }
 
@@ -865,8 +905,10 @@ class CallStateMachine(
     }
 
     private fun enter(next: CallState, nowMs: Long) {
+        val previous = state
         state = next
         stateSinceMs = nowMs
+        if (previous != next) onStateChange?.invoke(previous, next)
     }
 
     private fun resetCall() {
@@ -876,6 +918,8 @@ class CallStateMachine(
         isVideo = false
         sessionKey = null
         nonceSalt = null
+        peerWbAdpcm = false
+        peerOpus = false
         connectedAtMs = null
         dialedAtMs = null
         lastAcceptAtMs = null

@@ -36,8 +36,10 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.oshi.desktop.pairing.QrMatrix
+import com.oshi.desktop.pairing.QrImageDecoder
 import com.oshi.desktop.ui.OshiTheme
 import com.oshi.desktop.ui.state.ShellState
+import java.io.File
 
 /**
  * "New" — the pairing screen, and the window's answer to the phone's QR tab.
@@ -45,11 +47,9 @@ import com.oshi.desktop.ui.state.ShellState
  * ============================================================ HALF OF PAIRING, HONESTLY
  *
  * Pairing on the phones is symmetric: each side shows a code and each side scans one. This
- * window can only ever do one of those halves. `DesktopLimits.MISSING` records why and it is
- * not a schedule — no desktop machine is guaranteed a webcam, and a "Scan" button that
- * worked on the developer's laptop and not on a user's desktop would be worse than no
- * button. So: **this screen SHOWS a code and ACCEPTS a pasted one.** The phone scans what is
- * on screen here; what the phone shows is pasted into the box below.
+ * window can show its code, accept pasted text, and decode a QR from a selected image. A live
+ * webcam scanner remains a separate native capability; an image picker works on every supported
+ * desktop and covers a screenshot or a photo of the phone's code.
  *
  * The code drawn is the real thing, not a picture of one. [QrMatrix] is this project's own
  * encoder — the same one `/qr png` writes a file with — and what it encodes is
@@ -70,9 +70,11 @@ fun NewPane(
     state: ShellState,
     onStartConversation: (String) -> Unit,
     onCopy: (String) -> Unit,
+    onPickQrImage: () -> File?,
     modifier: Modifier = Modifier,
 ) {
     var pasted by remember { mutableStateOf("") }
+    var scanError by remember { mutableStateOf<String?>(null) }
 
     Column(
         modifier
@@ -128,8 +130,7 @@ fun NewPane(
                 Spacer(Modifier.height(OshiTheme.xs))
                 Text(
                     "Paste what their app gave them — a bare key, an oshi:// link, or the whole " +
-                        "share message. There is no camera here: no desktop machine is guaranteed " +
-                        "one, so a Scan button would work on some computers and not on others.",
+                    "share message. You can also choose a screenshot or photo of their QR code.",
                     style = OshiTheme.typography.bodySmall,
                     color = Ink.soft,
                 )
@@ -146,7 +147,16 @@ fun NewPane(
                         onStartConversation(pasted)
                         pasted = ""
                     }
+                    TextAction("Scan QR image") {
+                        onPickQrImage()?.let { image ->
+                            QrImageDecoder.decode(image).fold(
+                                onSuccess = { pasted = it; scanError = null },
+                                onFailure = { scanError = it.message ?: "Could not scan this QR image." },
+                            )
+                        }
+                    }
                 }
+                scanError?.let { Text(it, style = OshiTheme.typography.bodySmall, color = Color(0xffb3261e)) }
                 Spacer(Modifier.height(OshiTheme.md))
                 Text(
                     "Nothing is sent and the relay is not told. Adding someone here writes one row " +

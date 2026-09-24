@@ -30,7 +30,13 @@ fun main(args: Array<String>) {
     //
     // The window is an ADDITIONAL entry point. `--client` is unchanged and is still the
     // surface that reaches every capability; see UiLauncher's note.
-    if (args.contains("--ui")) {
+    //
+    // `--hidden` implies the window too. The packaged launchers (jpackage OSHI.exe, the
+    // macOS .app) bake `--ui` in as DEFAULT arguments, and jpackage REPLACES the defaults
+    // when any argument is given — so the "Open at login" entry `OSHI.exe --hidden`
+    // arrives here as `["--hidden"]` alone. Without this it fell through to the protocol
+    // walkthrough, printed a demo and exited: login start silently did nothing.
+    if (args.contains("--ui") || args.contains(com.oshi.desktop.ui.LoginItem.HIDDEN_FLAG)) {
         com.oshi.desktop.ui.runUiCli(args)
         return
     }

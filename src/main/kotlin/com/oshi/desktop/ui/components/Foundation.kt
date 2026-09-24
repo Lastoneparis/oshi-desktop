@@ -228,8 +228,9 @@ fun Modifier.focusRing(shape: Shape): Modifier {
  *
  * **There is no phone and no video glyph in this enum and there must never be one.** The
  * shipped `ChatView` has a four-button action bar with `phone.fill` and `video.fill` in it;
- * PARITY.md row 2.1 is unambiguous that no audio flows on this client, so those two buttons
- * are the one part of that screen this window deliberately does not port. See
+ * PARITY.md row 2.1 records only loopback proof for the opt-in audio lane, with no TURN and
+ * no real-device call. Those two buttons are therefore the one part of that screen this
+ * window deliberately does not port. See
  * `DesktopLimits.MISSING`.
  */
 enum class Glyph { SEARCH, PLUS, ARROW_UP, CHEVRON_RIGHT, CHECK, DOUBLE_CHECK, CLOCK, ALERT, LOCK, PALETTE, EYE_SLASH, FILE, CLOSE, COPY }

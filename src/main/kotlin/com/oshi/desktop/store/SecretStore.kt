@@ -1,6 +1,9 @@
 package com.oshi.desktop.store
 
 import java.io.File
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.util.Base64
 import java.util.concurrent.TimeUnit
 
@@ -77,8 +80,7 @@ internal class MacKeychainStore(private val service: String) : SecretStore {
     override fun get(account: String): ByteArray? {
         val r = Proc.run(listOf("/usr/bin/security", "find-generic-password", "-a", account, "-s", service, "-w"))
         if (r.exitCode != 0) return null
-        val out = r.stdout.trim()
-        return if (out.isEmpty()) null else Base64.getDecoder().decode(out)
+        return decodeStoredSecret(r.stdout, id)
     }
 
     override fun put(account: String, secret: ByteArray) {
@@ -112,32 +114,48 @@ internal class MacKeychainStore(private val service: String) : SecretStore {
 internal class LinuxSecretToolStore(private val service: String) : SecretStore {
     override val id = "libsecret (secret-tool)"
 
-    fun isUsable(): Boolean =
-        Proc.which("secret-tool") != null &&
-            // A keyring daemon that is not running makes every call hang or fail; a
-            // lookup of a key we do not have is the cheapest way to find out, and its
-            // "not found" (exit 1, empty stderr) is success for this purpose.
-            Proc.run(listOf("secret-tool", "lookup", "service", service, "account", "__probe__"),
-                timeoutSeconds = 5).timedOut.not()
+    private fun secretTool(): String? = resolveSecretTool(Proc::which)
+
+    fun isUsable(): Boolean {
+        val tool = secretTool() ?: return false
+        // A keyring daemon that is not running makes every call hang or fail; a lookup
+        // of a key we do not have is the cheapest way to find out, and its "not found"
+        // (exit 1, empty stderr) is success for this purpose.
+        return Proc.run(
+            listOf(tool, "lookup", "service", service, "account", "__probe__"),
+            timeoutSeconds = 5,
+        ).timedOut.not()
+    }
 
     override fun get(account: String): ByteArray? {
-        val r = Proc.run(listOf("secret-tool", "lookup", "service", service, "account", account))
+        val tool = secretTool() ?: return null
+        val r = Proc.run(listOf(tool, "lookup", "service", service, "account", account))
         if (r.exitCode != 0) return null
-        val out = r.stdout.trim()
-        return if (out.isEmpty()) null else Base64.getDecoder().decode(out)
+        return decodeStoredSecret(r.stdout, id)
     }
 
     override fun put(account: String, secret: ByteArray) {
+        val tool = secretTool() ?: throw SecretStoreException("secret-tool is unavailable")
         val b64 = Base64.getEncoder().encodeToString(secret)
         val r = Proc.run(
-            listOf("secret-tool", "store", "--label=OSHI master key", "service", service, "account", account),
+            listOf(tool, "store", "--label=OSHI master key", "service", service, "account", account),
             stdin = b64,
         )
         if (r.exitCode != 0) throw SecretStoreException("secret-tool store failed: ${r.stderr.trim()}")
     }
 
     override fun delete(account: String) {
-        Proc.run(listOf("secret-tool", "clear", "service", service, "account", account))
+        secretTool()?.let { Proc.run(listOf(it, "clear", "service", service, "account", account)) }
+    }
+
+    internal companion object {
+        private const val SYSTEM_SECRET_TOOL = "/usr/bin/secret-tool"
+
+        /** Prefer the system binary so a writable PATH entry cannot receive the vault key. */
+        internal fun resolveSecretTool(
+            pathLookup: (String) -> String?,
+            isExecutable: (String) -> Boolean = { File(it).isFile && File(it).canExecute() },
+        ): String? = SYSTEM_SECRET_TOOL.takeIf(isExecutable) ?: pathLookup("secret-tool")
     }
 }
 
@@ -161,15 +179,19 @@ internal class WindowsDpapiStore(private val service: String) : SecretStore {
     private val dir get() = File(DesktopPaths.dataDir, "dpapi").also { DesktopPaths.ensurePrivateDir(it) }
     private fun blob(account: String) = File(dir, "${service}.${account.replace(Regex("[^A-Za-z0-9._-]"), "_")}.dpapi")
 
-    fun isUsable(): Boolean = Proc.which("powershell.exe") != null || Proc.which("powershell") != null
+    fun isUsable(): Boolean = powershell() != null
 
-    private fun powershell(): String = Proc.which("powershell.exe") ?: Proc.which("powershell") ?: "powershell.exe"
+    private fun powershell(): String? = resolvePowerShell(
+        System.getenv("SystemRoot") ?: System.getenv("WINDIR"),
+        Proc::which,
+    )
 
     override fun get(account: String): ByteArray? {
         val f = blob(account)
         if (!f.isFile) return null
+        val shell = powershell() ?: return null
         val r = Proc.run(
-            listOf(powershell(), "-NoProfile", "-NonInteractive", "-Command",
+            listOf(shell, "-NoProfile", "-NonInteractive", "-Command",
                 "Add-Type -AssemblyName System.Security; " +
                     "\$p=[Convert]::FromBase64String((Get-Content -Raw \$env:OSHI_BLOB_PATH).Trim()); " +
                     "\$b=[Security.Cryptography.ProtectedData]::Unprotect(\$p,\$null,'CurrentUser'); " +
@@ -177,13 +199,13 @@ internal class WindowsDpapiStore(private val service: String) : SecretStore {
             env = mapOf("OSHI_BLOB_PATH" to f.absolutePath),
         )
         if (r.exitCode != 0) return null
-        val out = r.stdout.trim()
-        return if (out.isEmpty()) null else Base64.getDecoder().decode(out)
+        return decodeStoredSecret(r.stdout, id)
     }
 
     override fun put(account: String, secret: ByteArray) {
+        val shell = powershell() ?: throw SecretStoreException("PowerShell is unavailable")
         val r = Proc.run(
-            listOf(powershell(), "-NoProfile", "-NonInteractive", "-Command",
+            listOf(shell, "-NoProfile", "-NonInteractive", "-Command",
                 "Add-Type -AssemblyName System.Security; " +
                     "\$b=[Convert]::FromBase64String(\$env:OSHI_SECRET_IN); " +
                     "\$p=[Security.Cryptography.ProtectedData]::Protect(\$b,\$null,'CurrentUser'); " +
@@ -197,6 +219,24 @@ internal class WindowsDpapiStore(private val service: String) : SecretStore {
 
     override fun delete(account: String) {
         blob(account).delete()
+    }
+
+    internal companion object {
+        /**
+         * A user-writable directory can precede System32 on PATH. Prefer the PowerShell
+         * bundled with Windows, then retain PATH only for stripped-down Windows images.
+         */
+        internal fun resolvePowerShell(
+            systemRoot: String?,
+            pathLookup: (String) -> String?,
+            isExecutable: (String) -> Boolean = { File(it).isFile && File(it).canExecute() },
+        ): String? {
+            val systemPowerShell = systemRoot
+                ?.takeIf { it.isNotBlank() }
+                ?.let { File(it, "System32/WindowsPowerShell/v1.0/powershell.exe").path }
+                ?.takeIf(isExecutable)
+            return systemPowerShell ?: pathLookup("powershell.exe") ?: pathLookup("powershell")
+        }
     }
 }
 
@@ -243,6 +283,17 @@ internal class VerifiedSecretStore(private val delegate: SecretStore) : SecretSt
 }
 
 class SecretStoreException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
+
+/** A helper printing non-base64 must not leak an implementation exception into account open. */
+internal fun decodeStoredSecret(stdout: String, backend: String): ByteArray? {
+    val encoded = stdout.trim()
+    if (encoded.isEmpty()) return null
+    return try {
+        Base64.getDecoder().decode(encoded)
+    } catch (e: IllegalArgumentException) {
+        throw SecretStoreException("$backend returned malformed base64 for a stored secret", e)
+    }
+}
 
 /** An in-memory store. Tests use it; nothing else should. */
 class InMemorySecretStore(override val id: String = "in-memory (NOT PERSISTENT)") : SecretStore {
@@ -303,11 +354,12 @@ internal object Proc {
 }
 
 /**
- * Write-to-temp-then-rename.
+ * Write-to-temp-then-replace.
  *
  * A half-written vault is an unrecoverable account: the file exists, so nothing offers
  * to create a new identity, and it does not decrypt, so nothing can read the old one.
- * The rename is the only step that must be atomic, and on every platform it is.
+ * Prefer an atomic replacement where the filesystem supports it. The fallback never
+ * deletes the old file first, avoiding a Windows delete-then-rename loss window.
  */
 internal object AtomicFile {
     fun write(target: File, bytes: ByteArray) {
@@ -317,10 +369,13 @@ internal object AtomicFile {
         try {
             DesktopPaths.makePrivate(tmp)
             tmp.writeBytes(bytes)
-            if (!tmp.renameTo(target)) {
-                // Windows will not rename onto an existing file.
-                if (!target.delete() && target.exists()) throw SecretStoreException("cannot replace $target")
-                if (!tmp.renameTo(target)) throw SecretStoreException("cannot rename $tmp to $target")
+            try {
+                Files.move(
+                    tmp.toPath(), target.toPath(),
+                    StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING,
+                )
+            } catch (_: AtomicMoveNotSupportedException) {
+                Files.move(tmp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
             }
             DesktopPaths.makePrivate(target)
         } finally {

@@ -83,19 +83,15 @@ import java.util.concurrent.atomic.AtomicLong
  * [com.oshi.desktop.call.media.CallAudioSession], which owns its own), and calling BOTH
  * on one socket throws on the second one rather than emitting the duplicate nonce.
  *
- * ============================================================ TURN IS NOT HERE
+ * ============================================================ TURN LIVES BESIDE THIS SOCKET
  *
- * There is no TURN client in this package. Both phones fall back to a coturn allocation
- * when hole punching fails, using Allocate + Refresh + **ChannelBind + ChannelData** with
- * long-term auth — and both explicitly refuse CreatePermission and Send/Data indications
- * (`OSHI/TurnClient.swift:16`, `TurnClient.kt:41`, *"we rely exclusively on ChannelBind"*).
- * The `0x40..0x7F` ChannelData range is therefore RECOGNISED and dropped with its own
- * reason ([DropReason.TURN_CHANNEL_DATA_UNSUPPORTED]) rather than being handed to the
- * media codec, where it would fail to authenticate and be counted as broken audio.
- *
- * The practical consequence, stated rather than buried: **behind a symmetric NAT on both
- * ends, this client has no media path at all.** Hole punching cannot open one and there
- * is no relay under it. That is a real hole and it is the next thing to build.
+ * TURN runs on its OWN socket ([TurnClient]), as on both phones, and reaches this class
+ * through [relay] and [handleRelayed] — PARITY.md row 2.1-t. Both phones use Allocate +
+ * Refresh + **ChannelBind + ChannelData** with long-term auth and no CreatePermission
+ * (`OSHI/TurnClient.swift:16`, `TurnClient.kt:41`). ChannelData can therefore never
+ * legitimately arrive HERE, so the `0x40..0x7F` range is still recognised and dropped with
+ * its own reason ([DropReason.TURN_CHANNEL_DATA_UNSUPPORTED]) rather than being handed to
+ * the media codec, where it would fail to authenticate and be counted as broken audio.
  */
 class MediaSocket(
     private val socket: DatagramSocket,
@@ -191,6 +187,36 @@ class MediaSocket(
     @Volatile
     private var peerAddress: InetSocketAddress? = null
 
+    /** The selected pair's candidate — a RELAY one is reached through [relay], not [socket]. */
+    @Volatile
+    private var peerCandidate: IceCandidate? = null
+
+    /**
+     * How a RELAY-type remote candidate is reached: through OUR TURN allocation. PARITY.md
+     * row 2.1-t. Both phones route exactly this way — `sendToPair` sends via the TURN
+     * channel iff the REMOTE candidate is `.relay` (`P2PTransport.swift:1370-1392`,
+     * `P2PTransport.kt:1146-1158`) — so a relay pair is always relay↔relay through the
+     * one coturn, which works whatever NAT sits on either side. Null = no allocation;
+     * relay candidates are then skipped, as the phones skip them with no TURN client.
+     */
+    @Volatile
+    var relay: RelayRouter? = null
+
+    /**
+     * Relay-only: probe and send on RELAY pairs only. The phones' `forceRelay`
+     * ("Always use relay", IP privacy) — and how a test proves the relay leg carries a
+     * call on its own.
+     */
+    @Volatile
+    var relayOnly: Boolean = false
+
+    /** Reaches a remote RELAY candidate through our own TURN allocation. */
+    fun interface RelayRouter {
+        fun send(data: ByteArray, remote: IceCandidate): Boolean
+    }
+
+    val relayPingsSent = AtomicLong()
+
     // Counters. Cheap, and the difference between "the call is silent" and a diagnosis.
     val framesSent = AtomicLong()
     val framesPlayed = AtomicLong()
@@ -199,6 +225,10 @@ class MediaSocket(
     val pingsAnswered = AtomicLong()
     val pongsCorrelated = AtomicLong()
     val packetsDropped = AtomicLong()
+    /** Every datagram the socket delivered, before any classification. Diagnostics. */
+    val packetsReceived = AtomicLong()
+    /** Receive calls that threw (e.g. Windows reporting an ICMP unreachable). Diagnostics. */
+    val receiveErrors = AtomicLong()
 
     /** The port audio leaves from. What host candidates must advertise. */
     val localPort: Int get() = socket.localPort
@@ -288,8 +318,17 @@ class MediaSocket(
     fun probeTick(nowMs: Long = System.currentTimeMillis()) {
         pairs.expireProbes(nowMs)
         for (cand in pairs.remoteCandidates()) {
+            val isRelay = cand.type == IceCandidateType.RELAY
+            if (relayOnly && !isRelay) continue
+            val router = relay
+            if (isRelay && router == null) continue
             val nonce = HolePunch.newNonce()
             val ping = HolePunch.buildPing(p2pCallId, nonce, nowMs)
+            if (isRelay) {
+                pairs.noteProbeSent(HolePunch.nonceHex(nonce), cand.key, nowMs)
+                if (router!!.send(ping, cand)) { pingsSent.incrementAndGet(); relayPingsSent.incrementAndGet() }
+                continue
+            }
             val target = addressOf(cand) ?: continue
             pairs.noteProbeSent(HolePunch.nonceHex(nonce), cand.key, nowMs)
             if (sendRaw(ping, target)) pingsSent.incrementAndGet()
@@ -300,13 +339,15 @@ class MediaSocket(
      * Recompute which pair carries audio. Returns the selection, or null when no pair
      * has answered inside [IcePairTable.LIVENESS_MAX_AGE_MS].
      *
-     * Null is a real answer and the caller must treat it as one: it means the hole punch
-     * has not succeeded, and with no TURN under this package there is nowhere else for
-     * the audio to go.
+     * Null is a real answer and the caller must treat it as one: no pair — direct or
+     * TURN — has answered; the `:8089` relay in [com.oshi.desktop.call.CallMediaLeg] is the
+     * only carrier left.
      */
     fun updateSelection(nowMs: Long = System.currentTimeMillis()): IceCandidate? {
         val best = pairs.best(nowMs, selectedKey)
+            ?.takeUnless { relayOnly && it.type != IceCandidateType.RELAY }
         selectedKey = best?.key
+        peerCandidate = best
         peerAddress = best?.let { addressOf(it) }
         return best
     }
@@ -325,11 +366,11 @@ class MediaSocket(
      */
     fun sendPcm(pcm: ByteArray, audioType: Int = CallMediaFrame.TYPE_PCM_48K): Boolean {
         claimSendMode(SendMode.SEALS_HERE)
-        val target = peerAddress ?: return false
+        if (peerCandidate == null) return false
         val frame = CallMediaFrame.encode(
             sessionKey, baseSalt, isCaller, sequence.next(), audioType, pcm,
         )
-        return sendRaw(frame, target).also { if (it) framesSent.incrementAndGet() }
+        return sendToSelected(frame).also { if (it) framesSent.incrementAndGet() }
     }
 
     /**
@@ -340,8 +381,15 @@ class MediaSocket(
      */
     fun sendSealed(frame: ByteArray): Boolean {
         claimSendMode(SendMode.PRE_SEALED)
+        return sendToSelected(frame).also { if (it) framesSent.incrementAndGet() }
+    }
+
+    /** Direct to the selected pair, or through our TURN allocation when it is a RELAY pair. */
+    private fun sendToSelected(frame: ByteArray): Boolean {
+        val cand = peerCandidate ?: return false
+        if (cand.type == IceCandidateType.RELAY) return relay?.send(frame, cand) ?: false
         val target = peerAddress ?: return false
-        return sendRaw(frame, target).also { if (it) framesSent.incrementAndGet() }
+        return sendRaw(frame, target)
     }
 
     private fun claimSendMode(mode: SendMode) {
@@ -380,8 +428,10 @@ class MediaSocket(
                 socket.receive(pkt)
             } catch (_: Exception) {
                 if (!running.get()) return
+                receiveErrors.incrementAndGet()
                 continue
             }
+            packetsReceived.incrementAndGet()
             val from = InetSocketAddress(pkt.address, pkt.port)
             runCatching { handle(buf, pkt.length, from) }
         }
@@ -430,6 +480,45 @@ class MediaSocket(
         }
     }
 
+    /**
+     * One datagram that arrived through OUR TURN allocation, from [fromIp]:[fromPort] —
+     * the peer's relayed address. Same demux as [handle], with two differences the
+     * phones share (`P2PTransport.swift:1087-1116`, `P2PTransport.kt:1117-1140`):
+     *
+     *  - a ping is answered BACK THROUGH THE RELAY ([reply]), never from the media
+     *    socket, because the peer is pinging our RELAY candidate and must see the pong
+     *    come from it;
+     *  - the source is NOT learned as a peer-reflexive candidate: it is the peer's relay
+     *    address, reachable only through TURN, and learning it as a direct pair would
+     *    send media from the media socket to a coturn port that has no permission for it.
+     */
+    fun handleRelayed(data: ByteArray, fromIp: String, fromPort: Int, reply: (ByteArray) -> Unit) {
+        if (!running.get() || data.isEmpty()) return
+        val from = runCatching {
+            InetSocketAddress(InetAddress.getByAddress(IceCandidateCodec.parseIpLiteral(fromIp) ?: return), fromPort)
+        }.getOrNull() ?: return
+        when (val classified = MediaDemux.classify(data, data.size, p2pCallId) { false }) {
+            is InboundPacket.Ping -> {
+                reply(classified.pong)
+                pingsAnswered.incrementAndGet()
+                listener.onPing(from, null)
+            }
+            is InboundPacket.Pong -> {
+                val rtt = pairs.recordPong(classified.nonceHex, System.currentTimeMillis())
+                if (rtt != null) {
+                    pongsCorrelated.incrementAndGet()
+                    pairs.pair("$fromIp:$fromPort")?.candidate?.let { listener.onPong(it, rtt) }
+                }
+            }
+            is InboundPacket.Media -> handleMedia(classified.bytes, from)
+            is InboundPacket.StunResponse -> Unit
+            is InboundPacket.Dropped -> {
+                packetsDropped.incrementAndGet()
+                listener.onDropped(classified.reason, from)
+            }
+        }
+    }
+
     private fun handleMedia(sealed: ByteArray, from: InetSocketAddress) {
         if (listener.onSealedMedia(sealed, from)) return
         val decoded = CallMediaFrame.decode(sessionKey, sealed)
@@ -466,6 +555,8 @@ class MediaSocket(
         pairs.clear()
         selectedKey = null
         peerAddress = null
+        peerCandidate = null
+        relay = null
         synchronized(stunTxIds) { stunTxIds.clear() }
     }
 

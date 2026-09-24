@@ -273,7 +273,7 @@ object ContactSyncRecord {
 
             if (existing == null) {
                 contacts.seen(r.publicKey, nowMs, displayNameHint = r.alias)
-                if (r.blocked == true) { contacts.block(r.publicKey); blockApplied++ }
+                if (r.blocked == true) { contacts.block(r.publicKey, r.syncTimestampMs); blockApplied++ }
                 if (r.verified == true) {
                     contacts.setVerification(r.publicKey, ContactStore.VerificationState.VERIFIED)
                 }
@@ -286,8 +286,9 @@ object ContactSyncRecord {
             r.alias?.let { contacts.setDisplayName(existing.address, it) }
             // Rule 3: only a record that CARRIES a block decision may change one.
             when (r.blocked) {
-                true -> { contacts.block(existing.address); blockApplied++ }
-                false -> { contacts.unblock(existing.address); blockApplied++ }
+                true -> { contacts.block(existing.address, r.syncTimestampMs); blockApplied++ }
+                // __BLOCK_SYNC_LWW_2026_09_24__ the record's own time, not "now" (devsync LWW).
+                false -> { BlockPolicy.unblockEverySpelling(contacts, existing.address, r.syncTimestampMs); blockApplied++ }
                 null -> Unit
             }
             if (r.verified != null) {

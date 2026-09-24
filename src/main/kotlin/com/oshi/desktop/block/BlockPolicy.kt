@@ -174,13 +174,13 @@ object BlockPolicy {
      * @return how many contact rows were unblocked. Zero means nothing matched, which is
      *   a legitimate outcome (already unblocked, or never blocked) and not an error.
      */
-    fun unblockEverySpelling(contacts: ContactStore, address: String): Int {
+    fun unblockEverySpelling(contacts: ContactStore, address: String, atMs: Long = System.currentTimeMillis()): Int {
         val wanted = normalizeKey(address)
         if (wanted.isEmpty()) return 0
         var n = 0
         for (c in contacts.all()) {
             if (c.blocked && normalizeKey(c.address) == wanted) {
-                contacts.unblock(c.address)
+                contacts.unblock(c.address, atMs)
                 n++
             }
         }

@@ -44,13 +44,36 @@ class MdnsService(
     private val instanceLabel: String,
     private val hostLabel: String,
     private val port: Int,
-    private val txtEntries: List<String>,
+    txtEntries: List<String>,
     private val onServiceFound: (DiscoveredService) -> Unit,
     private val onServiceLost: (String) -> Unit = {},
     private val log: (String) -> Unit = {},
     /** Injectable so [expireStale] can be tested without waiting five minutes. */
     private val clock: () -> Long = System::currentTimeMillis,
+    /**
+     * __DEVSYNC_DIRECT_2026_09_22__ The DNS-SD service type. Default: the mesh's
+     * `_oshi-mesh._tcp`. Direct own-device sync runs a SECOND instance for
+     * `_oshi-devsync._tcp.local.` (docs/OSHI_DEVICE_SYNC_DIRECT.md §5.1) — its own type and its
+     * own listener, never the mesh's (which drops own-key frames and is unencrypted).
+     */
+    serviceTypeName: String = MeshProtocol.SERVICE_TYPE,
+    /**
+     * The TXT key without which a resolved instance is dropped: the mesh's `pk`. Devsync's TXT is
+     * `v`/`t` only (§5.1, no key — that is the unlinkability point), so it passes null. With the
+     * mesh default, every devsync peer was resolved and then silently DISCARDED: measured on a real
+     * en0, two desktops advertising (both visible to `dns-sd -B`) never found each other.
+     */
+    private val requiredTxtKey: String? = "pk",
 ) {
+    /** Current TXT. Mutable for devsync's hourly rotating tag; see [updateTxt]. */
+    @Volatile private var txtEntries: List<String> = txtEntries
+
+    /** Replace the TXT record and re-announce it (devsync rotates its account tag every hour). */
+    fun updateTxt(entries: List<String>) {
+        txtEntries = entries
+        if (running.get()) safely { announce() }
+    }
+
 
     data class DiscoveredService(
         val instanceName: String,
@@ -63,7 +86,7 @@ class MdnsService(
         val platform: String get() = txt["platform"] ?: "unknown"
     }
 
-    private val serviceType = MdnsCodec.Name.of(MeshProtocol.SERVICE_TYPE)
+    private val serviceType = MdnsCodec.Name.of(serviceTypeName)
     private val instanceName = MdnsCodec.Name(listOf(instanceLabel) + serviceType.labels)
     private val hostName = MdnsCodec.Name(listOf(hostLabel, "local"))
     private val metaQuery = MdnsCodec.Name.of("_services._dns-sd._udp.local.")
@@ -313,7 +336,7 @@ class MdnsService(
         // nothing a TCP connection to it could accomplish. Drop it here rather than let an
         // empty-string key become a routing entry that matches every tolerant lookup in
         // MeshNode.
-        if (svc.publicKey.isEmpty()) return null
+        if (requiredTxtKey != null && svc.txt[requiredTxtKey].isNullOrEmpty()) return null
         return svc
     }
 

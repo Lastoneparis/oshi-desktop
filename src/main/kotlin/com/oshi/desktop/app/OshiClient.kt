@@ -3,6 +3,8 @@ package com.oshi.desktop.app
 import com.oshi.desktop.DesktopIdentity
 import com.oshi.desktop.DesktopV2Signer
 import com.oshi.desktop.block.BlockPolicy
+import com.oshi.desktop.block.BlockedByPeerStore
+import com.oshi.desktop.block.BlockedNoticeGate
 import com.oshi.desktop.call.CallLane
 import com.oshi.desktop.call.CallSignalClient
 import com.oshi.desktop.call.CallStateMachine
@@ -15,16 +17,20 @@ import com.oshi.desktop.group.GroupMessageWire
 import com.oshi.desktop.group.GroupType
 import com.oshi.desktop.group.GroupUpdateWire
 import com.oshi.desktop.group.MinimalGroupUpdate
+import com.oshi.desktop.i18n.t
 import com.oshi.desktop.mesh.MeshNode
 import com.oshi.desktop.msg.ControlEvent
 import com.oshi.desktop.msg.ControlPayloadRouter
 import com.oshi.desktop.msg.ControlPrefix
 import com.oshi.desktop.msg.DeliveryReceipt
 import com.oshi.desktop.msg.MessageActionPayload
+import com.oshi.desktop.msg.PeerNickname
+import com.oshi.desktop.msg.ProfileUpdateWire
 import com.oshi.desktop.msg.ReactionPayload
 import com.oshi.desktop.msg.ReadReceipt
 import com.oshi.desktop.msg.TypingPayload
 import com.oshi.desktop.net.AccountDeletionReceipt
+import com.oshi.desktop.net.MessagePushClient
 import com.oshi.desktop.net.RouterState
 import com.oshi.desktop.net.V2AccountClient
 import com.oshi.desktop.net.V2BlobClient
@@ -48,8 +54,11 @@ import com.oshi.desktop.store.DeliveryStatus
 import com.oshi.desktop.store.DesktopPaths
 import com.oshi.desktop.store.IdentityStore
 import com.oshi.desktop.store.KeyVault
+import com.oshi.desktop.store.LocalDataKeys
+import com.oshi.desktop.store.MediaVault
 import com.oshi.desktop.store.MediaType
 import com.oshi.desktop.store.Message
+import com.oshi.desktop.store.ReceiptPreferences
 import com.oshi.desktop.store.MessageStore
 import com.oshi.desktop.store.PrekeyStore
 import com.oshi.desktop.store.SecretStore
@@ -65,6 +74,7 @@ import com.oshi.desktop.sync.V2SyncClient
 import com.oshi.messenger.network.v2.OSHICryptoV2
 import com.oshi.messenger.network.v2.V2FileKeyMessage
 import java.io.File
+import java.security.SecureRandom
 import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
@@ -133,9 +143,23 @@ class OshiClient(
      * have typed — the default comes from [V2Http.defaultBaseUrl].
      */
     val serverUrl: String = V2Http.defaultBaseUrl(),
-    val displayName: String = defaultDisplayName(),
+    /**
+     * __SHARED_NICKNAME_2026_09_22__ The LOCAL fallback label (`--name`, `OSHI_NAME`, or
+     * "user (os)"). It is never put on the wire as a nickname — only [ownNickname], which
+     * the user set on purpose, is. See [displayName].
+     */
+    displayName: String = defaultDisplayName(),
     private val log: (String) -> Unit = {},
 ) : AutoCloseable {
+
+    private val fallbackDisplayName: String = displayName
+
+    /**
+     * What this account is called on this machine: the nickname set in Settings when there
+     * is one, else the launch-time fallback. Read at use, so a rename shows up everywhere
+     * (reaction/typing `senderName`, the window title on next draw) without a restart.
+     */
+    val displayName: String get() = ownNickname ?: fallbackDisplayName
 
     val vault: KeyVault = KeyVault.open(File(home, KeyVault.FILE_NAME), secretStore, passphrase)
     val identity: DesktopIdentity = IdentityStore.loadOrCreate(vault)
@@ -143,12 +167,45 @@ class OshiClient(
     /** This account's address: the standard padded base64 of its X25519 public key. */
     val address: String get() = identity.userKey
 
-    val contacts = ContactStore(File(home, "contacts.json"))
-    val messages = MessageStore(File(home, "messages"))
+    /**
+     * __LOCAL_DATA_AT_REST_2026_09_22__ One vault entry, one HKDF subkey per local store.
+     * Contacts, groups, the schedule and attachments are sealed at rest under these; see
+     * [LocalDataKeys]. A vault that does not open never gets this far, so no store below can
+     * be constructed without its key and read as empty.
+     */
+    private val localDataRoot: ByteArray = LocalDataKeys.root(vault)
+
+    val contacts = ContactStore(File(home, "contacts.json"), LocalDataKeys.derive(localDataRoot, LocalDataKeys.CONTACTS))
+    // __BLOCKED_NOTICE_SWITCH_2026_09_23__ rate-limit stamps for the "you are blocked" notice.
+    private val blockedNotice = BlockedNoticeGate(
+        File(home, "blocked_notice.json"), LocalDataKeys.derive(localDataRoot, LocalDataKeys.BLOCKED_NOTICE),
+    )
+    /**
+     * __BLOCKED_BY_PEER_2026_09_24__ peers whose 🚫BLOCKED🚫 notice told us they block us: never
+     * dialled (no offer, no VoIP push) until they write to us again. See [BlockedByPeerStore].
+     */
+    val blockedByPeers = BlockedByPeerStore(
+        File(home, "blocked_by_peer.json"), LocalDataKeys.derive(localDataRoot, LocalDataKeys.BLOCKED_BY_PEER),
+    )
+    private val receiptPreferences = ReceiptPreferences(File(home, ReceiptPreferences.FILE_NAME))
+    // A distinct random data-encryption key keeps an exported history from becoming
+    // readable merely because another vault entry is later repurposed. The vault itself is
+    // OS-store/passphrase protected and fails closed before the client is assembled.
+    private val messageHistoryKey: ByteArray = vault.getOrCreate(MessageStore.HISTORY_KEY_ACCOUNT) {
+        ByteArray(32).also(SecureRandom()::nextBytes)
+    }
+    val messages = MessageStore(File(home, "messages"), messageHistoryKey)
 
     private val prekeys = PrekeyStore(vault)
     private val sessions = SessionStore(vault)
     private val http = V2Http(DesktopV2Signer(identity), serverUrl)
+
+    /** __DESKTOP_REPORT_2026_09_23__ "Signaler" — see [V2ReportClient] for the privacy contract. */
+    val reports = com.oshi.desktop.net.V2ReportClient(
+        http, { identity.userKey },
+        File(home, "reports.json"), LocalDataKeys.derive(localDataRoot, LocalDataKeys.REPORTS),
+    )
+    @Volatile private var lastReportRetryMs = 0L
     val config = V2ConfigGate(baseUrl = serverUrl, log = log)
     private val keys = V2KeysClient(http, identity, prekeys)
     private val relay = V2MessagesClient(http)
@@ -156,8 +213,33 @@ class OshiClient(
     val account = V2AccountClient(http)
     private val routerState = RouterState(File(home, RouterState.FILE_NAME))
 
-    val router = V2Router(identity, config, keys, relay, sessions, prekeys, routerState, log)
+    /**
+     * __PER_DEVICE_MAILBOX_2026_09_23__ This install as one device of its account
+     * (ServerPatches/per_device_mailbox/CLIENT_SPEC.md). Inert while `/v2/config.device_mailbox_enabled`
+     * is false; it also decides whether this install may publish the ACCOUNT bundle, which is
+     * what stops a desktop restored from the phone's recovery key from fighting the phone.
+     */
+    val deviceMailbox = com.oshi.desktop.net.DeviceMailbox(
+        identity = identity,
+        vault = vault,
+        http = http,
+        keys = keys,
+        accountPrekeys = prekeys,
+        devicePrekeys = PrekeyStore(vault, PrekeyStore.DEVICE_VAULT_ACCOUNT),
+        config = config,
+        stateFile = File(home, com.oshi.desktop.net.DeviceMailbox.FILE_NAME),
+        identityOrigin = { IdentityStore.origin(vault) },
+        log = log,
+    ).also { http.deviceSigner = it }
+
+    val router = V2Router(identity, config, keys, relay, sessions, prekeys, routerState, log, deviceMailbox)
     val mesh = MeshNode(address, displayName, log)
+
+    /**
+     * __DESKTOP_MESSAGE_PUSH_2026_09_23__ The signed generic wake after a v2 send (the relay does
+     * not push). See [MessagePushClient]: fire-and-forget, ids only, never content or names.
+     */
+    private val messagePush = MessagePushClient(serverUrl, DesktopV2Signer(identity), address, log)
 
     // ------------------------------------------------------------- the wired rows
 
@@ -168,19 +250,58 @@ class OshiClient(
     val places = PlaceRouter()
 
     /** Row 0.17: this account's groups, as the wire JSON an iPhone accepts. */
-    val groups = GroupStore(File(home, "groups.json"))
+    val groups = GroupStore(File(home, "groups.json"), LocalDataKeys.derive(localDataRoot, LocalDataKeys.GROUPS))
 
-    private val groupIngest = GroupIngest(groups) { address }
+    // __DEVSYNC_REJOIN_2026_09_23__ a group LEFT on this account (devsync left-groups state) is not
+    // re-created by a member's re-share, unless the user rejoined (design §8.4).
+    private val groupIngest = GroupIngest(groups) { address }.also { ingest ->
+        ingest.refusesGroup = { gid -> runCatching { devSync.refusesGroup(gid) }.getOrDefault(false) }
+        ingest.isBlocked = { key -> BlockPolicy.outgoingText(contacts, key) == BlockPolicy.Outbound.REFUSE_BLOCKED }
+    }
 
     /** Row 0.25: the queue. Driven by the poll loop — see [start]. */
-    val scheduled = ScheduledMessageStore(File(home, "scheduled-messages.json"))
+    val scheduled = ScheduledMessageStore(
+        File(home, "scheduled-messages.json"),
+        LocalDataKeys.derive(localDataRoot, LocalDataKeys.SCHEDULED),
+    )
 
     val scheduler = ScheduledMessageRunner(scheduled, ::deliverScheduled)
 
-    /** Where decrypted inbound media is written. Created on first use, not at construction. */
+    /** Where inbound media is written — SEALED ("OSHIMED1", [MediaVault]). Created on first use. */
     val mediaDir: File get() = File(home, "media")
 
+    /**
+     * __LOCAL_DATA_AT_REST_2026_09_22__ The attachment vault. Installed process-wide so the
+     * window's composables, which open media by path, can decrypt it. At construction: the
+     * decrypted-copy scratch dir is swept (whatever a crashed run left), the plaintext files an
+     * older build left in `media/` are LISTED synchronously — before this process downloads
+     * anything, so nothing half-written can be listed — and sealed in place on a daemon thread.
+     */
+    val mediaVault: MediaVault = MediaVault(
+        mediaDir = File(home, "media"),
+        scratchDir = File(home, MediaVault.SCRATCH_DIR_NAME),
+        key = LocalDataKeys.derive(localDataRoot, LocalDataKeys.MEDIA),
+    ).also { v ->
+        MediaVault.install(v)
+        runCatching { v.sweepScratch() }
+        val legacy = runCatching { v.legacyCandidates() }.getOrDefault(emptyList())
+        if (legacy.isNotEmpty()) {
+            Thread({
+                val r = v.migratePlaintext(legacy)
+                log("client: media at rest — sealed ${r.sealed}, failed ${r.failed} (left as they were), skipped ${r.skipped}")
+            }, "oshi-media-migration").apply { isDaemon = true; start() }
+        }
+    }
+
     private val syncCursor = SyncCursor(File(home, "sync-cursor.json"))
+
+    /**
+     * __DEVSYNC_DIRECT_2026_09_22__ Direct own-device sync (docs/OSHI_DEVICE_SYNC_DIRECT.md):
+     * LAN + live pass-through relay, nothing stored server-side. Gated by
+     * `/v2/config.devsync_enabled` (default off) or the local override; ticked by the poll loop.
+     */
+    private val devSyncLazy = lazy { com.oshi.desktop.devsync.DesktopDevSync(this, home, log) }
+    val devSync: com.oshi.desktop.devsync.DesktopDevSync get() = devSyncLazy.value
 
     /**
      * Row 0.24's V2 archive. LAZY, and that is not an optimisation: building it derives the
@@ -238,17 +359,28 @@ class OshiClient(
 
     val botApi: BotApi by lazy { BotApi(baseUrl = serverUrl) }
 
+    /**
+     * __CALL_RATING_2026_09_22__ "How was the call quality?" after a finished call.
+     *
+     * Held here rather than in [ClientCli] so the window can reach the same instance
+     * when it grows a call surface — one ask-history, one cooldown, whichever surface
+     * the person was using. WHETHER to ask is
+     * [com.oshi.messenger.service.CallRatingPolicy], compiled from the Android tree.
+     */
+    val callRating: com.oshi.desktop.call.CallRatingClient by lazy {
+        com.oshi.desktop.call.CallRatingClient(myPublicKey = address)
+    }
+
     // ------------------------------------------------------------------ calls (row 2.1)
 
     /**
-     * The call SIGNALLING lane — **and there is no media under it.**
+     * The call signalling and experimental desktop audio lane.
      *
-     * This client can ring a peer, be rung, answer, decline and hang up. It cannot carry one
-     * sample of audio in either direction: there is no capture, no playback, no media socket
-     * and no ICE. [CallLane.NO_AUDIO_WILL_FLOW] is the single owner of that sentence and
-     * every surface that starts a call prints it — the same discipline row 0.26's
-     * [BOT_CHANNEL_IS_PLAINTEXT] enforces on the plaintext bot lane, for the same reason: a
-     * caller must be handed the fact rather than left to find it in a doc comment.
+     * This client can ring a peer, be rung, answer, decline and hang up. It also opens a
+     * microphone, speaker and UDP/ICE leg after acceptance. That is not a claim of general
+     * call reachability: there is no TURN fallback and the path is not yet validated between
+     * real desktop devices or against phones. A call whose local audio devices or media path
+     * cannot open is ended rather than represented as a silent connected call.
      *
      * It rides a SEPARATE server from every other row here — the call server on port 8083,
      * reached through nginx at `/api/call/`, never `/v2/…` (see [CallSignalClient]) — and
@@ -258,6 +390,16 @@ class OshiClient(
      * nothing a client that never places a call should pay for.
      */
     private val callsLazy: Lazy<CallLane> = lazy {
+        // __CALL_LOG_AT_REST_2026_09_23__ Every call-lane line also goes to the sealed call
+        // log (OSHILOG1, same file format and same redacted export as iOS / Android). Installed
+        // here, with the lane, so a client that never places a call never opens one.
+        com.oshi.desktop.diag.DesktopCallLog.install(
+            home, LocalDataKeys.derive(localDataRoot, LocalDataKeys.CALL_LOG),
+        )
+        val callLog: (String) -> Unit = { line ->
+            log(line)
+            com.oshi.desktop.diag.DesktopCallLog.log(line)
+        }
         CallLane(
             myAddress = address,
             myPrivateKey = identity.identity.priv,
@@ -265,7 +407,10 @@ class OshiClient(
             deviceId = syncCursor.deviceId(),
             // The SAME ContactStore every other ingress uses, so a blocked peer cannot ring
             // this client — enforcement, not a second flag (PARITY.md 0.21).
-            machine = CallStateMachine(address, contacts, syncCursor.deviceId()),
+            machine = CallStateMachine(address, contacts, syncCursor.deviceId()).also { m ->
+                // __BLOCKED_BY_PEER_2026_09_24__ never dial a peer that told us it blocks us.
+                m.isBlockedBy = { peer -> blockedByPeers.isBlockedBy(peer) }
+            },
             // AUDIO. Opens a UDP socket, the microphone and the speaker on a connected
             // call, signals ICE candidates, and ENDS the call if no device can be opened
             // rather than connecting it in silence — a silent connected call makes two
@@ -277,8 +422,22 @@ class OshiClient(
             // between two real people on two real machines. Audio has been shown crossing
             // LOOPBACK in a test; that is not the same claim.
             mediaOpener = com.oshi.desktop.call.CallMedia.real(),
-            log = log,
-        ).also { lane -> lane.onEvent = { event -> onCall(event) } }
+            log = callLog,
+        ).also { lane ->
+            lane.onEvent = { event ->
+                // Seal the call's last lines now: the process may be quit right after a hang-up.
+                if (event is CallLane.CallEvent.Ended) com.oshi.desktop.diag.DesktopCallLog.flush()
+                // A blocked caller never rings here; they get the same (rate-limited)
+                // notice a blocked message gets, instead of ringing out into nothing.
+                if (event is CallLane.CallEvent.Refused &&
+                    event.refusal == com.oshi.desktop.call.CallRefusal.BLOCKED) {
+                    event.from?.let { noticeBlockedSender(it, null) }
+                }
+                // __BLOCKED_BY_PEER_2026_09_24__ a peer that rings us no longer blocks us.
+                if (event is CallLane.CallEvent.Ringing && event.incoming) blockedByPeers.clear(event.peer)
+                onCall(event)
+            }
+        }
     }
 
     val calls: CallLane by callsLazy
@@ -314,16 +473,23 @@ class OshiClient(
      * @return how many bot messages were stored.
      */
     fun pollBots(): Int {
-        val entries = botQueue.pending().getOrElse {
-            log("client: bot queue unreachable: ${it.javaClass.simpleName}: ${it.message}")
-            return 0
-        }
         var stored = 0
-        for (entry in entries) {
-            if (entry !is BotQueueClient.QueueEntry.Bot) continue
-            val msg = runCatching { BotEnvelope.parse(entry.raw) }.getOrElse {
-                log("client: malformed bot envelope, skipped: ${it.message}")
-                continue
+        // __BOT_E2E_2026_09_23__ `bot-seal-v1` envelopes are opened with the IDENTITY X25519
+        // pair (the one behind [address]); legacy ones are read as before. drainBots acks
+        // every bot entry, a dropped one included, so nothing cycles.
+        botQueue.drainBots(identity.identity.priv, identity.identity.pub) { decoded ->
+            val msg = when (decoded) {
+                is BotEnvelope.Decoded.Message -> decoded.message
+                is BotEnvelope.Decoded.Dropped -> {
+                    // Reason only — never content, never the outer placeholder.
+                    log("client: bot envelope dropped: ${decoded.reason}")
+                    return@drainBots
+                }
+                is BotEnvelope.Decoded.CallbackAnswer -> {
+                    // No inline keyboards on desktop, so no pending callback to answer.
+                    log("client: bot callback answer received (${decoded.sealing.transport}); nothing to show")
+                    return@drainBots
+                }
             }
             // A bot post is not a ratcheted message and must never be filed as if a peer
             // had authenticated it: it goes under its own conversation key.
@@ -352,14 +518,18 @@ class OshiClient(
                     // carries no parseable timestamp gets ours, and SAYS it is ours.
                     sentAtSource = if (msg.unixMillis != null) TimestampSource.ISO8601
                                    else TimestampSource.LOCAL_CLOCK,
+                    // Persists how it was protected, for the honest thread label.
+                    transport = msg.sealing.transport,
                 )
             )
             if (outcome == MessageStore.AppendOutcome.INSERTED) stored++
-            // Ack a duplicate too: the queue entry is still on the server, and leaving it
-            // there means re-reading the same post on every poll for ever.
-            botQueue.ackBot(msg.envelopeMessageId)
+            // A duplicate is acked too (by drainBots): the queue entry is still on the
+            // server, and leaving it there means re-reading the same post on every poll.
+        }.onFailure {
+            log("client: bot queue unreachable: ${it.javaClass.simpleName}: ${it.message}")
+            return 0
         }
-        if (stored > 0) log("client: stored $stored bot message(s) — this lane is NOT encrypted")
+        if (stored > 0) log("client: stored $stored bot message(s)")
         return stored
     }
 
@@ -406,8 +576,13 @@ class OshiClient(
      * Both privacy toggles, checked at the SEND site exactly as both phones do. Off means
      * the payload is never emitted; it does not mean an inbound one is ignored.
      */
-    var deliveryReceiptsEnabled: Boolean = true
-    var readReceiptsEnabled: Boolean = true
+    private var receiptValues = receiptPreferences.load()
+    var deliveryReceiptsEnabled: Boolean
+        get() = receiptValues.delivery
+        set(value) { receiptValues = receiptValues.copy(delivery = value); receiptPreferences.save(receiptValues) }
+    var readReceiptsEnabled: Boolean
+        get() = receiptValues.read
+        set(value) { receiptValues = receiptValues.copy(read = value); receiptPreferences.save(receiptValues) }
 
     private val running = AtomicBoolean(false)
     private var timers: ScheduledExecutorService? = null
@@ -415,6 +590,7 @@ class OshiClient(
 
     init {
         router.onMessage = { inbound -> receive(inbound) }
+        router.onSentCopy = { copy -> storeSentCopy(copy) }
         mesh.onMessage = { m ->
             // PARITY.md 0.21. On the mesh the sender key rides the envelope in the clear,
             // so the block is applied BEFORE the payload is looked at — the position
@@ -518,12 +694,30 @@ class OshiClient(
         timer.scheduleWithFixedDelay({
             PollGuard.run(log) {
                 router.refreshConfig()
-                if (config.isEnabledCached() && !published) {
+                // Re-checked hourly, not once per process: the pool drains while we run, and
+                // whether THIS install may refill the account bundle can change (DeviceMailbox).
+                if (config.isEnabledCached() && (!published || System.currentTimeMillis() - publishedAt > REPUBLISH_CHECK_MS)) {
+                    val wasPublished = published
                     published = router.publishBundleIfNeeded()
-                    if (published) log("client: prekey bundle published — peers can now reach us over V2")
+                    if (published) publishedAt = System.currentTimeMillis()
+                    if (published && !wasPublished) log("client: prekey bundle published — peers can now reach us over V2")
                 }
+                // __PER_DEVICE_MAILBOX_2026_09_23__ register / keep this device's bundle fresh
+                // (a no-op while the flag is off), BEFORE the poll picks device or legacy mode.
+                // After the account publish: a brand-new identity is only authorisable on the
+                // device routes once its first publish has bound its signing key.
+                runCatching { deviceMailbox.tick() }
+                    .onFailure { log("client: device mailbox tick failed: ${it.javaClass.simpleName}: ${it.message}") }
                 router.poll()
                 tick()
+                // __DESKTOP_REPORT_2026_09_23__ a report filed offline goes out once the
+                // server answers again ("sent automatically" is what the UI promises).
+                if (System.currentTimeMillis() - lastReportRetryMs > 10 * 60_000L) {
+                    lastReportRetryMs = System.currentTimeMillis()
+                    runCatching { reports.retryPending() }
+                }
+                // __DEVSYNC_DIRECT_2026_09_22__ gate + engine lifecycle (a no-op while the flag is off).
+                runCatching { devSync.tick() }.onFailure { log("client: devsync tick failed: ${it.javaClass.simpleName}: ${it.message}") }
             }
         }, 0, pollIntervalMs, TimeUnit.MILLISECONDS)
 
@@ -561,6 +755,7 @@ class OshiClient(
     }
 
     @Volatile private var published = false
+    @Volatile private var publishedAt = 0L
 
     fun stop() {
         if (!running.compareAndSet(true, false)) return
@@ -597,10 +792,17 @@ class OshiClient(
         }
         mesh.stop()
         loraDetach()
+        if (devSyncLazy.isInitialized()) runCatching { devSync.stop() }
         routerState.flush()
     }
 
-    override fun close() = stop()
+    override fun close() {
+        stop()
+        runCatching { messagePush.close() }
+        // Decrypted scratch copies (playback, "open in another app") do not outlive the client.
+        runCatching { mediaVault.sweepScratch() }
+        MediaVault.uninstall(mediaVault)
+    }
 
     // ------------------------------------------------------------------ send
 
@@ -621,10 +823,181 @@ class OshiClient(
      * with each other and are both wrong. Every payload this client legitimately emits goes
      * out through its own method below, none of which routes through here.
      */
-    fun send(peerAddress: String, text: String): SendOutcome {
+    fun send(
+        peerAddress: String,
+        text: String,
+        replyTo: com.oshi.desktop.msg.ReplyEnvelope.Quote? = null,
+    ): SendOutcome {
         if (ControlPrefix.isControl(text)) return SendOutcome.REFUSED_CONTROL_PAYLOAD
-        return sendPlaintext(peerAddress, text, storeRow = true)
+        // __GROUP_PARITY_2026_09_23__ a reply travels in the iOS `💬REPLY💬` envelope, wrapped
+        // AFTER the user text was checked (the envelope itself is a sentinel by design).
+        val wire = replyTo?.let { com.oshi.desktop.msg.ReplyEnvelope.wrap(text, it) } ?: text
+        // __SHARED_NICKNAME_2026_09_22__ Read BEFORE the row is appended: "first reply".
+        val firstReply = !hasSentUserMessage(peerAddress)
+        val outcome = sendPlaintext(peerAddress, wire, storeRow = true)
+        if (outcome == SendOutcome.SENT) afterUserSend(peerAddress, firstReply)
+        return outcome
     }
+
+    // ------------------------------------------- __SHARED_NICKNAME_2026_09_22__ profile
+
+    /**
+     * The nickname the user set for THIS account, sealed in the vault (never a plaintext
+     * file — same protection as the identity, on macOS Keychain, Windows DPAPI and Linux
+     * Secret Service alike). Null when none was set.
+     */
+    val ownNickname: String?
+        get() = vault.get(OWN_NICKNAME_ACCOUNT)
+            ?.let { PeerNickname.sanitize(String(it, Charsets.UTF_8)) }
+
+    /** Peers already asked for their profile in this process — one request per peer per run. */
+    private val profileRequested = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /**
+     * The phones' privacy gate, ported: a profile goes only to someone we have WRITTEN to at
+     * least once (iOS `hasSentUserMessage`, Android `hasOutgoingUserMessage`). Somebody who
+     * merely messaged us does not learn our name until we answer.
+     */
+    fun hasSentUserMessage(peerAddress: String): Boolean =
+        runCatching { messages.messages(peerAddress).any { it.fromMe } }.getOrDefault(false)
+
+    /**
+     * May this client announce a profile under its identity key? ONLY when the key was
+     * minted here ([IdentityStore.Origin.GENERATED]).
+     *
+     * A desktop restored from a phone's recovery key holds the PHONE'S key. Every field of a
+     * profile update is recorded by peers against that key, and "absent = cannot" is
+     * deliberate on both phones: `groupEnvelopeV3`/`ratchetV3` absent ⇒ iOS
+     * `PeerCapabilityStore.record(…: false)` and Android `PeerCapabilities.record(… false)`
+     * REMOVE the capability; `profileImageData` absent ⇒ iOS `processProfileUpdate` sets the
+     * presence avatar to nil. This client cannot truthfully claim what the phone advertises,
+     * so one broadcast from here would downgrade the phone's sessions and group envelopes
+     * with every contact. [IdentityStore.Origin.UNKNOWN] (a vault older than the marker) is
+     * treated the same way: not broadcasting is the only answer that can never do that.
+     *
+     * Receiving and DISPLAYING peers' nicknames is unaffected, and so is the manual
+     * "Send to my phone" archive write, which goes to our own devices, not to contacts.
+     */
+    val mayBroadcastProfile: Boolean
+        get() = IdentityStore.origin(vault) == IdentityStore.Origin.GENERATED
+
+    /**
+     * Send our `📸PROFILE_UPDATE📸` to one peer, over V2 (the only lane this client has, and
+     * the one iOS and Android now try first). Silent by construction: the V2 relay does not
+     * push, the prefix is on every receiver's no-push list, and no receiver stores it as a
+     * row. Nothing is stored here either. REFUSED (nothing leaves) on a shared identity —
+     * see [mayBroadcastProfile]; every automatic path goes through here.
+     */
+    fun sendProfileUpdate(peerAddress: String, clear: Boolean = false): SendOutcome {
+        if (!mayBroadcastProfile) return SendOutcome.REFUSED_CONTROL_PAYLOAD
+        return sendPlaintext(peerAddress, ProfileUpdateWire.encode(ownNickname, clear), storeRow = false)
+    }
+
+    /**
+     * Outcome of [setOwnNickname]: what is stored now, and how many peers were told.
+     * [withheld] = stored locally but deliberately NOT broadcast (shared identity).
+     */
+    data class NicknameUpdate(
+        val nickname: String?,
+        val changed: Boolean,
+        val sent: Int,
+        val eligible: Int,
+        val withheld: Boolean = false,
+    )
+
+    /**
+     * Set (or, with null/blank, remove) this account's nickname, then tell every eligible
+     * contact. Blocking I/O — call it off the UI thread. A removal is announced once as an
+     * explicit empty `displayName`, so receivers drop the old name instead of keeping it.
+     */
+    fun setOwnNickname(name: String?): NicknameUpdate {
+        val clean = PeerNickname.sanitize(name)
+        val before = ownNickname
+        if (clean == before) return NicknameUpdate(clean, changed = false, sent = 0, eligible = 0)
+        if (clean == null) vault.delete(OWN_NICKNAME_ACCOUNT)
+        else vault.put(OWN_NICKNAME_ACCOUNT, clean.toByteArray(Charsets.UTF_8))
+        if (!mayBroadcastProfile) {
+            log("client: nickname stored; NOT broadcast — this identity is shared with a phone (or its origin is unknown)")
+            return NicknameUpdate(clean, changed = true, sent = 0, eligible = 0, withheld = true)
+        }
+        val (sent, eligible) = broadcastProfile(clear = clean == null)
+        log("client: nickname ${if (clean == null) "removed" else "set"}; told $sent/$eligible contact(s)")
+        return NicknameUpdate(clean, changed = true, sent = sent, eligible = eligible)
+    }
+
+    /**
+     * __DEVSYNC_PROFILE_2026_09_23__ Adopt the nickname set on ANOTHER device of this account
+     * (direct own-device sync, PROFILE record). Stored only: the editing device already told the
+     * contacts. Returns true when it changed.
+     */
+    fun adoptOwnNicknameFromOwnDevice(name: String): Boolean {
+        val clean = PeerNickname.sanitize(name) ?: return false
+        if (clean == ownNickname) return false
+        vault.put(OWN_NICKNAME_ACCOUNT, clean.toByteArray(Charsets.UTF_8))
+        return true
+    }
+
+    /** Profile to every unblocked contact we have written to. Returns (sent, eligible). */
+    fun broadcastProfile(clear: Boolean = false): Pair<Int, Int> {
+        if (!mayBroadcastProfile) return 0 to 0
+        val targets = contacts.all()
+            .filter { !it.blocked && it.address != address && hasSentUserMessage(it.address) }
+        var sent = 0
+        for (c in targets) {
+            if (runCatching { sendProfileUpdate(c.address, clear) }.getOrNull() == SendOutcome.SENT) sent++
+        }
+        return sent to targets.size
+    }
+
+    /**
+     * After a message the USER wrote went out: on a first reply, introduce ourselves (the
+     * phones do exactly this, `isFirstMessage → sendProfileUpdate`).
+     */
+    private fun afterUserSend(peerAddress: String, firstReply: Boolean) {
+        if (firstReply && ownNickname != null && mayBroadcastProfile) runCatching { sendProfileUpdate(peerAddress) }
+    }
+
+    /**
+     * After PROSE from a peer whose own name we still do not know: ask once per run
+     * (`📸PROFILE_REQUEST📸`, silent). Only once we have written to them — both phones answer
+     * a request only for someone they have written to, and it is the same courtesy back.
+     * This is how contacts that predate the nickname feature get named without anyone
+     * having to rename.
+     */
+    private fun maybeRequestProfile(peerAddress: String) {
+        if (contacts.get(peerAddress)?.sharedNickname != null) return
+        // __FIRST_CONTACT_NICKNAME_2026_09_23__ No "have we written to them" gate on ASKING any
+        // more: the request discloses nothing of ours, and the peer's own gate (answer only
+        // someone THEY wrote to) is satisfied by the very message we are reacting to. With the
+        // gate, a stranger's first message — from a sender that did not attach its profile
+        // (Android ≤ 1.6.25 when the contact row already existed) — stayed titled by address
+        // until we replied.
+        if (!profileRequested.add(peerAddress)) return
+        runCatching { sendPlaintext(peerAddress, ControlPrefix.PROFILE_REQUEST, storeRow = false) }
+    }
+
+    /**
+     * Own-device sync of the nickname, through the ONE mechanism the phones already share:
+     * the legacy `/api/sync/profile` blob (`userName`). Only meaningful when this computer
+     * holds the SAME account as the phone (restored from its recovery key); otherwise the
+     * slot is simply this account's own. Manual on purpose — PARITY.md row 0.24 keeps this
+     * unauthenticated route out of any automatic loop.
+     *
+     * Pull: adopt the phone's nickname (and announce it to contacts if it changed).
+     */
+    fun legacySyncPullNickname(): Result<NicknameUpdate?> =
+        legacySync.pull(SyncProtocol.LegacyKind.PROFILE).map { blob ->
+            ProfileUpdateWire.readLegacyProfileBlob(blob)?.let { setOwnNickname(it) }
+        }
+
+    /** Push: write our nickname into that blob, carrying the phone's avatar and links through. */
+    fun legacySyncPushNickname(): Result<Unit> =
+        legacySync.pull(SyncProtocol.LegacyKind.PROFILE).mapCatching { existing ->
+            legacySync.push(
+                SyncProtocol.LegacyKind.PROFILE,
+                ProfileUpdateWire.mergeLegacyProfileBlob(existing, ownNickname),
+            ).getOrThrow()
+        }
 
     private fun sendPlaintext(peerAddress: String, text: String, storeRow: Boolean): SendOutcome {
         // Through BlockPolicy, never through `contacts.isBlocked` directly: the store's
@@ -638,8 +1011,14 @@ class OshiClient(
         val now = System.currentTimeMillis()
         val outcome = when {
             !config.isEnabledCached() -> SendOutcome.GATE_CLOSED
-            router.sendText(peerAddress, text.toByteArray(Charsets.UTF_8), msgId) -> SendOutcome.SENT
+            // A stored row is a user message: its other devices get a sent-copy (§3.6).
+            router.sendText(peerAddress, text.toByteArray(Charsets.UTF_8), msgId, selfCopy = storeRow) -> SendOutcome.SENT
             else -> SendOutcome.NO_V2_PATH
+        }
+        // __DESKTOP_MESSAGE_PUSH_2026_09_23__ user-visible rows only; silent control payloads
+        // (profile, receipts, typing, group state…) never wake anyone — same catalog as the phones.
+        if (storeRow && outcome == SendOutcome.SENT && !ControlPrefix.suppressesPush(text)) {
+            messagePush.wakeDirect(peerAddress, msgId)
         }
         if (storeRow) {
             messages.append(
@@ -818,7 +1197,9 @@ class OshiClient(
         val mime = probeMime(file)
         return sendMedia(
             peerAddress = peerAddress,
-            bytes = file.readBytes(),
+            // Through the vault: a GIF from GifOutbox is sealed at rest (a user's own file
+            // passes through as is). __PLAINTEXT_LEFTOVERS_2026_09_24__
+            bytes = mediaVault.openStream(file).use { it.readBytes() },
             filename = file.name,
             mime = mime,
             mediaType = mediaType ?: MediaType.forMime(mime),
@@ -881,9 +1262,10 @@ class OshiClient(
             manifest = enc.manifest,
             filename = filename,
             mime = mime,
-            mediaType = mediaType.wire,
+            mediaType = com.oshi.desktop.gif.GifWire.label(mediaType, mime),   // __GIF_PACK_2026_09_23__
         )
         val sent = router.sendText(peerAddress, key.toBytes(), msgId)
+        if (sent) messagePush.wakeDirect(peerAddress, msgId)   // __DESKTOP_MESSAGE_PUSH_2026_09_23__
         messages.append(
             Message(
                 id = msgId,
@@ -965,48 +1347,205 @@ class OshiClient(
     /** Add a member locally and tell the group. Admin-gated exactly as the ingest path is. */
     fun addGroupMember(groupId: String, memberAddress: String): GroupDefinition? {
         val g = groups.get(groupId) ?: return null
+        // __GROUP_E2E_V2_2026_09_23__ spec §5.2: admin, or any member of a collaborative/public group.
+        if (!g.isAdmin(address) && !(g.type != GroupType.ADMIN_ONLY && g.isMember(address))) return null
         if (g.isMember(memberAddress)) return g
         val now = System.currentTimeMillis()
         val updated = bumpVersion(
             g.copy(members = g.members + GroupMember(memberAddress, joinedAtUnixMillis = now, isAdmin = false))
         )
         groups.put(updated)
+        // __GROUP_E2E_V2_2026_09_23__ spec §5.2: the definition to every member of the NEW roster
+        // (the new member learns the group from it), then the optional Android companion to the
+        // members who already had the group.
+        broadcastGroupUpdate(updated, GroupUpdateWire.encodeDefinitionFramed(updated))
         broadcastGroupUpdate(
-            updated,
+            g,
             ControlPrefix.GROUP_UPDATE + GroupUpdateWire.encodeMemberAdded(updated.groupId, memberAddress),
         )
-        // The new member has no copy of the group at all, so the minimal update is useless
-        // to them — they get the whole definition, which is the payload their own ingest
-        // path's unknown-group gate is written for.
-        sendPlaintext(memberAddress, GroupUpdateWire.encodeDefinitionFramed(updated), storeRow = false)
         return updated
     }
 
     /** Remove a member locally and tell the group (including the person removed). */
     fun removeGroupMember(groupId: String, memberAddress: String): GroupDefinition? {
         val g = groups.get(groupId) ?: return null
+        if (!g.isAdmin(address)) return null
         val remaining = g.members.filterNot { GroupIdentity.sameIdentity(it.publicKey, memberAddress) }
         if (remaining.size == g.members.size) return g
-        val updated = bumpVersion(g.copy(members = remaining))
+        // __GROUP_E2E_V2_2026_09_23__ spec §5.2: the definition (member gone, added to
+        // evictedMemberKeys) to the remaining members AND the removed one; the `member_removed`
+        // companion is REQUIRED to the removed member.
+        val removed = g.members.first { GroupIdentity.sameIdentity(it.publicKey, memberAddress) }.publicKey
+        val updated = bumpVersion(
+            g.copy(
+                members = remaining,
+                evictedMemberKeys = (g.evictedMemberKeys + removed).distinctBy(GroupIdentity::canonicalIdentity),
+            )
+        )
         groups.put(updated)
-        val payload = ControlPrefix.GROUP_UPDATE +
-            GroupUpdateWire.encodeMemberRemoved(updated.groupId, memberAddress)
-        broadcastGroupUpdate(updated, payload)
-        sendPlaintext(memberAddress, payload, storeRow = false)
+        val definition = GroupUpdateWire.encodeDefinitionFramed(updated)
+        broadcastGroupUpdate(updated, definition)
+        sendPlaintext(removed, definition, storeRow = false)
+        sendPlaintext(
+            removed,
+            ControlPrefix.GROUP_UPDATE + GroupUpdateWire.encodeMemberRemoved(updated.groupId, removed),
+            storeRow = false,
+        )
         return updated
+    }
+
+    /**
+     * __GROUP_E2E_V2_2026_09_23__ Leave a group (spec §5.2): `member_removed` naming OURSELVES to
+     * every other member, over v2 1:1 only, then forget the group here and record the leave so a
+     * member's re-share cannot walk us back in (devsync C.16 tombstone, carried to own devices).
+     */
+    fun leaveGroup(groupId: String): Boolean {
+        val g = groups.get(groupId) ?: return false
+        broadcastGroupUpdate(
+            g,
+            ControlPrefix.GROUP_UPDATE + GroupUpdateWire.encodeMemberRemoved(g.groupId, address),
+        )
+        runCatching { devSync.noteLocalLeave(g.groupId, g.name) }
+            .onFailure { log("client: leave of ${g.groupId.take(8)}… not recorded for devsync: ${it.message}") }
+        groups.delete(g.groupId)
+        return true
     }
 
     /** Rename a group locally and tell the members. */
     fun renameGroup(groupId: String, name: String): GroupDefinition? {
         val g = groups.get(groupId) ?: return null
+        if (!g.isAdmin(address) && !(g.type != GroupType.ADMIN_ONLY && g.isMember(address))) return null
         val updated = bumpVersion(g.copy(name = name))
         groups.put(updated)
+        // __GROUP_E2E_V2_2026_09_23__ spec §5.2: the authoritative definition, then the companion.
+        broadcastGroupUpdate(updated, GroupUpdateWire.encodeDefinitionFramed(updated))
         broadcastGroupUpdate(
             updated,
             ControlPrefix.GROUP_UPDATE + GroupUpdateWire.encodeGroupRenamed(updated.groupId, name),
         )
         return updated
     }
+
+    /**
+     * Grant or revoke a member's administrator role, then broadcast the authoritative roster.
+     *
+     * There is no minimal role-change frame shared by the phones: iOS uses a full group
+     * definition for this operation. Sending that same frame matters because an admin set is
+     * accepted only from someone who was already an admin in the recipient's current roster.
+     * The creator key remains an admin, matching the safeguard in both phone clients.
+     */
+    fun setGroupMemberAdmin(groupId: String, memberAddress: String, isAdmin: Boolean): GroupDefinition? {
+        val g = groups.get(groupId) ?: return null
+        if (!g.isAdmin(address)) return null
+        val member = g.members.firstOrNull { GroupIdentity.sameIdentity(it.publicKey, memberAddress) } ?: return null
+        if (!isAdmin && GroupIdentity.sameIdentity(member.publicKey, g.adminPublicKey)) return null
+        if (member.isAdmin == isAdmin) return g
+        val updated = bumpVersion(
+            g.copy(members = g.members.map {
+                if (GroupIdentity.sameIdentity(it.publicKey, memberAddress)) it.copy(isAdmin = isAdmin) else it
+            })
+        )
+        groups.put(updated)
+        broadcastGroupUpdate(updated, GroupUpdateWire.encodeDefinitionFramed(updated))
+        return updated
+    }
+
+    /** __GROUP_PARITY_2026_09_23__ iOS's invite link for a group we are in (`inviteLink(inviter:)`). */
+    fun groupInviteLink(groupId: String): String? {
+        val g = groups.get(groupId) ?: return null
+        if (!g.isMember(address)) return null
+        return com.oshi.desktop.group.GroupInvite.link(g.groupId, g.name, address)
+    }
+
+    enum class JoinOutcome { ALREADY_MEMBER, REQUESTED, NOT_AN_INVITE, NO_INVITER }
+
+    /**
+     * __GROUP_PARITY_2026_09_23__ Join from an invite link — iOS `joinGroupFromInvite`
+     * (`GroupMessaging.swift:1731-1800`): a stub `{inviter (admin), us}` so the conversation
+     * exists at once, then an authenticated `member_sync_request` to the inviter over v2, who
+     * adds us and answers with the real definition (GROUP_E2E_V2_SPEC §5.3). A legacy link with no
+     * inviter cannot be completed on the v2 channel and is refused rather than half-joined.
+     */
+    fun joinGroupFromInvite(raw: String): Pair<JoinOutcome, String?> {
+        val inv = com.oshi.desktop.group.GroupInvite.parse(raw) ?: return JoinOutcome.NOT_AN_INVITE to null
+        groups.get(inv.groupId)?.let { if (it.isMember(address)) return JoinOutcome.ALREADY_MEMBER to it.groupId }
+        val inviter = inv.inviter?.takeIf { !GroupIdentity.sameIdentity(it, address) }
+            ?: return JoinOutcome.NO_INVITER to inv.groupId
+        runCatching { devSync.noteLocalJoin(inv.groupId) }
+        val now = System.currentTimeMillis()
+        val existing = groups.get(inv.groupId)
+        val stub = existing?.copy(
+            members = existing.members + GroupMember(publicKey = address, joinedAtUnixMillis = now, isAdmin = false),
+            lastActivityUnixMillis = now,
+        ) ?: GroupDefinition(
+            groupId = inv.groupId,
+            name = inv.name ?: t("group_invite_default_name"),
+            type = GroupType.COLLABORATIVE, // iOS's default until the full definition arrives
+            adminPublicKey = inviter,
+            members = listOf(
+                GroupMember(publicKey = inviter, joinedAtUnixMillis = now, isAdmin = true),
+                GroupMember(publicKey = address, joinedAtUnixMillis = now, isAdmin = false),
+            ),
+            createdAtUnixMillis = now,
+            lastActivityUnixMillis = now,
+        )
+        groups.put(stub)
+        contacts.seen(inviter, now)
+        sendPlaintext(
+            inviter,
+            ControlPrefix.GROUP_UPDATE + GroupUpdateWire.encodeMemberSyncRequest(inv.groupId, address),
+            storeRow = false,
+        )
+        return JoinOutcome.REQUESTED to stub.groupId
+    }
+
+    /**
+     * __GROUP_PARITY_2026_09_23__ May this account change the group's picture? iOS
+     * `canChangeGroupPicture`: any member of a collaborative or public group, only an admin
+     * of an admin-only one — the same rule [renameGroup] applies to the name.
+     */
+    fun canEditGroupInfo(groupId: String): Boolean {
+        val g = groups.get(groupId) ?: return false
+        return g.isAdmin(address) || (g.type != GroupType.ADMIN_ONLY && g.isMember(address))
+    }
+
+    /**
+     * __GROUP_PARITY_2026_09_23__ Set ([imageBytes] = any readable picture) or remove (null) the
+     * group picture, then broadcast the authoritative definition carrying it — iOS
+     * `updateGroupPicture` / `removeGroupPicture` (`GroupMessaging.swift:2080-2150`).
+     *
+     * A REMOVAL does not propagate to the phones, and that is their rule, not a bug here:
+     * iOS keeps its local picture whenever an incoming definition carries none
+     * (`swift:1075`, "lightweight broadcasts strip picture"), and so does this client's
+     * authorizer. iPhone-to-iPhone removal has the same limit.
+     */
+    fun setGroupPicture(groupId: String, imageBytes: ByteArray?): GroupDefinition? {
+        val g = groups.get(groupId) ?: return null
+        if (!canEditGroupInfo(groupId)) return null
+        val jpeg = imageBytes?.let { com.oshi.desktop.group.GroupPicture.prepare(it) ?: return null }
+        val updated = bumpVersion(
+            g.copy(
+                groupPictureBase64 = jpeg?.let(com.oshi.desktop.group.GroupPicture::encodeBase64),
+                groupPictureUpdatedAtUnixMillis = System.currentTimeMillis(),
+                groupPictureUpdatedBy = address,
+            )
+        )
+        groups.put(updated)
+        broadcastGroupUpdate(updated, GroupUpdateWire.encodeDefinitionFramed(updated))
+        return updated
+    }
+
+    /**
+     * __GROUP_PARITY_2026_09_23__ Mute a group's notifications on THIS device. `isMuted` is a
+     * personal preference: never sent as true (the wire always says false, as Android pins
+     * it) and re-imposed from the local copy on every ingest, exactly as iOS does (`swift:1028`).
+     */
+    fun setGroupMuted(groupId: String, muted: Boolean): GroupDefinition? =
+        // __GROUP_MUTE_SYNC_2026_09_24__ stamped (mutedAt) so the account's other devices follow
+        // through devsync GROUPS; the group-update WIRE still never carries it.
+        groups.setMuted(groupId, muted, System.currentTimeMillis())
+
+    fun isGroupMuted(groupId: String): Boolean = groups.get(groupId)?.isMuted == true
 
     /**
      * Ask ONE peer for their copy of a group's roster.
@@ -1041,13 +1580,25 @@ class OshiClient(
      * recipients (everyone but us, by canonical identity) and the envelope's `groupId` is
      * what routes each leg.
      */
-    fun sendGroupText(groupId: String, text: String): GroupSendReport {
-        if (ControlPrefix.isControl(text)) {
+    fun sendGroupText(
+        groupId: String,
+        rawText: String,
+        replyTo: com.oshi.desktop.msg.ReplyEnvelope.Quote? = null,
+        /** __MENTIONS_2026_09_23__ members picked in the composer; kept only if still in the text. */
+        mentions: List<com.oshi.desktop.group.MentionWire.Mention> = emptyList(),
+    ): GroupSendReport {
+        if (ControlPrefix.isControl(rawText)) {
             return GroupSendReport(groupId, 0, 0, emptyList(), refusedControlPayload = true)
         }
+        // __GROUP_PARITY_2026_09_23__ same `💬REPLY💬` envelope inside the group body
+        // (iOS GroupViews.swift:5328, Android GroupManager.buildReplyEnvelope).
+        val text = replyTo?.let { com.oshi.desktop.msg.ReplyEnvelope.wrap(rawText, it) } ?: rawText
         val g = groups.get(groupId) ?: return GroupSendReport(groupId, 0, 0, emptyList())
-        val msgId = UUID.randomUUID().toString()
+        // __GROUP_E2E_V2_2026_09_23__ spec §2.2: `id` UPPERCASE (iOS UUID spelling), `senderName` "".
+        val msgId = UUID.randomUUID().toString().uppercase(java.util.Locale.US)
         val now = System.currentTimeMillis()
+        val sentMentions = com.oshi.desktop.group.MentionWire.stillPresent(rawText, mentions)
+            .filter { m -> g.isMember(m.publicKey) }
         val plaintext = GroupMessageWire.encodeForEnvelope(
             GroupMessageWire.GroupMessagePayload(
                 messageId = msgId,
@@ -1055,21 +1606,16 @@ class OshiClient(
                 senderPublicKey = address,
                 body = text,
                 timestampUnixMillis = now,
-                senderName = displayName,
+                mentions = sentMentions,
             )
         ).toByteArray(Charsets.UTF_8)
 
-        var sent = 0
-        val blocked = ArrayList<String>()
-        val recipients = GroupFanout.plan(g, address)
-        for (member in recipients) {
-            // A blocked member is skipped, not silently included. iOS delivers group
-            // messages from and to blocked members (PARITY.md 0.21 defect 2); this does not.
-            if (BlockPolicy.outgoingText(contacts, member) == BlockPolicy.Outbound.REFUSE_BLOCKED) {
-                blocked += member
-                continue
-            }
-            if (router.sendText(member, plaintext, msgId, groupId = g.groupId)) sent++
+        val report = groupFanOut(g, msgId) { plaintext }
+        // __DESKTOP_MESSAGE_PUSH_2026_09_23__ spec §2.5: text wakes the members it reached.
+        messagePush.wakeGroup(report.reached, g.groupId, msgId)
+        // __PER_DEVICE_MAILBOX_2026_09_23__ once per group message, not once per member (§7.2).
+        if (report.sent > 0) runCatching {
+            router.sendSelfCopy(com.oshi.desktop.net.SentCopy.conversationGroup(g.groupId), plaintext, msgId)
         }
         messages.append(
             Message(
@@ -1081,12 +1627,13 @@ class OshiClient(
                 content = text,
                 sentAtMs = now,
                 sentAtSource = TimestampSource.LOCAL_CLOCK,
-                deliveryStatus = if (sent > 0) DeliveryStatus.SENT else DeliveryStatus.FAILED,
-                transport = if (sent > 0) "relay-v2" else "none",
+                deliveryStatus = if (report.delivered) DeliveryStatus.SENT else DeliveryStatus.FAILED,
+                transport = if (report.sent > 0) "relay-v2" else "none",
+                mentions = sentMentions,
             )
         )
         groups.put(g.copy(lastActivityUnixMillis = now))
-        return GroupSendReport(g.groupId, recipients.size, sent, blocked)
+        return report
     }
 
     data class GroupSendReport(
@@ -1095,12 +1642,192 @@ class OshiClient(
         val sent: Int,
         val skippedBlocked: List<String>,
         val refusedControlPayload: Boolean = false,
-    )
+        /**
+         * __GROUP_E2E_V2_2026_09_23__ spec §6: members with no v2 path (no session, no bundle).
+         * They receive NOTHING — there is no legacy/IPFS fallback — and the UI names them
+         * (`group.member_must_update`).
+         */
+        val unreachable: List<String> = emptyList(),
+        val messageId: String? = null,
+        /** __DESKTOP_MESSAGE_PUSH_2026_09_23__ members a v2 envelope reached (they get the wake). */
+        val reached: List<String> = emptyList(),
+    ) {
+        /** Spec §6: `sent` when at least one member was reached, or there is no other member. */
+        val delivered: Boolean get() = sent > 0 || recipients - skippedBlocked.size <= 0
+    }
+
+    /**
+     * __GROUP_E2E_V2_2026_09_23__ The ONE group content fan-out (spec §1, §2.1, §6, §7.1): one
+     * pairwise ratchet envelope per member (per device in device mode — the router does that),
+     * `type:"group"` + `groupId`, one app message id. A member with no v2 path gets nothing.
+     * [payloadFor] returns the ratchet plaintext for that member (media differs per member:
+     * each has its own blob reservation), or null to skip them.
+     */
+    private fun groupFanOut(g: GroupDefinition, msgId: String, payloadFor: (String) -> ByteArray?): GroupSendReport {
+        var sent = 0
+        val reached = ArrayList<String>()
+        val blocked = ArrayList<String>()
+        val unreachable = ArrayList<String>()
+        val recipients = GroupFanout.plan(g, address)
+        for (member in recipients) {
+            // A blocked member is skipped, not silently included. iOS delivers group
+            // messages from and to blocked members (PARITY.md 0.21 defect 2); this does not.
+            if (BlockPolicy.outgoingText(contacts, member) == BlockPolicy.Outbound.REFUSE_BLOCKED) {
+                blocked += member
+                continue
+            }
+            val bytes = runCatching { payloadFor(member) }.getOrNull()
+            if (bytes != null && router.sendText(member, bytes, msgId, groupId = g.groupId)) { sent++; reached += member } else unreachable += member
+        }
+        if (unreachable.isNotEmpty()) {
+            log("client: group ${g.groupId.take(8)}… ${unreachable.size} member(s) without a v2 path — nothing sent to them")
+        }
+        return GroupSendReport(g.groupId, recipients.size, sent, blocked, unreachable = unreachable, messageId = msgId, reached = reached)
+    }
+
+    /** Spec §2.3 content body inside a GroupMessage, fanned out; no self copy, no row. */
+    private fun sendGroupBody(g: GroupDefinition, body: String): GroupSendReport {
+        val msgId = UUID.randomUUID().toString().uppercase(java.util.Locale.US)
+        val plaintext = GroupMessageWire.encodeForEnvelope(
+            GroupMessageWire.GroupMessagePayload(
+                messageId = msgId, groupId = g.groupId, senderPublicKey = address,
+                body = body, timestampUnixMillis = System.currentTimeMillis(),
+            )
+        ).toByteArray(Charsets.UTF_8)
+        return groupFanOut(g, msgId) { plaintext }
+    }
+
+    /** Spec §2.4 system command (edit/delete), fanned out; no self copy, no row. */
+    private fun sendGroupSystem(g: GroupDefinition, type: String, data: Map<String, String>): GroupSendReport {
+        val msgId = UUID.randomUUID().toString().uppercase(java.util.Locale.US)
+        val plaintext = GroupMessageWire.encodeForEnvelope(
+            GroupMessageWire.GroupMessagePayload(
+                messageId = msgId, groupId = g.groupId, senderPublicKey = GroupMessageWire.SYSTEM_SENDER,
+                body = "", timestampUnixMillis = System.currentTimeMillis(),
+                systemMessageType = type, systemMessageData = data,
+            )
+        ).toByteArray(Charsets.UTF_8)
+        return groupFanOut(g, msgId) { plaintext }
+    }
+
+    /** __GROUP_E2E_V2_2026_09_23__ `🔥REACTION🔥` in a group (spec §2.3). Applied locally first. */
+    fun sendGroupReaction(groupId: String, messageId: String, emoji: String, adding: Boolean = true): GroupSendReport? {
+        val g = groups.get(groupId) ?: return null
+        val gid = GroupIdentity.canonicalGroupId(g.groupId)
+        val local = messages.messages(gid).firstOrNull { GroupMessageWire.sameMessageId(it.id, messageId) } ?: return null
+        val body = ReactionPayload.encode(
+            messageId = local.id, emoji = emoji, senderPublicKey = address,
+            isAdding = adding, atUnixMillis = System.currentTimeMillis(), senderName = displayName,
+        )
+        messages.setReaction(gid, local.id, address, if (adding) emoji else null)
+        return sendGroupBody(g, body)
+    }
+
+    /** __GROUP_E2E_V2_2026_09_23__ `message_edited` (spec §2.4): our own messages only. */
+    fun editGroupMessage(groupId: String, messageId: String, newText: String): GroupSendReport? {
+        val g = groups.get(groupId) ?: return null
+        val gid = GroupIdentity.canonicalGroupId(g.groupId)
+        val local = messages.messages(gid).firstOrNull { GroupMessageWire.sameMessageId(it.id, messageId) } ?: return null
+        if (!local.fromMe || ControlPrefix.isControl(newText)) return null
+        messages.editContent(gid, local.id, newText, System.currentTimeMillis())
+        return sendGroupSystem(
+            g, GroupMessageWire.SYSTEM_EDITED,
+            mapOf("actorPublicKey" to address, "editedMessageId" to local.id, "editedContent" to newText),
+        )
+    }
+
+    /** __GROUP_E2E_V2_2026_09_23__ `message_deleted` (spec §2.4): ours, or any as an admin. */
+    fun deleteGroupMessage(groupId: String, messageId: String): GroupSendReport? {
+        val g = groups.get(groupId) ?: return null
+        val gid = GroupIdentity.canonicalGroupId(g.groupId)
+        val local = messages.messages(gid).firstOrNull { GroupMessageWire.sameMessageId(it.id, messageId) } ?: return null
+        if (!local.fromMe && !g.isAdmin(address)) return null
+        messages.deleteForEveryone(gid, local.id, System.currentTimeMillis())
+        return sendGroupSystem(
+            g, GroupMessageWire.SYSTEM_DELETED,
+            mapOf("actorPublicKey" to address, "deletedMessageId" to local.id),
+        )
+    }
+
+    /** __GROUP_E2E_V2_2026_09_23__ `⌨️TYPING⌨️` in a group (spec §2.3/§2.5): skipped over 20 members. */
+    fun sendGroupTyping(groupId: String, typing: Boolean): GroupSendReport? {
+        val g = groups.get(groupId) ?: return null
+        if (g.members.size > 20) return null
+        return sendGroupBody(
+            g,
+            TypingPayload.encode(
+                senderPublicKey = address, isTyping = typing,
+                atUnixMillis = System.currentTimeMillis(),
+                groupId = GroupIdentity.canonicalGroupId(g.groupId), senderName = displayName,
+            ),
+        )
+    }
+
+    /**
+     * __GROUP_E2E_V2_2026_09_23__ Group media (spec §4): the file is sealed ONCE (one file key,
+     * one nonce, same ciphertext chunks), uploaded as one blob reservation PER MEMBER (the blob
+     * store authorises exactly one recipient), and each member's `type:"group"` envelope carries
+     * the `v2file` key JSON + `groupMessage` (media stripped). Over the blob cap ⇒ refused.
+     * Never inline, never IPFS. No self copy (devsync brings media).
+     */
+    fun sendGroupFile(groupId: String, file: File, caption: String? = null): GroupSendReport? {
+        val g = groups.get(groupId) ?: return null
+        if (!config.isEnabledCached()) return null
+        val bytes = mediaVault.openStream(file).use { it.readBytes() }   // sealed GIF or a user's own file
+        if (bytes.isEmpty() || bytes.size > V2BlobClient.MAX_PLAINTEXT_BYTES) return null
+        val mime = probeMime(file)
+        val mediaType = MediaType.forMime(mime)
+        val groupType = when (mediaType) {
+            MediaType.IMAGE -> GroupMessageWire.GroupMediaType.PHOTO
+            MediaType.VIDEO -> GroupMessageWire.GroupMediaType.VIDEO
+            MediaType.AUDIO -> GroupMessageWire.GroupMediaType.AUDIO
+            MediaType.CONTACT -> GroupMessageWire.GroupMediaType.CONTACT
+            else -> GroupMessageWire.GroupMediaType.DOCUMENT
+        }
+        val msgId = UUID.randomUUID().toString().uppercase(java.util.Locale.US)
+        val now = System.currentTimeMillis()
+        val groupMessage = GroupMessageWire.encodeForEnvelope(
+            GroupMessageWire.GroupMessagePayload(
+                messageId = msgId, groupId = g.groupId, senderPublicKey = address,
+                body = "", timestampUnixMillis = now, mediaType = groupType,
+                plaintextContent = caption?.takeIf { it.isNotEmpty() }, mediaFileName = file.name,
+            )
+        )
+        val enc = OSHICryptoV2.encryptFile(bytes, file.name, mime)
+        val report = groupFanOut(g, msgId) { member ->
+            if (!router.ensureSession(member)) return@groupFanOut null
+            val blobId = blobs.uploadBlob(member, enc.chunks) ?: return@groupFanOut null
+            V2FileKeyMessage(
+                blobId = blobId, fileKey = enc.fileKey, fileNonce = enc.fileNonce,
+                chunkCount = enc.chunks.size, manifest = enc.manifest, filename = file.name,
+                mime = mime, mediaType = groupType.raw, groupMessage = groupMessage,
+            ).toBytes()
+        }
+        messagePush.wakeGroup(report.reached, g.groupId, msgId)   // __DESKTOP_MESSAGE_PUSH_2026_09_23__ §2.5 media
+        messages.append(
+            Message(
+                id = msgId,
+                conversationId = GroupIdentity.canonicalGroupId(g.groupId),
+                senderAddress = address,
+                recipientAddress = g.groupId,
+                fromMe = true,
+                content = caption?.takeIf { it.isNotEmpty() } ?: file.name,
+                mediaType = mediaType,
+                mediaRef = file.absolutePath,
+                sentAtMs = now,
+                sentAtSource = TimestampSource.LOCAL_CLOCK,
+                deliveryStatus = if (report.delivered) DeliveryStatus.SENT else DeliveryStatus.FAILED,
+                transport = if (report.sent > 0) "relay-v2" else "none",
+            )
+        )
+        groups.put(g.copy(lastActivityUnixMillis = now))
+        return report
+    }
 
     private fun bumpVersion(g: GroupDefinition): GroupDefinition = g.copy(
-        // Only ever bumped when we already carry one: a defaulted 0 on a group whose peers
-        // emit none would make every one of their updates read as stale. See GroupDefinition.
-        stateVersion = g.stateVersion?.plus(1),
+        // __GROUP_E2E_V2_2026_09_23__ spec §5.3: stateVersion is REQUIRED on every definition we
+        // emit (local + 1, absent = 0). Receivers still skip the check when THEIR copy has none.
+        stateVersion = (g.stateVersion ?: 0) + 1,
         lastActivityUnixMillis = System.currentTimeMillis(),
     )
 
@@ -1153,6 +1880,7 @@ class OshiClient(
 
     /** Push every contact — blocked ones INCLUDED — into the V2 archive. */
     fun syncPushContacts(): Result<SyncProtocol.PushResult> {
+        storedSyncRefusal()?.let { return Result.failure(it) }
         val now = System.currentTimeMillis()
         // exportAll asserts that every locally-blocked contact is represented. That guard
         // is the whole point of the row: Android's payload is built from a query that
@@ -1200,7 +1928,18 @@ class OshiClient(
 
     /** The legacy `/api/sync` alias map — aliases only, no block state. See [ContactSyncRecord]. */
     fun legacySyncPushAliases(): Result<Unit> =
-        legacySync.push(SyncProtocol.LegacyKind.CONTACTS, ContactSyncRecord.encodeLegacyAliasMap(contacts))
+        storedSyncRefusal()?.let { Result.failure(it) }
+            ?: legacySync.push(SyncProtocol.LegacyKind.CONTACTS, ContactSyncRecord.encodeLegacyAliasMap(contacts))
+
+    /**
+     * __DEVSYNC_DIRECT_2026_09_22__ Once direct device sync is on for this account, nothing is
+     * uploaded to a stored-sync route any more (design D8): the V2 archive and the legacy
+     * `/api/sync` mirror refuse locally, before any byte leaves.
+     */
+    private fun storedSyncRefusal(): Throwable? =
+        if (runCatching { devSync.enabled }.getOrDefault(false))
+            IllegalStateException("stored sync is off: this account uses direct device sync (More → Linked devices)")
+        else null
 
     /** Gap-fill from the legacy alias map. Never overwrites a local alias. Returns rows added. */
     fun legacySyncPullAliases(): Result<Int> =
@@ -1215,6 +1954,15 @@ class OshiClient(
     @Volatile private var lora: com.oshi.desktop.lora.LoRaLink? = null
 
     val loraAttached: Boolean get() = lora?.isConnected == true
+
+    /** Which nodes the attached radio has heard — the header's "LoRa N". */
+    private val loraRoster = com.oshi.desktop.lora.LoRaNodeRoster()
+
+    /** Other LoRa nodes heard within Meshtastic's two-hour "online" window. */
+    fun loraOnlineNodes(nowMs: Long = System.currentTimeMillis()): Int = loraRoster.onlineCount(nowMs)
+
+    /** LAN mesh peers currently known to [mesh] — the header's mesh count. */
+    val meshPeerCount: Int get() = mesh.peers().size
 
     /**
      * Attach to a Meshtastic node over TCP — PARITY.md row 0.27.
@@ -1233,21 +1981,30 @@ class OshiClient(
      * The link is a real socket to a real node; nothing here has been exercised against a
      * radio, only against `FakeMeshtasticNode`.
      */
-    fun loraAttach(host: String, port: Int = com.oshi.desktop.lora.LoRaAttach.TCP_PORT) {
+    fun loraAttach(host: String, port: Int = com.oshi.desktop.lora.LoRaAttach.TCP_PORT): Boolean {
+        val endpoint = com.oshi.desktop.lora.LoRaAttach.tcpEndpoint(host, port)
+        if (endpoint == null) {
+            // Do not include the raw value here: this callback commonly feeds the terminal,
+            // where a pasted control character could otherwise alter the diagnostic output.
+            onLoRa("lora: refused invalid TCP endpoint")
+            return false
+        }
         loraDetach()
         val link = com.oshi.desktop.lora.LoRaLink(
-            host = host,
-            port = port,
+            host = endpoint.host,
+            port = endpoint.port,
             onFromRadio = { fromRadio -> onFromRadio(fromRadio) },
             log = { log("lora: $it"); onLoRa(it) },
         )
         lora = link
         link.start()
+        return true
     }
 
     fun loraDetach() {
         lora?.stop()
         lora = null
+        loraRoster.clear()
     }
 
     /**
@@ -1259,6 +2016,8 @@ class OshiClient(
      * meanings for fields it does not implement would be worse than one that ignores them.
      */
     private fun onFromRadio(fromRadio: ByteArray) {
+        // Counts only — node_info/my_info are read for WHO was heard WHEN, nothing else.
+        loraRoster.observeFromRadio(fromRadio, System.currentTimeMillis())
         val packetField = com.oshi.desktop.lora.LoRaProto.field(fromRadio, 2, wire = 2) ?: return
         when (val d = loraInbound.route(packetField.payload, address, System.currentTimeMillis())) {
             is com.oshi.desktop.lora.LoRaInbound.Decision.InteropText -> {
@@ -1277,7 +2036,13 @@ class OshiClient(
                     deliveryStatus = DeliveryStatus.DELIVERED,
                     transport = "lora",
                 )
-                messages.append(stored)
+                val outcome = messages.append(stored)
+                // Unlike an unopened OSHI envelope, this is deliberately persisted as an
+                // unverified radio row. Publish it through the normal inbound callback so
+                // the running desktop window refreshes, increments its unread counter and
+                // may show its privacy-preserving local notification. A duplicate radio
+                // retransmission must not create another alert.
+                if (outcome != MessageStore.AppendOutcome.DUPLICATE) onMessage(stored)
                 onLoRa("interop text from node ${d.nodeNum} (UNVERIFIED — not authenticated): ${d.text.take(200)}")
             }
             is com.oshi.desktop.lora.LoRaInbound.Decision.Envelope -> {
@@ -1318,6 +2083,8 @@ class OshiClient(
             }
         }
         val outcome = sendPlaintext(m.recipient, m.content, storeRow = false)
+        // __DESKTOP_MESSAGE_PUSH_2026_09_23__ a scheduled message is a user message: wake the peer.
+        if (outcome == SendOutcome.SENT && !ControlPrefix.suppressesPush(m.content)) messagePush.wakeDirect(m.recipient, m.id)
         if (outcome != SendOutcome.SENT) {
             return when (outcome) {
                 // Blocked and malformed are terminal; the network ones are not.
@@ -1361,10 +2128,39 @@ class OshiClient(
         // able to delete our messages — blocking someone must not leave them holding a
         // write primitive against our own history.
         if (BlockPolicy.inbound(contacts, inbound.from) == BlockPolicy.Inbound.DROP_BLOCKED) {
+            // __BLOCKED_MEMBER_GROUPS_2026_09_24__ the ONE exception: a group STATE update (roster,
+            // name, a member leaving) from a blocked member still reaches the authorizer, which
+            // applies its own membership/admin rules — otherwise the roster here drifts from
+            // everyone else's (iOS / Android keep processing group control from a blocked member
+            // too). Their CONTENT stays dropped, 1:1 and group alike (owner decision 2026-09-24:
+            // a blocked member's group messages are not stored — so not shown, not counted).
+            if (inbound.groupId.isNullOrBlank() && ControlPrefix.match(inbound.text) == ControlPrefix.GROUP_UPDATE) {
+                log("client: group update from a blocked contact ${inbound.from.take(12)}… — roster only")
+                dispatch(inbound)
+                return
+            }
             log("client: dropped a message from a blocked contact ${inbound.from.take(12)}…")
+            // Group traffic is not answered: being in a group with someone you blocked
+            // is not them trying to reach you 1:1.
+            if (inbound.groupId.isNullOrBlank()) noticeBlockedSender(inbound.from, inbound.text)
             return
         }
         dispatch(inbound)
+    }
+
+    /**
+     * __BLOCKED_NOTICE_SWITCH_2026_09_23__ Tell a blocked peer, once a day at most, that
+     * nothing they send arrives — parity with both phones. Rules and switch live in
+     * [BlockedNoticeGate]. Bypasses [sendPlaintext] on purpose: that gate refuses every
+     * send to a blocked key, and this is the one message that must reach one. No stored
+     * row, no push, no self-copy.
+     */
+    internal fun noticeBlockedSender(peer: String, text: String?) {
+        if (!blockedNotice.claim(peer, text, address)) return
+        val sent = runCatching {
+            router.sendText(peer, ControlPrefix.BLOCKED_NOTICE.toByteArray(Charsets.UTF_8), UUID.randomUUID().toString())
+        }.getOrDefault(false)
+        log("client: blocked notice to ${peer.take(12)}… ${if (sent) "sent" else "not sent"}")
     }
 
     /**
@@ -1375,21 +2171,34 @@ class OshiClient(
     internal fun dispatch(inbound: V2Inbound) {
         val text = inbound.text
 
-        // 2. A group update. Checked before the envelope's groupId because a definition
-        //    broadcast travels as an ordinary 1:1 message carrying the sentinel.
+        // 2. A group MESSAGE (content channel, spec §1/§3). The envelope's groupId is what routes
+        //    it; the payload's own copy is a claim by the sender and is not trusted for routing.
+        //    __GROUP_E2E_V2_2026_09_23__ checked FIRST: a `type:"group"` envelope is content only —
+        //    a `📢GROUP_UPDATE📢` on it is dropped (vector `group_update_on_group_channel`), and a
+        //    `v2file` key on it is GROUP media (§4), never 1:1 media.
+        if (!inbound.groupId.isNullOrBlank()) {
+            val key = V2FileKeyMessage.parse(text)
+            if (key != null) receiveGroupMedia(inbound, key) else receiveGroupMessage(inbound)
+            return
+        }
+
+        // 3. A group update (state channel): an ordinary 1:1 message carrying the sentinel.
         if (ControlPrefix.match(text) == ControlPrefix.GROUP_UPDATE) {
             val result = groupIngest.ingest(text, inbound.from)
             log("client: group update from ${inbound.from.take(12)}… → ${result.outcome} (${result.detail})")
             result.respondTo?.let { sendPlaintext(inbound.from, GroupUpdateWire.encodeDefinitionFramed(it), false) }
+            // __GROUP_PARITY_2026_09_23__ an invite join changed the roster: every other member hears it.
+            result.broadcast?.let { g ->
+                val framed = GroupUpdateWire.encodeDefinitionFramed(g)
+                for (m in GroupFanout.plan(g, address)) if (!GroupIdentity.sameIdentity(m, inbound.from)) sendPlaintext(m, framed, false)
+            }
             contacts.seen(inbound.from, inbound.ts)
             onGroupEvent(result)
-            return
-        }
-
-        // 3. A group MESSAGE. The envelope's groupId is what routes it; the payload's own
-        //    copy is a claim by the sender and is not trusted for routing.
-        if (!inbound.groupId.isNullOrBlank()) {
-            receiveGroupMessage(inbound)
+            // __GROUP_E2E_V2_2026_09_23__ spec §3 step 5/6: content that arrived before this
+            // definition (unknown group, or a member added seconds ago) is replayed now.
+            if (result.groupId != null &&
+                (result.outcome == GroupIngest.Outcome.CREATED || result.outcome == GroupIngest.Outcome.UPDATED)
+            ) replayHeldGroupContent(result.groupId)
             return
         }
 
@@ -1408,6 +2217,8 @@ class OshiClient(
             is ControlEvent.Delivered, is ControlEvent.Read, is ControlEvent.Typing,
             is ControlEvent.Reaction, is ControlEvent.Action,
             -> {
+                // __BLOCKED_BY_PEER_2026_09_24__ a receipt = the peer takes our traffic again.
+                blockedByPeers.observe(inbound.from, text)
                 contacts.seen(inbound.from, inbound.ts)
                 onControl(inbound.from, event, outcome)
                 return
@@ -1422,6 +2233,51 @@ class OshiClient(
             }
 
             is ControlEvent.Foreign -> {
+                // A blocked-contact notice deliberately has no body.  It must still become
+                // a normal, localised row: otherwise the recipient sees the protocol marker
+                // itself (or, worse, no explanation at all).  Do not send a delivery receipt
+                // for it; the sender's emission is already rate-limited and this is a terminal
+                // refusal, not a conversation message.
+                if (event.prefix == ControlPrefix.BLOCKED_NOTICE) {
+                    storeInbound(
+                        inbound,
+                        "🚫 " + t("chat.blocked_by_contact"),
+                        // Phones' rule 3: the row is enough — the person is looking at the
+                        // thread they just wrote in, an alert "you were blocked" helps no one.
+                        suppressNotification = true,
+                    )
+                    // __BLOCKED_BY_PEER_2026_09_24__ from now on this peer is never dialled.
+                    blockedByPeers.noteBlocked(inbound.from)
+                    return
+                }
+                // __SHARED_NICKNAME_2026_09_22__ A profile update: the only thing this
+                // client reads from it is the peer's shared nickname (`displayName`). It is
+                // applied to the contact and NOTHING else happens — no row in MessageStore,
+                // no `onMessage` (which is what raises the notification), no receipt. A
+                // renamed peer is not news. Absent key (older builds) leaves the stored
+                // nickname untouched; an explicit empty one clears it.
+                if (event.prefix == ControlPrefix.PROFILE_UPDATE) {
+                    contacts.seen(inbound.from, inbound.ts)
+                    when (val nick = PeerNickname.readProfileUpdate(text)) {
+                        is PeerNickname.Read.Set -> contacts.setSharedNickname(inbound.from, nick.name)
+                        PeerNickname.Read.Clear -> contacts.setSharedNickname(inbound.from, null)
+                        PeerNickname.Read.Absent -> Unit
+                    }
+                    onControl(inbound.from, event, outcome)
+                    return
+                }
+                // __SHARED_NICKNAME_2026_09_22__ A peer asking for our profile (both phones
+                // send this when they hold no profile for us). Answered with the same
+                // payload a rename broadcasts, behind the same "have we written to them"
+                // gate. Silent both ways; nothing stored.
+                if (event.prefix == ControlPrefix.PROFILE_REQUEST) {
+                    contacts.seen(inbound.from, inbound.ts)
+                    if (mayBroadcastProfile && ownNickname != null && hasSentUserMessage(inbound.from)) {
+                        runCatching { sendProfileUpdate(inbound.from) }
+                    }
+                    onControl(inbound.from, event, outcome)
+                    return
+                }
                 // 6. Row 0.19 — location and check-in — consumes exactly this case.
                 //
                 // THE CLOCK IS OURS, NEVER THE SENDER'S. `inbound.ts` is the envelope's
@@ -1446,9 +2302,22 @@ class OshiClient(
                     else log("client: unparseable ${event.prefix} from ${inbound.from.take(12)}…")
                     return
                 }
+                // __GROUP_PARITY_2026_09_23__ A reply or forward is a USER message in an
+                // envelope (`Kind.ENVELOPE`: "unwrap, never summarise"). Step 7 used to drop
+                // it, so every reply and forward a phone sent in a 1:1 chat vanished on this
+                // client. Stored as sent — the bubble unwraps it and draws the quote — and
+                // treated like prose: receipt, notification, profile request.
+                if (com.oshi.desktop.msg.ReplyEnvelope.unwrap(text) != null) {
+                    storeInbound(inbound, text, suppressNotification = false)
+                    if (deliveryReceiptsEnabled) {
+                        sendPlaintext(inbound.from, DeliveryReceipt.encode(inbound.msgId), storeRow = false)
+                    }
+                    maybeRequestProfile(inbound.from)
+                    return
+                }
                 // 7. A sentinel belonging to a row this client has not built (call signal,
-                //    profile/wallpaper update, reply/forward envelope). Known, not ours,
-                //    and NOT rendered — the body is JSON and a user would see it raw.
+                //    profile/wallpaper update). Known, not ours, and NOT rendered — the body
+                //    is JSON and a user would see it raw.
                 log("client: ignoring a ${event.prefix} payload (${event.kind}) from ${inbound.from.take(12)}…")
                 onControl(inbound.from, event, outcome)
                 return
@@ -1466,6 +2335,7 @@ class OshiClient(
         if (deliveryReceiptsEnabled) {
             sendPlaintext(inbound.from, DeliveryReceipt.encode(inbound.msgId), storeRow = false)
         }
+        maybeRequestProfile(inbound.from)   // __SHARED_NICKNAME_2026_09_22__
     }
 
     private fun storeInbound(inbound: V2Inbound, content: String, suppressNotification: Boolean) {
@@ -1485,6 +2355,9 @@ class OshiClient(
         )
         val outcome = messages.append(stored)
         contacts.seen(inbound.from, inbound.ts)
+        // __BLOCKED_BY_PEER_2026_09_24__ a real row (not the notice, not a silent ping) from the
+        // peer = it writes to us again. Same rule as iOS `observeStoredInbound`.
+        if (!suppressNotification) blockedByPeers.clear(inbound.from)
         if (outcome != MessageStore.AppendOutcome.DUPLICATE && !suppressNotification) onMessage(stored)
     }
 
@@ -1500,27 +2373,46 @@ class OshiClient(
      *    of a message that reached us over two transports as two different rows.
      */
     private fun receiveGroupMessage(inbound: V2Inbound) {
-        val gid = GroupIdentity.canonicalGroupId(inbound.groupId!!)
-        val group = groups.get(gid)
-        if (group == null) {
-            log("client: group message for a group we do not hold (${gid.take(12)}…)")
-            return
-        }
-        if (!group.isMember(inbound.from)) {
-            log("client: dropped a group message from a non-member ${inbound.from.take(12)}…")
-            return
-        }
+        // __GROUP_E2E_V2_2026_09_23__ spec §3 step 2: base64 GroupMessage or nothing — never
+        // render bytes (a `📢GROUP_UPDATE📢` on the group channel lands here and is dropped).
         val payload = GroupMessageWire.decodeFromEnvelope(inbound.text)
         if (payload == null) {
-            log("client: undecodable group message from ${inbound.from.take(12)}…")
+            log("client: undecodable group message from ${inbound.from.take(12)}… — dropped")
             return
         }
+        val group = admitGroupContent(inbound, payload) ?: return
+        val gid = GroupIdentity.canonicalGroupId(group.groupId)
+        if (payload.isSystem) {
+            applyGroupSystem(inbound, group, payload)
+            return
+        }
+        // §2.3 ephemeral / mutating bodies: never a bubble, never deduped as a message.
+        val body = payload.body
+        when (ControlPrefix.match(body)) {
+            ControlPrefix.REACTION, ControlPrefix.REACTION_LEGACY,
+            ControlPrefix.TYPING_IOS, ControlPrefix.TYPING_ANDROID -> {
+                val (event, outcome) = control.apply(gid, inbound.from, body)
+                contacts.seen(inbound.from, inbound.ts)
+                // __GROUP_PARITY_2026_09_23__ a typing ping names its sender in the JSON; it is shown
+                // under a name only when that is the member whose ratchet delivered it.
+                if (event is ControlEvent.Typing && !GroupIdentity.sameIdentity(event.payload.senderPublicKey, inbound.from)) return
+                onControl(gid, event, outcome)
+                return
+            }
+            ControlPrefix.GROUP_UPDATE, ControlPrefix.ACTION, ControlPrefix.DELIVERY_RECEIPT,
+            ControlPrefix.READ_RECEIPT, ControlPrefix.CALL_SIGNAL, ControlPrefix.SESSION_RESET -> {
+                log("client: control payload on the group content channel from ${inbound.from.take(12)}… — dropped")
+                return
+            }
+            else -> Unit
+        }
         if (messages.messages(gid).any { GroupMessageWire.sameMessageId(it.id, payload.messageId) }) return
-
-        val body = GroupMessageWire.resolveIncomingBody(
-            contentField = payload.body,
-            plaintextContentField = payload.plaintextContent.orEmpty(),
-            decodedEncryptedContent = payload.body,
+        // __MENTIONS_2026_09_23__ keep only current members whose `@name` is visible in the text.
+        val admittedMentions = com.oshi.desktop.group.MentionWire.admit(
+            body = com.oshi.desktop.msg.ReplyEnvelope.unwrap(body)?.content ?: body,
+            mentions = payload.mentions,
+            isMember = { k -> group.isMember(k) },
+            sameKey = GroupIdentity::sameIdentity,
         )
         val stored = Message(
             id = payload.messageId,
@@ -1533,11 +2425,166 @@ class OshiClient(
             sentAtSource = TimestampSource.RELAY_ENVELOPE_MS,
             deliveryStatus = DeliveryStatus.DELIVERED,
             transport = "relay-v2",
+            mentions = admittedMentions,
         )
         val outcome = messages.append(stored)
         contacts.seen(inbound.from, inbound.ts)
         groups.put(group.copy(lastActivityUnixMillis = maxOf(group.lastActivityUnixMillis, payload.timestampUnixMillis)))
         if (outcome != MessageStore.AppendOutcome.DUPLICATE) onMessage(stored)
+    }
+
+    /**
+     * __GROUP_E2E_V2_2026_09_23__ Spec §3 steps 3-6 for one decoded GroupMessage. Returns the group
+     * when the content may be applied; null when it was dropped or HELD (unknown group, or a
+     * sender not yet in our roster — replayed by [replayHeldGroupContent] when the definition
+     * lands). Never creates a group, never adds a member.
+     */
+    private fun admitGroupContent(inbound: V2Inbound, payload: GroupMessageWire.GroupMessagePayload): GroupDefinition? {
+        val gid = GroupIdentity.canonicalGroupId(inbound.groupId!!)
+        if (!payload.groupId.equals(gid, ignoreCase = true)) {
+            log("client: group message whose groupId differs from its envelope — dropped")
+            return null
+        }
+        if (payload.isSystem) {
+            val actor = payload.systemMessageData?.get("actorPublicKey")
+            if (actor == null || !GroupIdentity.sameIdentity(actor, inbound.from)) {
+                log("client: group system message whose actor is not the sender ${inbound.from.take(12)}… — dropped")
+                return null
+            }
+        } else if (!GroupIdentity.sameIdentity(payload.senderPublicKey, inbound.from)) {
+            log("client: group message whose author is not the sender ${inbound.from.take(12)}… — dropped")
+            return null
+        }
+        val group = groups.get(gid)
+        if (group == null) {
+            holdGroupContent(gid, inbound, "a group we do not hold (yet)")
+            return null
+        }
+        if (group.isEvicted(inbound.from)) {
+            log("client: group message from an evicted member ${inbound.from.take(12)}… — dropped")
+            return null
+        }
+        if (!group.isMember(inbound.from)) {
+            holdGroupContent(gid, inbound, "a sender not (yet) in our roster")
+            return null
+        }
+        return group
+    }
+
+    /** Spec §2.4: `message_edited` (author only) / `message_deleted` (author or current admin). */
+    private fun applyGroupSystem(inbound: V2Inbound, group: GroupDefinition, payload: GroupMessageWire.GroupMessagePayload) {
+        val gid = GroupIdentity.canonicalGroupId(group.groupId)
+        val data = payload.systemMessageData.orEmpty()
+        val at = payload.timestampUnixMillis
+        when (payload.systemMessageType) {
+            GroupMessageWire.SYSTEM_EDITED -> {
+                val targetId = data["editedMessageId"] ?: return
+                val text = data["editedContent"] ?: return
+                val target = messages.messages(gid).firstOrNull { GroupMessageWire.sameMessageId(it.id, targetId) } ?: return
+                if (!GroupIdentity.sameIdentity(target.senderAddress, inbound.from)) {
+                    log("client: group edit of someone else's message by ${inbound.from.take(12)}… — refused")
+                    return
+                }
+                if (target.isDeletedForEveryone || target.content == text) return
+                messages.editContent(gid, target.id, text, at)
+            }
+            GroupMessageWire.SYSTEM_DELETED -> {
+                val targetId = data["deletedMessageId"] ?: return
+                val target = messages.messages(gid).firstOrNull { GroupMessageWire.sameMessageId(it.id, targetId) } ?: return
+                if (!GroupIdentity.sameIdentity(target.senderAddress, inbound.from) && !group.isAdmin(inbound.from)) {
+                    log("client: group delete by a non-author non-admin ${inbound.from.take(12)}… — refused")
+                    return
+                }
+                if (target.isDeletedForEveryone) return
+                messages.deleteForEveryone(gid, target.id, at)
+            }
+            else -> return
+        }
+        contacts.seen(inbound.from, inbound.ts)
+        onGroupContentChanged(gid)
+    }
+
+    /** Called after a group edit/delete was applied, so a surface can redraw that thread. */
+    @Volatile var onGroupContentChanged: (String) -> Unit = {}
+
+    /**
+     * __GROUP_E2E_V2_2026_09_23__ Group media (spec §4): the key message carries `groupMessage`;
+     * the §3 checks run BEFORE any download, then the bytes are fetched from THIS member's blob
+     * and sealed at rest like 1:1 media.
+     */
+    private fun receiveGroupMedia(inbound: V2Inbound, key: V2FileKeyMessage) {
+        val payload = key.groupMessage?.let { GroupMessageWire.decodeFromEnvelope(it) }
+        if (payload == null || payload.isSystem) {
+            log("client: group media key without a usable groupMessage from ${inbound.from.take(12)}… — dropped")
+            return
+        }
+        val group = admitGroupContent(inbound, payload) ?: return
+        val gid = GroupIdentity.canonicalGroupId(group.groupId)
+        if (messages.messages(gid).any { GroupMessageWire.sameMessageId(it.id, payload.messageId) }) return
+        val name = payload.mediaFileName ?: key.filename
+        val safeName = name.replace(Regex("[^A-Za-z0-9._-]"), "_").take(120).ifEmpty { "file" }
+        val out = File(mediaDir, "${payload.messageId.take(8)}-$safeName")
+        val written = blobs.downloadAndDecryptToFile(
+            blobId = key.blobId,
+            chunkCount = key.chunkCount,
+            fileKey = key.fileKey,
+            fileNonce = key.fileNonce,
+            manifest = key.manifest,
+            out = out,
+            openSink = mediaVault::sealingStream,
+        )
+        if (written == null) log("client: group media ${key.blobId.take(12)}… could not be fetched or decrypted")
+        val mediaType = when (payload.mediaType ?: GroupMessageWire.GroupMediaType.fromRaw(key.mediaType)) {
+            GroupMessageWire.GroupMediaType.PHOTO -> MediaType.IMAGE
+            GroupMessageWire.GroupMediaType.VIDEO -> MediaType.VIDEO
+            GroupMessageWire.GroupMediaType.AUDIO -> MediaType.AUDIO
+            GroupMessageWire.GroupMediaType.CONTACT -> MediaType.CONTACT
+            GroupMessageWire.GroupMediaType.DOCUMENT -> MediaType.DOCUMENT
+            null -> MediaType.forMime(key.mime)
+        }
+        val stored = Message(
+            id = payload.messageId,
+            conversationId = gid,
+            senderAddress = inbound.from,
+            recipientAddress = gid,
+            fromMe = false,
+            content = payload.plaintextContent ?: name,
+            mediaType = mediaType,
+            mediaRef = if (written != null) out.absolutePath else null,
+            sentAtMs = payload.timestampUnixMillis,
+            sentAtSource = TimestampSource.RELAY_ENVELOPE_MS,
+            deliveryStatus = DeliveryStatus.DELIVERED,
+            transport = "relay-v2",
+        )
+        val outcome = messages.append(stored)
+        contacts.seen(inbound.from, inbound.ts)
+        groups.put(group.copy(lastActivityUnixMillis = maxOf(group.lastActivityUnixMillis, payload.timestampUnixMillis)))
+        if (outcome != MessageStore.AppendOutcome.DUPLICATE) onMessage(stored)
+    }
+
+    /** Spec §3 step 5: bounded (200 per group, 7 days), in memory; replayed when the definition lands. */
+    private val heldGroupContent = java.util.concurrent.ConcurrentHashMap<String, MutableList<Pair<Long, V2Inbound>>>()
+
+    private fun holdGroupContent(gid: String, inbound: V2Inbound, why: String) {
+        val list = heldGroupContent.getOrPut(gid) { java.util.Collections.synchronizedList(ArrayList()) }
+        synchronized(list) {
+            val cutoff = System.currentTimeMillis() - HELD_GROUP_CONTENT_TTL_MS
+            list.removeAll { it.first < cutoff }
+            if (list.size >= MAX_HELD_GROUP_CONTENT) list.removeAt(0)
+            list += System.currentTimeMillis() to inbound
+        }
+        log("client: group content from ${inbound.from.take(12)}… held: $why (${gid.take(8)}…)")
+    }
+
+    private fun replayHeldGroupContent(groupId: String) {
+        val gid = GroupIdentity.canonicalGroupId(groupId)
+        val held = heldGroupContent.remove(gid) ?: return
+        val cutoff = System.currentTimeMillis() - HELD_GROUP_CONTENT_TTL_MS
+        val batch = synchronized(held) { held.filter { it.first >= cutoff }.map { it.second } }
+            // __BLOCKED_MEMBER_GROUPS_2026_09_24__ held before the sender was blocked: still dropped.
+            .filter { BlockPolicy.inbound(contacts, it.from) != BlockPolicy.Inbound.DROP_BLOCKED }
+        for (inbound in batch) runCatching { dispatch(inbound) }
+            .onFailure { log("client: replay of held group content failed: ${it.javaClass.simpleName}") }
     }
 
     /**
@@ -1560,6 +2607,8 @@ class OshiClient(
             fileNonce = key.fileNonce,
             manifest = key.manifest,
             out = out,
+            // Re-sealed chunk by chunk under the local media key: the plaintext never lands.
+            openSink = mediaVault::sealingStream,
         )
         if (written == null) log("client: media ${key.blobId.take(12)}… could not be fetched or decrypted")
 
@@ -1575,15 +2624,17 @@ class OshiClient(
         val card = if (
             written != null &&
             key.mediaType == MediaType.CONTACT.wire &&
-            out.length() in 1..MAX_CONTACT_CARD_BYTES
+            (MediaVault.lengthOf(out) ?: 0L) in 1..MAX_CONTACT_CARD_BYTES
         ) {
             runCatching {
-                com.oshi.desktop.place.ContactCardPayload.decode(out.readText(Charsets.UTF_8))
+                com.oshi.desktop.place.ContactCardPayload.decode(
+                    String(mediaVault.readBytes(out, MAX_CONTACT_CARD_BYTES.toLong()), Charsets.UTF_8)
+                )
             }.getOrNull()
         } else {
             if (written != null && key.mediaType == MediaType.CONTACT.wire) {
                 log(
-                    "client: an attachment claimed mediaType=contact at ${out.length()} bytes — " +
+                    "client: an attachment claimed mediaType=contact at ${MediaVault.lengthOf(out)} bytes — " +
                         "over the ${MAX_CONTACT_CARD_BYTES}-byte ceiling, so it was NOT parsed as one"
                 )
             }
@@ -1617,6 +2668,7 @@ class OshiClient(
         )
         val outcome = messages.append(stored)
         contacts.seen(inbound.from, inbound.ts)
+        blockedByPeers.clear(inbound.from)   // __BLOCKED_BY_PEER_2026_09_24__ media = a person writing
         if (outcome != MessageStore.AppendOutcome.DUPLICATE) onMessage(stored)
         if (deliveryReceiptsEnabled) {
             sendPlaintext(inbound.from, DeliveryReceipt.encode(inbound.msgId), storeRow = false)
@@ -1670,7 +2722,117 @@ class OshiClient(
     /** Every conversation including blocked peers — what a "blocked" settings view reads. */
     fun conversationsIncludingBlocked(): List<MessageStore.ConversationSummary> = messages.conversations()
 
-    fun history(peerAddress: String): List<Message> = messages.messages(peerAddress)
+    fun history(peerAddress: String): List<Message> = messages.messages(peerAddress).filterNot { it.hiddenLocally }
+
+    /** __GROUP_PARITY_2026_09_23__ delete one message on this device only, 1:1 or group (iOS "Delete for me"). */
+    fun deleteMessageForMe(conversationId: String, messageId: String): Boolean {
+        val conv = groups.get(conversationId)?.let { GroupIdentity.canonicalGroupId(it.groupId) } ?: conversationId
+        val m = messages.messages(conv).firstOrNull { GroupMessageWire.sameMessageId(it.id, messageId) } ?: return false
+        return messages.hideLocally(conv, m.id) != null
+    }
+
+    /**
+     * __GROUP_PARITY_2026_09_23__ iOS `deleteGroup` — what an ADMIN's "Delete group" does on iOS
+     * (`GroupMessaging.swift:2394`, reached from `GroupViews.swift:4823`): the group and its
+     * messages are removed from THIS device, and nothing is sent — the other members keep the
+     * group. A leave is also recorded for own-device sync, so a member's later broadcast (whose
+     * roster still names us) does not bring it back here; iOS has no such tombstone.
+     */
+    fun deleteGroupLocally(groupId: String): Boolean {
+        val g = groups.get(groupId) ?: return false
+        runCatching { devSync.noteLocalLeave(g.groupId, g.name) }
+        messages.deleteConversation(GroupIdentity.canonicalGroupId(g.groupId))
+        return groups.delete(g.groupId)
+    }
+
+    /**
+     * __GROUP_PARITY_2026_09_23__ iOS `BlockedContactsManager.blockGroup` (local): the composer is
+     * closed with a banner and no notification is raised (`PushNotificationManager.swift:183`).
+     * Messages still arrive and are stored, as on iOS. Nothing is sent to anyone.
+     */
+    /**
+     * __DESKTOP_REPORT_2026_09_23__ File a report about a contact (address) or a group
+     * (group id), optionally blocking in the same gesture — the phones' "Also block"
+     * toggle. Blocking here is the SAME [block] / [setGroupBlocked] every other surface
+     * uses; reporting never leaves a group by itself (iOS/Android parity).
+     */
+    fun report(
+        subject: com.oshi.desktop.net.V2ReportClient.Subject,
+        subjectId: String,
+        reason: com.oshi.desktop.net.V2ReportClient.Reason,
+        details: String,
+        alsoBlock: Boolean,
+    ): com.oshi.desktop.net.V2ReportClient.Report {
+        val filed = reports.file(subject, subjectId, reason, details)
+        if (alsoBlock) {
+            when (subject) {
+                com.oshi.desktop.net.V2ReportClient.Subject.CONTACT -> block(subjectId)
+                com.oshi.desktop.net.V2ReportClient.Subject.GROUP -> setGroupBlocked(subjectId, true)
+            }
+        }
+        return filed
+    }
+
+    fun setGroupBlocked(groupId: String, blocked: Boolean): GroupDefinition? {
+        groups.get(groupId) ?: return null
+        groups.setBlocked(groupId, blocked)
+        return groups.get(groupId)
+    }
+
+    fun isGroupBlocked(groupId: String): Boolean = groups.isBlocked(groupId)
+
+    /**
+     * __GROUP_PARITY_2026_09_23__ Set the group description (wire key `description`, iOS
+     * `groupDescription`, GROUP_E2E_V2_SPEC §5.1). Same permission as the name. Phones on a
+     * release older than that spec ignore the key; an absent key never erases a stored one, so a
+     * description can be changed but not cleared across devices (iOS `swift:1072` has the same rule).
+     */
+    fun setGroupDescription(groupId: String, description: String): GroupDefinition? {
+        val g = groups.get(groupId) ?: return null
+        if (!canEditGroupInfo(groupId)) return null
+        val text = description.trim().take(500)
+        if (text == g.description.orEmpty()) return g
+        val updated = bumpVersion(g.copy(description = text.ifEmpty { null }))
+        groups.put(updated)
+        broadcastGroupUpdate(updated, GroupUpdateWire.encodeDefinitionFramed(updated))
+        return updated
+    }
+
+    /**
+     * __GROUP_PARITY_2026_09_23__ Pin ([messageId]) or unpin (null) — iOS `pinMessage` /
+     * `unpinMessage` (`GroupMessaging.swift:1471-1505`): `pinnedMessageId` + `pinnedBy` in the
+     * full definition, permission `canPinMessages` (= the name/picture rule). Unpinning sends a
+     * definition WITHOUT the keys, which is how iOS unpins too.
+     */
+    fun setGroupPin(groupId: String, messageId: String?): GroupDefinition? {
+        val g = groups.get(groupId) ?: return null
+        if (!canEditGroupInfo(groupId)) return null
+        val gid = GroupIdentity.canonicalGroupId(g.groupId)
+        val pinId = messageId?.let { id ->
+            messages.messages(gid).firstOrNull { GroupMessageWire.sameMessageId(it.id, id) }?.id?.uppercase(java.util.Locale.US)
+                ?: return null
+        }
+        val updated = bumpVersion(g.copy(pinnedMessageId = pinId, pinnedBy = pinId?.let { address }))
+        groups.put(updated)
+        broadcastGroupUpdate(updated, GroupUpdateWire.encodeDefinitionFramed(updated))
+        return updated
+    }
+
+    /**
+     * __GROUP_PARITY_2026_09_23__ Forward a message to a contact — iOS `forwardGroupMessage`
+     * (`GroupViews.swift:5305`): a 1:1 send of `➡️FORWARDED➡️{originalSenderName, content,
+     * isForwarded, forwardCount}`; forwarding a forward increments the count and keeps the
+     * first sender's name (`MessageActionsManager.swift:292`).
+     */
+    fun forwardMessage(fromConversation: String, messageId: String, toPeer: String): SendOutcome? {
+        val conv = groups.get(fromConversation)?.let { GroupIdentity.canonicalGroupId(it.groupId) } ?: fromConversation
+        val m = messages.messages(conv).firstOrNull { GroupMessageWire.sameMessageId(it.id, messageId) } ?: return null
+        if (m.isDeletedForEveryone || m.hiddenLocally || m.content.isNullOrBlank()) return null
+        val senderName = if (m.fromMe) ownNickname else contacts.get(m.senderAddress)?.label(m.senderAddress.take(8))
+        val body = com.oshi.desktop.msg.ReplyEnvelope.forward(m.content!!, senderName)
+        if (BlockPolicy.outgoingText(contacts, toPeer) == BlockPolicy.Outbound.REFUSE_BLOCKED) return SendOutcome.BLOCKED
+        return sendPlaintext(toPeer, body, storeRow = true)
+    }
 
     /**
      * `DELETE /v2/account` and then the local wipe — PARITY.md row 0.11, guideline 5.1.1(v).
@@ -1694,12 +2856,67 @@ class OshiClient(
         sessions.clear()
         prekeys.clear()
         IdentityStore.erase(vault)
+        vault.delete(OWN_NICKNAME_ACCOUNT)   // __SHARED_NICKNAME_2026_09_22__ the name goes with the account
         routerState.clear()
         syncCursor.reset()
         return receipt
     }
 
+    /**
+     * __PER_DEVICE_MAILBOX_2026_09_23__ A message ANOTHER device of this account sent
+     * (CLIENT_SPEC.md §3.6), stored as an OUTGOING row with status `sent`: no notification (a
+     * `fromMe` row never raises one), no receipt, no control processing. Deduped by msgId —
+     * devsync may bring the same row later. Control payloads and media keys never become rows
+     * here; a media message's bytes arrive through devsync with its row.
+     */
+    internal fun storeSentCopy(copy: com.oshi.desktop.net.SentCopy) {
+        val row = when (copy.conversationType) {
+            com.oshi.desktop.net.SentCopy.TYPE_1TO1 -> {
+                val peer = copy.peer ?: return
+                val text = copy.message
+                if (ControlPrefix.isControl(text) || V2FileKeyMessage.parse(text) != null) return
+                Message(
+                    id = copy.msgId, conversationId = peer, senderAddress = address, recipientAddress = peer,
+                    fromMe = true, content = text, sentAtMs = copy.sentAtMs ?: System.currentTimeMillis(),
+                    sentAtSource = if (copy.sentAtMs != null) TimestampSource.ISO8601 else TimestampSource.LOCAL_CLOCK,
+                    deliveryStatus = DeliveryStatus.SENT, transport = "self-copy",
+                )
+            }
+            com.oshi.desktop.net.SentCopy.TYPE_GROUP -> {
+                val gid = GroupIdentity.canonicalGroupId(copy.groupId ?: return)
+                val group = groups.get(gid) ?: run { log("client: sent-copy for a group we do not hold (${gid.take(12)}…)"); return }
+                val payload = GroupMessageWire.decodeFromEnvelope(copy.message) ?: return
+                // __GROUP_E2E_V2_2026_09_23__ spec §7.2: §3 steps 2-3, our own authorship, no
+                // command processing; the row id is the GroupMessage `id` (dedup key everywhere).
+                if (!payload.groupId.equals(gid, ignoreCase = true)) return
+                if (payload.isSystem || !GroupIdentity.sameIdentity(payload.senderPublicKey, address)) return
+                if (ControlPrefix.isControl(payload.body) && ControlPrefix.match(payload.body) != ControlPrefix.REPLY) return
+                if (messages.messages(gid).any { GroupMessageWire.sameMessageId(it.id, payload.messageId) }) return
+                groups.put(group.copy(lastActivityUnixMillis = maxOf(group.lastActivityUnixMillis, payload.timestampUnixMillis)))
+                Message(
+                    id = payload.messageId, conversationId = gid, senderAddress = address, recipientAddress = group.groupId,
+                    fromMe = true, content = payload.body, sentAtMs = payload.timestampUnixMillis,
+                    sentAtSource = TimestampSource.RELAY_ENVELOPE_MS,
+                    deliveryStatus = DeliveryStatus.SENT, transport = "self-copy",
+                    mentions = com.oshi.desktop.group.MentionWire.admit(
+                        com.oshi.desktop.msg.ReplyEnvelope.unwrap(payload.body)?.content ?: payload.body,
+                        payload.mentions, { k -> group.isMember(k) }, GroupIdentity::sameIdentity,
+                    ),
+                )
+            }
+            else -> return
+        }
+        if (messages.messages(row.conversationId).any { it.id.equals(row.id, ignoreCase = true) }) return
+        if (messages.append(row) != MessageStore.AppendOutcome.DUPLICATE) onMessage(row)
+    }
+
     companion object {
+        /** How often the poll loop re-asks whether the ACCOUNT bundle needs a refill. */
+        const val REPUBLISH_CHECK_MS = 60 * 60 * 1000L
+
+        /** __GROUP_E2E_V2_2026_09_23__ spec §3 step 5 bounds for held group content. */
+        const val MAX_HELD_GROUP_CONTENT = 200
+        const val HELD_GROUP_CONTENT_TTL_MS = 7L * 24 * 3600 * 1000
 
         /**
          * The sentence a UI is obliged to show beside any bot composer (row 0.26).
@@ -1722,6 +2939,9 @@ class OshiClient(
          * delivered, just as an attachment rather than as a contact.
          */
         const val MAX_CONTACT_CARD_BYTES: Long = 64L * 1024
+
+        /** __SHARED_NICKNAME_2026_09_22__ Vault entry holding this account's own nickname (UTF-8). */
+        const val OWN_NICKNAME_ACCOUNT = "profile.nickname"
 
         fun defaultDisplayName(): String =
             System.getenv("OSHI_NAME")?.takeIf { it.isNotBlank() }

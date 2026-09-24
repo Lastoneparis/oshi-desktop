@@ -50,11 +50,12 @@ import com.oshi.desktop.group.MinimalGroupUpdate
  *
  * ============================================================ WHAT IT REFUSES TO COPY
  *
- * `member_sync_request` **does not auto-add the requester**. iOS does, reasoning "they have
- * the group, so they're legitimate" (`GroupMessaging.swift:1113`), which is an
- * unauthenticated membership write and is recorded as a defect in PARITY.md row 0.17. Here a
- * sync request from someone already in the roster is answered with our copy of the
- * definition ([Result.respondTo]); a sync request from anyone else is dropped.
+ * `member_sync_request` from a non-member: iOS adds the requester unconditionally
+ * (`GroupMessaging.swift:1113`). GROUP_E2E_V2_SPEC §5.3 keeps that — it is how an invite link
+ * completes — but only on the authenticated v2 channel. Here it is admitted only when the
+ * requester IS the authenticated sender, we are an admin, and the key is neither evicted nor
+ * blocked (__GROUP_PARITY_2026_09_23__). A member's request is answered with our copy
+ * ([Result.respondTo]).
  *
  * Pure apart from [groups]: no clock, no network. What to SEND in response is returned, never
  * sent from here — the poll thread owns the network.
@@ -63,6 +64,16 @@ class GroupIngest(
     private val groups: GroupStore,
     private val selfAddress: () -> String,
 ) {
+
+    /**
+     * __DEVSYNC_REJOIN_2026_09_23__ The desktop's left-group tombstone: true for a group this account
+     * LEFT (own-device sync state) and has not rejoined. Gate zero in front of materialising an
+     * unknown group: a member whose roster still names us would otherwise walk us back in.
+     */
+    @Volatile var refusesGroup: (groupId: String) -> Boolean = { false }
+
+    /** __GROUP_PARITY_2026_09_23__ a blocked contact is never admitted by an invite join. */
+    @Volatile var isBlocked: (publicKey: String) -> Boolean = { false }
 
     /** What [ingest] did. Every refusal is a distinct value so a refusal can be counted. */
     enum class Outcome {
@@ -101,6 +112,16 @@ class GroupIngest(
 
         /** Neither a definition nor a minimal update, or a definition an iPhone would throw on. */
         REJECTED_MALFORMED,
+
+        /**
+         * __GROUP_COMPAT_IGNORE_2026_09_23__ A well-formed `{"type":…}` state frame whose `type`
+         * this client does not act on (GROUP_E2E_V2_SPEC header: new `type` values are ones "old
+         * receivers ignore"). Android's legacy `{"type":"updated",groupId,name,description}` — sent
+         * after every rename alongside the definition and `group_renamed` — and the spec's own
+         * optional `read_receipt_batch` land here. Nothing is written; the definition that
+         * accompanies them is authoritative.
+         */
+        IGNORED,
     }
 
     /**
@@ -112,6 +133,8 @@ class GroupIngest(
         val groupId: String?,
         val detail: String,
         val respondTo: GroupDefinition? = null,
+        /** __GROUP_PARITY_2026_09_23__ a definition every OTHER member must now receive (invite join). */
+        val broadcast: GroupDefinition? = null,
     )
 
     fun ingest(plaintext: String, sender: String?): Result {
@@ -136,9 +159,17 @@ class GroupIngest(
         val current = groups.get(gid)
 
         if (current == null) {
+            if (refusesGroup(gid)) {
+                return Result(Outcome.REJECTED_NOT_PERMITTED, gid, "group left on this account (not rejoined)")
+            }
             // Rule 2, gate one. Without it, a broadcast re-creates a group we LEFT.
             if (!GroupUpdateAuthorizer.isSelfInRoster(selfAddress(), incoming.memberKeys)) {
                 return Result(Outcome.REJECTED_NOT_IN_ROSTER, gid, "we are not in the roster of an unknown group")
+            }
+            // __GROUP_E2E_V2_2026_09_23__ an admin evicted us: a stale roster still naming us must
+            // not walk us back in (spec §5.1 evictedMemberKeys).
+            if (incoming.isEvicted(selfAddress())) {
+                return Result(Outcome.REJECTED_NOT_IN_ROSTER, gid, "we were evicted from this group")
             }
             // Rule 2, gate two. `authorize` cannot run this check for a group we do not
             // hold — there is no local roster for "sender-not-a-member" to consult — so the
@@ -175,7 +206,9 @@ class GroupIngest(
 
     private fun minimal(plaintext: String, sender: String): Result {
         val update = GroupUpdateWire.decodeMinimalFramed(plaintext)
-            ?: return Result(Outcome.REJECTED_MALFORMED, null, "neither a definition nor a known minimal update")
+            ?: return GroupUpdateWire.ignorableMinimalType(plaintext)?.let { type ->
+                Result(Outcome.IGNORED, null, "state frame type '$type' not acted on here (spec: unknown types are ignored)")
+            } ?: Result(Outcome.REJECTED_MALFORMED, null, "neither a definition nor a known minimal update")
 
         if (update is MinimalGroupUpdate.Created) return created(update, sender)
 
@@ -187,6 +220,47 @@ class GroupIngest(
             ?: return Result(Outcome.REJECTED_MALFORMED, null, "minimal update with no groupId")
         val current = groups.get(gid)
             ?: return Result(Outcome.REJECTED_UNKNOWN_GROUP, gid, "minimal update for a group we do not hold")
+
+        // __GROUP_PARITY_2026_09_23__ An INVITE JOIN (spec §5.3: "the admin adds the requester — this
+        // is how invites complete — but ONLY on the v2 channel, so the requester is authenticated").
+        // Checked before the authorizer, which hard-rejects any non-member sender. Tighter than iOS:
+        // the requester must BE the authenticated sender (nobody can join someone else), we must be
+        // an admin of the group, and an evicted or blocked key is never re-admitted. Residual
+        // risk R1 of the spec still applies: whoever knows the group id can ask.
+        if (update is MinimalGroupUpdate.MemberSyncRequest && !current.isMember(sender)) {
+            if (!GroupIdentity.sameIdentity(update.requesterPublicKey, sender)) {
+                return Result(Outcome.REJECTED_NOT_PERMITTED, gid, "join request naming someone other than its sender")
+            }
+            if (!current.isAdmin(selfAddress())) {
+                return Result(Outcome.REJECTED_NOT_PERMITTED, gid, "join request, but we are not an admin of this group")
+            }
+            if (current.isEvicted(sender) || isBlocked(sender)) {
+                return Result(Outcome.REJECTED_NOT_PERMITTED, gid, "join request from an evicted or blocked key")
+            }
+            val joined = restamped(
+                current,
+                // No clock here (this class is pure): same joinedAt fallback as `member_added`.
+                current.members + GroupMember(publicKey = sender, joinedAtUnixMillis = current.lastActivityUnixMillis, isAdmin = false),
+            ).let { it.copy(stateVersion = (it.stateVersion ?: 0) + 1) }
+            groups.put(joined)
+            return Result(Outcome.UPDATED, gid, "${sender.take(12)}… joined by invite", respondTo = joined, broadcast = joined)
+        }
+
+        // __GROUP_E2E_V2_2026_09_23__ spec §5.3 rule 4: `member_removed` naming the SENDER itself is
+        // a leave, accepted from any current member whatever the group type (the sender is the
+        // authenticated envelope `from`, so nobody can leave on someone else's behalf).
+        if (update is MinimalGroupUpdate.MemberRemoved &&
+            GroupIdentity.sameIdentity(update.memberPublicKey, sender)
+        ) {
+            if (!current.isMember(sender)) return Result(Outcome.NO_CHANGE, gid, "not a member")
+            val remaining = current.members.filterNot { GroupIdentity.sameIdentity(it.publicKey, sender) }
+            val admins = GroupUpdateAuthorizer.restampAdminSet(current.adminKeys, remaining.map { it.publicKey })
+                .map(GroupIdentity::canonicalIdentity).toSet()
+            groups.put(current.copy(members = remaining.map {
+                it.copy(isAdmin = GroupIdentity.canonicalIdentity(it.publicKey) in admins)
+            }))
+            return Result(Outcome.UPDATED, gid, "${sender.take(12)}… left")
+        }
 
         // A minimal update carries no roster, so `apply` has nothing to merge. Ask the
         // authorizer what this sender is allowed to change instead: comparing the current
@@ -264,6 +338,7 @@ class GroupIngest(
     private fun created(update: MinimalGroupUpdate.Created, sender: String): Result {
         val gid = GroupIdentity.canonicalGroupId(update.groupId)
         if (groups.get(gid) != null) return Result(Outcome.NO_CHANGE, gid, "already have this group")
+        if (refusesGroup(gid)) return Result(Outcome.REJECTED_NOT_PERMITTED, gid, "group left on this account (not rejoined)")
         if (!GroupUpdateAuthorizer.isSelfInRoster(selfAddress(), update.memberKeys)) {
             return Result(Outcome.REJECTED_NOT_IN_ROSTER, gid, "we are not in the roster of a created group")
         }

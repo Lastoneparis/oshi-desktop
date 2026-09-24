@@ -50,12 +50,15 @@ what moves row 0.5, and nothing else does.
 Both require a Linux host — jpackage does not cross-build. `./gradlew packageAppImage` needs
 neither and produces something you can actually launch, which is the cheaper smoke test.
 
-## Signing — a documented gap, not a feature
+## Signing — required before a production repository
 
-Nothing here is signed. Debian repository signing is a detached OpenPGP signature over the apt
-`Release` file (`gpg --clearsign` / `debsign`); RPM signing is `rpm --addsign` with a GPG key
-whose public half users must import. A bare `.deb` or `.rpm` downloaded from a release page is
-unsigned either way, and `apt`/`dnf` will say so. These artifacts are for testing, not release.
+The build embeds the MIT license, OSHI website, package release and maintainer metadata, but it
+does **not** possess the organisation's OpenPGP private key and therefore cannot sign packages.
+Debian repository signing is a detached OpenPGP signature over the apt `Release` file
+(`gpg --clearsign` / `debsign`); RPM signing is `rpm --addsign` with a GPG key whose public half
+users must import. A bare `.deb` or `.rpm` downloaded from a release page is unsigned. Do not
+describe Linux distribution as production-ready until the signed APT/DNF repository and its key
+rotation process exist.
 
 ## Launching
 
@@ -71,4 +74,4 @@ Homebrew paths) and is not used on Linux.
 | | |
 |---|---|
 | `oshi.sh` | launcher — finds a distribution JDK and forwards to Gradle. |
-| `packaging/` | jpackage `--resource-dir` overrides. Empty today; see its README. |
+| `packaging/` | jpackage icon and safe Debian lifecycle-script overrides. |

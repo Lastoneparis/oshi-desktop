@@ -36,12 +36,21 @@ jobs:
           COMPILED="network/v2/OSHICryptoV2.kt network/v2/OSHICryptoV2Streaming.kt
                     network/v2/OSHIRatchetV2.kt network/v2/V2Session.kt
                     network/v2/V2FileKeyMessage.kt network/v2/V2RetryBudget.kt
-                    service/LlamaCpp.kt"
+                    service/LlamaCpp.kt service/CallRatingPolicy.kt
+                    service/VideoReorderReassembler.kt service/VideoRateController.kt
+                    network/encryption/PostQuantumKEM.kt network/encryption/RatchetSecurityMode.kt
+                    service/diag/CallFileLogger.kt"
           REFERENCED="network/v2/V2KeysClient.kt service/LocalLLMManager.kt"
           for f in $COMPILED $REFERENCED; do
             [ -f "$v/$f" ] || { echo "::error::missing vendored source: $f"; exit 1; }
           done
-          echo "all nine present"
+          for f in "$v"/network/v2/devsync/*.kt; do COMPILED="$COMPILED ${f#$v/}"; done
+          echo "all vendored sources present"
+
+          # Opus (Concentus) is vendored as SOURCE only: .java + LICENSE + README, never a jar.
+          [ -f Vendor/concentus/LICENSE ] || { echo "::error::Vendor/concentus/LICENSE missing"; exit 1; }
+          nonsrc="$(find Vendor -type f ! -name '*.java' ! -name LICENSE ! -name README-OSHI.md)"
+          [ -z "$nonsrc" ] || { echo "::error::non-source file under Vendor/: $nonsrc"; exit 1; }
 
           # The TRIPWIRE, enforced rather than documented: the shared crypto core is
           # portable only as long as nothing in it reaches for the Android SDK. An
@@ -57,7 +66,7 @@ jobs:
             if [ "$n" != "0" ]; then echo "::error::$f imports the Android SDK ($n)"; bad=1; fi
           done
           [ "$bad" -eq 0 ] || exit 1
-          echo "the seven compiled files import no Android SDK"
+          echo "the compiled shared files import no Android SDK"
 
           # A scan that can pass by not running is not a scan. The two REFERENCE files do
           # import android.*, which makes them a free positive control: if the pattern

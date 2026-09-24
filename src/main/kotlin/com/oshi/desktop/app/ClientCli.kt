@@ -91,6 +91,13 @@ fun runClientCli(args: Array<String>) {
         println("\n[group ${r.groupId?.take(8) ?: "?"}…] ${r.outcome}: ${r.detail}")
         print("> "); System.out.flush()
     }
+    // __CALL_RATING_2026_09_22__ callId → when the conversation actually started.
+    // `CallStateMachine` is pure and holds no clock on purpose, so the wall time a call
+    // was connected for exists nowhere else; `Connected` and `Ended` bracket it and this
+    // is the one subscriber that sees both. A call that never connects never gets an
+    // entry, so it reports a duration of 0 and the policy declines to ask about it.
+    val connectedAtMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
     // THE SURFACE FOR AN INBOUND CALL, and without it the whole lane is invisible.
     //
     // `onCall` was declared, fed by CallLane, and subscribed by NOBODY. A peer could ring,
@@ -108,7 +115,9 @@ fun runClientCli(args: Array<String>) {
                     println("\n   ringing ${short(event.peer)}…")
                 }
             com.oshi.desktop.call.CallLane.CallEvent.RingingStopped -> {}
-            is com.oshi.desktop.call.CallLane.CallEvent.Connected ->
+            is com.oshi.desktop.call.CallLane.CallEvent.Connected -> {
+                // __CALL_RATING_2026_09_22__ The conversation starts here.
+                connectedAtMs[event.callId] = System.currentTimeMillis()
                 // The EVENT decides, not the configuration: a lane with an opener can still
                 // connect without audio if the leg refused, and that call must say so.
                 println(
@@ -116,8 +125,34 @@ fun runClientCli(args: Array<String>) {
                         if (event.noAudio) com.oshi.desktop.call.CallLane.NO_AUDIO_WILL_FLOW
                         else "audio devices open; sound starts once a candidate pair answers."
                 )
-            is com.oshi.desktop.call.CallLane.CallEvent.Ended ->
+            }
+            is com.oshi.desktop.call.CallLane.CallEvent.Ended -> {
                 println("\n   call with ${short(event.peer)} ended: ${event.reason}")
+                // __CALL_RATING_2026_09_22__ The duration is computed HERE because the
+                // state machine is pure and deliberately carries no clock: `Connected`
+                // and `Ended` are the only two events that bracket the conversation, and
+                // this is the one place that sees both.
+                val startedAt = connectedAtMs.remove(event.callId)
+                val seconds = if (startedAt == null) 0L
+                else (System.currentTimeMillis() - startedAt) / 1000
+                // "We finished talking", as opposed to the network deciding for us.
+                // This client's enum spells the peer-side hang-up `PEER_DISCONNECTED`
+                // (the iOS wire spelling it accepts) where Android says `PEER_ENDED`.
+                val endedNormally = event.reason == com.oshi.desktop.call.CallEndReason.HUNG_UP ||
+                    event.reason == com.oshi.desktop.call.CallEndReason.PEER_DISCONNECTED
+                val ask = client.callRating.callDidEnd(
+                    callId = event.callId,
+                    peer = event.peer,
+                    durationSeconds = seconds,
+                    endedNormally = endedNormally,
+                )
+                if (ask != null) {
+                    println()
+                    println("   ${t("call.rating.title")}")
+                    println("   ${t("call.rating.subtitle")}")
+                    println("   /rate 1-5  ·  /rate skip")
+                }
+            }
             is com.oshi.desktop.call.CallLane.CallEvent.Refused ->
                 println("\n   call refused: ${event.refusal}${event.from?.let { " (from ${short(it)})" } ?: ""}")
             is com.oshi.desktop.call.CallLane.CallEvent.TransportProblem ->
@@ -137,9 +172,10 @@ fun runClientCli(args: Array<String>) {
     val withCalls = args.contains("--calls")
     if (withCalls) {
         println("  calls      : polling ${com.oshi.desktop.call.CallLane.POLL_INTERVAL_MS} ms — this contacts the CALL server,")
-        println("               which has no authentication and logs key prefixes and IPs. SIGNALLING ONLY: no audio.")
+        println("               which has no authentication and logs key prefixes and IPs. Experimental audio opens on connect;")
+        println("               it has loopback-only evidence, no TURN fallback, and no real-device call proof.")
     } else {
-        println("  calls      : off — pass --calls to ring and be rung (signalling only, no audio)")
+        println("  calls      : off — pass --calls to enable experimental audio calling (loopback-only evidence, no TURN)")
     }
     client.start(
         pollIntervalMs = argValue(args, "--poll")?.toLongOrNull() ?: 3_000,
@@ -202,12 +238,19 @@ object ClientCommands {
           /sendfile <address> <path>         encrypt a file, upload it, send the key message
           /card <address> <contact>          share one contact with another, as a contact card
           /history <address>                 the stored conversation with one peer
+          /export <path>                     ALL history as an encrypted .oshiexport (this account's key)
+          /import <path>                     merge an .oshiexport made by this account (no receipts sent)
           /chats                             every conversation, newest first
           /contacts                          known addresses
           /blocked                           conversations with blocked peers — withheld from /chats
           /peers                             OSHI devices found on this local network
           /block <address>                   stop storing anything from them (reversible)
           /unblock <address>                 unblocks EVERY base64 spelling of that key
+          /report <address> <reason> [+block] [details…]
+                                             report a contact to OSHI moderation (reason: spam|harassment|
+                                             inappropriate|other). Sends ONLY the reason, your text and the id.
+          /reportgroup <group> <reason> [+block] [details…]   same, for a group
+          /reports                           your filed reports and their delivery state
           /react <address> <msgId> <emoji>   add a reaction
           /unreact <address> <msgId> <emoji> remove yours
           /edit <address> <msgId> <text>     edit one of YOUR messages, for everyone
@@ -229,8 +272,8 @@ object ClientCommands {
           /schedule <address> <when> <text>  queue a message; <when> is +15m / +2h / +1d / epoch-ms
           /scheduled [address]               the queue
           /cancel <id>                       cancel a scheduled message
-          /call <address>                    ring a peer — SIGNALLING ONLY, NO AUDIO
-          /answer                            answer the ringing call (still no audio)
+          /call <address>                    ring a peer — experimental desktop audio; needs --calls
+          /answer                            answer the ringing call and attempt audio
           /decline                           decline the ringing call
           /hangup                            end the call that is up
           /calls                             the call state now, and this session's call log
@@ -239,13 +282,26 @@ object ClientCommands {
           /sync push|pull|status             the V2 archive (multi-device)
           /sync checkpoint <seq>             let the server drop everything up to <seq>
           /sync legacy push|pull             the legacy /api/sync alias map
-          /call <address>                    ring a peer — SIGNALLING ONLY, no audio (needs --calls)
+          /devices                           linked devices, pending approvals (direct device sync)
+          /devices approve|deny <id>         compare the 6-digit code on both screens first
+          /devices revoke <id>               stop syncing with that device
+          /devices sync                      re-run the diff with every connected device
+          /devsync on|off|auto               local override of the server's devsync_enabled
+          /mailbox                           this computer's own mailbox (per-device delivery)
+          /mailbox remove|relink [id]        remove a device from the account / link this one again
+          /mailbox approve <deviceId> <dsk>  sign another device in (prints the approval to paste there)
+          /mailbox accept <approval-json>    use an approval signed on another device
+          /mailbox takeover on|off           this computer answers old-style (account) messages
+          /mailbox reset RESET-ALL-DEVICES   recovery only: every device must be linked again
+          /nick [name|clear|pull|push]       your nickname: show, set (sent to contacts), remove, sync with your phone
           /lora attach <host> [port]         attach to a Meshtastic node over TCP (default 4403)
           /lora status|detach                the radio link — receive only, see /lora status
           /ai <prompt>                       ask the OFFLINE model (nothing leaves this machine)
           /ai model <path>                   point at a .gguf; nothing is ever downloaded
           /ai status                         engine, model, and what a question would do now
           /ai forget                         drop the remembered conversation context
+          /rate <1-5> [reasons] [note]       rate the call that just ended (/rate skip to pass)
+          /rate?                             the reason numbers, for `/rate 2 1,3 <note>`
           /deleteaccount confirm             erase this identity on the server, then wipe it here
           /quit
     """.trimIndent()
@@ -256,6 +312,54 @@ object ClientCommands {
                 input == "/quit" -> return false
                 input.isEmpty() -> {}
                 input == "/help" -> out(HELP)
+
+                // __CALL_RATING_2026_09_22__ `/rate 2 1,3 sounded robotic`
+                //   arg 1: the stars, 1-5, or `skip`
+                //   arg 2: optional comma-separated reason numbers, printed when the
+                //          rating is poor enough for them to matter
+                //   rest:  an optional note
+                input == "/rate" || input.startsWith("/rate ") -> {
+                    val pending = client.callRating.pending()
+                    if (pending == null) {
+                        out("   ${t("call.rating.nothing_to_rate")}")
+                    } else {
+                        val rest = input.removePrefix("/rate").trim()
+                        val stars = rest.substringBefore(' ').trim()
+                        if (stars.equals("skip", ignoreCase = true) || stars.isEmpty()) {
+                            client.callRating.dismiss()
+                            out("   ${t("call.rating.not_now")}")
+                        } else {
+                            val n = stars.toIntOrNull()
+                            if (n == null || n !in 1..5) {
+                                out("   usage: /rate <1-5> [reasons] [note]   ·   /rate skip")
+                            } else {
+                                val tail = rest.removePrefix(stars).trim()
+                                // A leading `1,3` is reason numbers; anything else is the note.
+                                val maybeReasons = tail.substringBefore(' ')
+                                val looksLikeReasons = maybeReasons.isNotEmpty() &&
+                                    maybeReasons.all { it.isDigit() || it == ',' }
+                                val reasons = if (!looksLikeReasons) emptySet() else
+                                    maybeReasons.split(',')
+                                        .mapNotNull { it.trim().toIntOrNull() }
+                                        .mapNotNull { com.oshi.desktop.call.CallRatingClient.Reason.byIndex(it) }
+                                        .toSet()
+                                val note = if (looksLikeReasons) tail.removePrefix(maybeReasons).trim() else tail
+                                client.callRating.submit(n, reasons, note)
+                                out("   ${t("call.rating.thanks")}")
+                            }
+                        }
+                    }
+                }
+
+                input == "/rate?" -> {
+                    // The reason numbers, in the person's language, so `/rate 2 1,3` is
+                    // typable without guessing what 1 and 3 are.
+                    out("   ${t("call.rating.what_happened")}")
+                    com.oshi.desktop.call.CallRatingClient.Reason.values().forEachIndexed { i, r ->
+                        out("     ${i + 1}. ${r.label()}")
+                    }
+                    out("   ${t("call.rating.privacy")}")
+                }
 
                 input == "/whoami" -> {
                     out("   ${client.address}")
@@ -290,7 +394,7 @@ object ClientCommands {
                             if (it.blocked) append(" [${t("contact.blocked")}]")
                             append(" [${it.verification.wire}]")
                         }
-                        out("   ${short(it.address)}  ${it.displayName ?: ""}$flags")
+                        out("   ${short(it.address)}  ${it.label("")}$flags")
                     }
                 }
 
@@ -362,6 +466,33 @@ object ClientCommands {
                     // client.block, not contacts.block: the store's flag needs a row to sit
                     // on, and blocking someone never messaged before must still work.
                     client.block(it); out("   blocked ${short(it)} — nothing from them will be stored")
+                }
+
+                // __DESKTOP_REPORT_2026_09_23__
+                input.startsWith("/report ") || input.startsWith("/reportgroup ") -> {
+                    val isGroup = input.startsWith("/reportgroup ")
+                    val parts = input.substringAfter(' ').trim().split(Regex("\\s+"), limit = 3)
+                    val reason = com.oshi.desktop.net.V2ReportClient.Reason.entries
+                        .firstOrNull { it.wire == parts.getOrNull(1)?.lowercase() }
+                    val target = parts.getOrNull(0)?.let { if (isGroup) resolveGroup(client, it) else resolve(client, it) }
+                    if (target == null || reason == null) {
+                        out("   usage: ${if (isGroup) "/reportgroup <group>" else "/report <address>"} <spam|harassment|inappropriate|other> [+block] [details]")
+                    } else {
+                        var rest = parts.getOrNull(2).orEmpty()
+                        val alsoBlock = rest.startsWith("+block")
+                        if (alsoBlock) rest = rest.removePrefix("+block").trim()
+                        val r = client.report(
+                            if (isGroup) com.oshi.desktop.net.V2ReportClient.Subject.GROUP else com.oshi.desktop.net.V2ReportClient.Subject.CONTACT,
+                            target, reason, rest, alsoBlock,
+                        )
+                        out("   report ${r.id.take(8)}: ${r.state}${r.lastError?.let { " ($it)" } ?: ""}${if (alsoBlock) " — also blocked" else ""}")
+                    }
+                }
+
+                input == "/reports" -> {
+                    val all = client.reports.all()
+                    if (all.isEmpty()) out("   (no reports filed)")
+                    all.forEach { out("   ${it.id.take(8)}  ${it.subject.wire} ${short(it.subjectId)}  ${it.reason.wire}  ${it.state}") }
                 }
 
                 input.startsWith("/unblock ") -> withPeer(client, input, "/unblock ", out) {
@@ -555,8 +686,42 @@ object ClientCommands {
                 input == "/decline" -> answered(client.calls.decline(), client, out, "declined")
                 input == "/hangup" -> answered(client.calls.hangUp(), client, out, "ended")
 
+                // __ENCRYPTED_MESSAGE_EXPORT_2026_09_22__ same owner as the window's More pane.
+                input.startsWith("/export ") -> {
+                    val r = MessageBackup(client)
+                        .export(java.io.File(input.removePrefix("/export ").trim()))
+                    out("   " + com.oshi.desktop.i18n.dt("desktop.export.done", r.messages, r.file.path))
+                    if (r.unreadableConversations > 0) {
+                        out("   " + com.oshi.desktop.i18n.dt("desktop.export.done.partial", r.unreadableConversations))
+                    }
+                }
+                input.startsWith("/import ") -> try {
+                    val r = MessageBackup(client)
+                        .import(java.io.File(input.removePrefix("/import ").trim()))
+                    out("   imported ${r.imported}; ${r.alreadyPresent} already present; ${r.invalid} unreadable record(s) skipped" +
+                        (if (r.skippedGroups > 0) "; ${r.skippedGroups} from groups not on this machine" else "") +
+                        (if (r.skippedUnknown > 0) "; ${r.skippedUnknown} of an unknown conversation kind" else ""))
+                } catch (e: com.oshi.desktop.store.MessageExportException) {
+                    out("   " + e.userMessage())
+                }
+
                 input.startsWith("/bot") -> bot(client, input.removePrefix("/bot").trim(), out)
+                // __DEVSYNC_DIRECT_2026_09_22__ Once direct device sync is on, the stored-sync
+                // paths (V2 archive + legacy /api/sync) are closed: nothing is uploaded any more.
+                input.startsWith("/sync") && client.devSync.enabled ->
+                    out("   stored sync is off: this account uses direct device sync (/devices)")
                 input.startsWith("/sync") -> sync(client, input.removePrefix("/sync").trim(), out)
+                input == "/devices" || input.startsWith("/devices ") -> devices(client, input.removePrefix("/devices").trim(), out)
+                // __PER_DEVICE_MAILBOX_2026_09_23__
+                input == "/mailbox" || input.startsWith("/mailbox ") -> mailbox(client, input.removePrefix("/mailbox").trim(), out)
+                input == "/devsync" || input.startsWith("/devsync ") -> when (input.removePrefix("/devsync").trim()) {
+                    "on" -> { client.devSync.setOverride(true); out("   direct device sync forced ON for this machine") }
+                    "off" -> { client.devSync.setOverride(false); out("   direct device sync forced OFF for this machine") }
+                    "auto" -> { client.devSync.setOverride(null); out("   direct device sync follows the server flag") }
+                    else -> out("   usage: /devsync on|off|auto")
+                }
+                // __SHARED_NICKNAME_2026_09_22__
+                input == "/nick" || input.startsWith("/nick ") -> nick(client, input.removePrefix("/nick").trim(), out)
                 input.startsWith("/lora") -> lora(client, input.removePrefix("/lora").trim(), out)
                 input == "/ai" || input.startsWith("/ai ") -> ai(input.removePrefix("/ai").trim(), out)
                 input.startsWith("/deleteaccount") ->
@@ -608,7 +773,11 @@ object ClientCommands {
                 if (parts.size < 3) { out("   usage: /group rename <groupId> <name>"); return }
                 val gid = resolveGroup(client, parts[1]) ?: run { out("   unknown group"); return }
                 val updated = client.renameGroup(gid, rest.substringAfter(parts[1]).trim())
-                out(if (updated == null) "   unknown group" else "   renamed to '${updated.name}'; update broadcast")
+                // __GROUP_E2E_V2_2026_09_23__ null here is "not permitted" (admin_only, not an admin),
+                // never "unknown": the group resolved one line up. Saying "unknown group" sent an
+                // interop investigation down the wrong path.
+                out(if (updated == null) "   NOT RENAMED — only an admin may rename this group (admin_only)"
+                    else "   renamed to '${updated.name}'; update broadcast")
             }
             "roster" -> {
                 if (parts.size < 3) { out("   usage: /group roster <groupId> <address>"); return }
@@ -622,6 +791,90 @@ object ClientCommands {
                 out("   " + outcomeText(client.requestAllGroups(who)))
             }
             else -> out("   usage: /group new|send|add|remove|rename|roster|sync …")
+        }
+    }
+
+    // ------------------------------------------------------------------ devices (direct sync)
+
+    /** __DEVSYNC_DIRECT_2026_09_22__ Linked devices: list, approve with the 6-digit code, revoke. */
+    /** __PER_DEVICE_MAILBOX_2026_09_23__ ServerPatches/per_device_mailbox/CLIENT_SPEC.md §3.2, §3.7. */
+    private fun mailbox(client: OshiClient, args: String, out: (String) -> Unit) {
+        val m = client.deviceMailbox
+        val parts = args.split(Regex("\\s+"), limit = 3).filter { it.isNotEmpty() }
+        when (parts.firstOrNull()) {
+            null -> {
+                val s = m.snapshot()
+                out("   per-device delivery: ${if (s.flagOn) "ON (server)" else "off (server flag)"} · status ${s.status}" +
+                    (s.deviceId?.let { " · this device ${it.take(8)}" } ?: ""))
+                out("   account bundle held here: ${s.holdsAccountBundle}")
+                if (s.removedAlert) out("   !! this computer was REMOVED from the account — /mailbox relink after approving it elsewhere")
+                if (s.newDevices.isNotEmpty()) out("   !! new device(s) you did not approve here: ${s.newDevices.joinToString { it.take(8) }}")
+                s.lastError?.let { out("   last error: $it") }
+                if (s.active) m.listDevices()?.forEach { d ->
+                    out("   ${d.deviceId}${if (d.deviceId == s.deviceId) " (this computer)" else ""} bundle=${d.hasBundle} approvedBy=${d.approvedBy?.take(8) ?: "-"}")
+                }
+                if (s.flagOn || s.deviceId != null) out("   dsk (give it to the approving device): ${m.dskPub}")
+            }
+            "remove" -> parts.getOrNull(1)?.let { id ->
+                m.unregister(id).fold({ out("   removed $id") }, { out("   ${it.message}") })
+            } ?: out("   usage: /mailbox remove <deviceId>")
+            "relink" -> { m.relink(); out("   ${m.snapshot().status}") }
+            "approve" -> {
+                val id = parts.getOrNull(1); val dsk = parts.getOrNull(2)
+                val a = if (id != null && dsk != null) m.approvalFor(id, dsk) else null
+                out(if (a != null) "   /mailbox accept $a" else "   usage: /mailbox approve <deviceId> <dsk> (this device must itself be registered)")
+            }
+            "accept" -> {
+                val a = runCatching { org.json.JSONObject(args.removePrefix("accept").trim()) }.getOrNull()
+                out(if (a != null && m.acceptApproval(a)) "   approval stored — registering on the next poll" else "   not an approval")
+            }
+            "takeover" -> when (parts.getOrNull(1)) {
+                "on" -> { m.takeOverAccountBundle(true); out("   this computer now publishes the account bundle") }
+                "off" -> { m.takeOverAccountBundle(false); out("   back to automatic ownership") }
+                else -> out("   usage: /mailbox takeover on|off")
+            }
+            "reset" -> if (parts.getOrNull(1) == "RESET-ALL-DEVICES") {
+                m.resetAll().fold({ out("   $it device(s) removed; every device must be linked again") }, { out("   ${it.message}") })
+            } else out("   usage: /mailbox reset RESET-ALL-DEVICES")
+            else -> out("   unknown /mailbox command")
+        }
+    }
+
+    private fun devices(client: OshiClient, rest: String, out: (String) -> Unit) {
+        val ds = client.devSync
+        val parts = rest.split(Regex("\\s+")).filter { it.isNotEmpty() }
+        fun resolveId(prefix: String?): String? {
+            if (prefix == null) return null
+            val snap = ds.snapshot()
+            val ids = (snap.pending.map { it.peerId } + snap.linked.map { it.deviceId }).distinct()
+            return ids.firstOrNull { it.startsWith(prefix.lowercase()) }
+        }
+        when (parts.getOrNull(0)) {
+            null -> {
+                val s = ds.snapshot()
+                out("   direct sync: " + (if (s.enabled) "ON" else "off") +
+                    " (server ${if (s.serverEnabled) "on" else "off"}, override ${s.override ?: "none"})" +
+                    (s.deviceId?.let { " — this device ${it.take(8)}" } ?: ""))
+                for (p in s.pending) out("   PENDING  ${p.peerId.take(8)}  ${p.name} (${p.platform}, ${p.transport})  code ${p.code}" +
+                    (if (p.thisDeviceIsNew) "  — waiting for approval on your other device" else "  — /devices approve ${p.peerId.take(8)}"))
+                for (d in s.linked) {
+                    val live = s.sessions.firstOrNull { it.peerId == d.deviceId }
+                    out("   linked   ${d.deviceId.take(8)}  ${d.name} (${d.platform})" + (live?.let { "  [${it.state} over ${it.transport}]" } ?: ""))
+                }
+                if (s.linked.isEmpty() && s.pending.isEmpty()) out("   no device linked yet")
+            }
+            "approve", "deny" -> {
+                val id = resolveId(parts.getOrNull(1)) ?: return out("   usage: /devices ${parts[0]} <id prefix>")
+                ds.approve(id, parts[0] == "approve")
+                out("   ${if (parts[0] == "approve") "approved" else "denied"} ${id.take(8)}")
+            }
+            "revoke" -> {
+                val id = resolveId(parts.getOrNull(1)) ?: return out("   usage: /devices revoke <id prefix>")
+                ds.revoke(id)
+                out("   revoked ${id.take(8)}: it will be refused from now on")
+            }
+            "sync" -> { ds.syncNow(); out("   syncing with every connected device") }
+            else -> out("   usage: /devices [approve|deny|revoke <id>|sync]")
         }
     }
 
@@ -706,6 +959,16 @@ private fun callLog(client: OshiClient, out: (String) -> Unit) {
             out("   ${lane.unopenable} signal(s) did not open, ${lane.unaddressable} named no valid" +
                 " sender, ${lane.sendFailures} send(s) failed")
         }
+        val media = lane.mediaDiagnostics()
+        out(
+            "   media: audio=${if (media.audioConfigured) "configured" else "disabled"}, " +
+                "status=${media.status.name.lowercase().replace('_', ' ')}, " +
+                "candidates sent/received/ignored=${media.candidatesSent}/" +
+                "${media.candidatesReceived}/${media.candidatesIgnored}, " +
+                "path=${if (media.pathSelected) "selected" else "not selected"}, " +
+                "frames accepted/refused=${media.framesAccepted}/${media.framesRefused}, " +
+                "failures=${media.mediaFailures}",
+        )
     }
 
 private fun lora(client: OshiClient, rest: String, out: (String) -> Unit) {
@@ -714,8 +977,16 @@ private fun lora(client: OshiClient, rest: String, out: (String) -> Unit) {
             "attach" -> {
                 val host = parts.getOrNull(1)
                 if (host == null) { out("   usage: /lora attach <host> [port]"); return }
-                val port = parts.getOrNull(2)?.toIntOrNull() ?: com.oshi.desktop.lora.LoRaAttach.TCP_PORT
-                client.loraAttach(host, port)
+                val portArg = parts.getOrNull(2)
+                val port = portArg?.toIntOrNull()
+                    ?: if (portArg == null) com.oshi.desktop.lora.LoRaAttach.TCP_PORT else run {
+                        out("   port must be an integer between 1 and 65535")
+                        return
+                    }
+                if (!client.loraAttach(host, port)) {
+                    out("   invalid endpoint: use a hostname/IP without spaces and a port from 1 to 65535")
+                    return
+                }
                 out("   attaching to $host:$port …")
                 // Said on every attach, because this is the one lane where "connected"
                 // and "can read your messages" are different facts.
@@ -829,6 +1100,33 @@ private fun sync(client: OshiClient, rest: String, out: (String) -> Unit) {
                 else -> out("   usage: /sync legacy push|pull")
             }
             else -> out("   usage: /sync push|pull|status|checkpoint <seq>|legacy push|pull")
+        }
+    }
+
+    /**
+     * __SHARED_NICKNAME_2026_09_22__ `/nick` — the REPL's half of the Settings nickname field.
+     * Setting or clearing it tells every contact we have written to (silently).
+     */
+    private fun nick(client: OshiClient, arg: String, out: (String) -> Unit) {
+        fun report(u: OshiClient.NicknameUpdate) = out(
+            if (!u.changed) "   unchanged: ${u.nickname ?: "(none)"}"
+            else if (u.withheld) "   nickname ${u.nickname?.let { "set to \"$it\"" } ?: "removed"} on this computer only — NOT sent to contacts: " +
+                "this identity is shared with a phone (restored from its recovery key), and a profile from here would " +
+                "overwrite what the phone advertises. Set it on the phone, or /nick push to the phone's archive."
+            else "   nickname ${u.nickname?.let { "set to \"$it\"" } ?: "removed"}; sent to ${u.sent}/${u.eligible} contact(s)"
+        )
+        when (arg) {
+            "" -> out("   nickname: ${client.ownNickname ?: "(none — contacts see your address)"}")
+            "clear" -> report(client.setOwnNickname(null))
+            "pull" -> client.legacySyncPullNickname().fold(
+                { u -> if (u == null) out("   the profile archive holds no nickname") else report(u) },
+                { out("   profile archive pull failed: ${it.message}") },
+            )
+            "push" -> client.legacySyncPushNickname().fold(
+                { out("   nickname written to the encrypted profile archive (avatar and links kept)") },
+                { out("   profile archive push failed: ${it.message}") },
+            )
+            else -> report(client.setOwnNickname(arg))
         }
     }
 

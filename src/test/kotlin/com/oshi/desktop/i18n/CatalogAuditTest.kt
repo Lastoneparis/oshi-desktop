@@ -70,9 +70,9 @@ class CatalogAuditTest {
         assertEquals("34 catalogs expected", 34, all.size)
         assertTrue(
             "English is missing ${absentFromEn.size} keys that other locales carry; the recorded " +
-                "figure is 1034. If this grew, a translator added keys nobody wired up; if it " +
+                "figure is 1057. If this grew, a translator added keys nobody wired up; if it " +
                 "shrank, English caught up. Either way update the number deliberately.",
-            absentFromEn.size <= 1034,
+            absentFromEn.size <= 1057,
         )
         // and the shape of it: almost all of it is two locales
         val onlyPlFa = absentFromEn.count { carriers.getValue(it).all { t -> t == "pl" || t == "fa" } }
@@ -157,6 +157,48 @@ class CatalogAuditTest {
         )
     }
 
+    // ==================================================================== DESKTOP OVERLAY
+    // `desktop.` strings are deliberately not in the extracted iOS catalogs. They need a
+    // separate audit rather than an exception to the shared-catalog assertions above.
+
+    @Test
+    fun `desktop-only catalog exactly matches the desktop source`() {
+        val used = SourceKeys.usedDesktop(mainSource)
+        assertTrue(
+            "the desktop-only scan found ${used.size} keys ($used). An empty scan would make " +
+                "the exact-set assertion below pass while every dt(…) call had stopped being " +
+                "recognised, so fail before accepting that vacuous result.",
+            used.size >= 10,
+        )
+
+        val nonDesktopUses = used.filterNot { it.startsWith(DesktopStrings.PREFIX) }
+        assertTrue(
+            "dt(…) is for desktop-only keys. These calls would bypass an existing translation " +
+                "or render a marker instead of using t(…): $nonDesktopUses",
+            nonDesktopUses.isEmpty(),
+        )
+        assertTrue("desktop overlay keys outside ${DesktopStrings.PREFIX}: ${DesktopStrings.misfiledKeys()}",
+            DesktopStrings.misfiledKeys().isEmpty())
+        assertTrue(
+            "desktop overlay keys shadowed by an extracted iOS key: ${DesktopStrings.shadowedKeys()}",
+            DesktopStrings.shadowedKeys().isEmpty(),
+        )
+
+        val missing = used - DesktopStrings.overlayKeys
+        val stale = DesktopStrings.overlayKeys - used
+        assertTrue(
+            "desktop-only keys reached from source but absent from i18n/Desktop/en.json: $missing\n" +
+                "An absent key becomes a visible ⟦desktop.…⟧ marker in the window.",
+            missing.isEmpty(),
+        )
+        assertTrue(
+            "desktop-only keys left in i18n/Desktop/en.json with no dt(…) call: $stale\n" +
+                "Remove them or wire the screen they describe; retaining English-only dead copy " +
+                "makes the catalog look more localised than the window is.",
+            stale.isEmpty(),
+        )
+    }
+
     // ==================================================================== TRAP 4
     // InfoPlist.strings is a SEPARATE catalog. 100% on one says nothing about the other.
 
@@ -167,7 +209,7 @@ class CatalogAuditTest {
         }
         assertEquals(34, info.size)
         val enInfo = info.getValue("en")
-        assertEquals("en InfoPlist is 16 keys, against Localizable's 3820", 16, enInfo.size)
+        assertEquals("en InfoPlist is 16 keys, against Localizable's 3987", 16, enInfo.size)
         assertTrue("the two catalogs must not share keys", (enInfo.keys intersect Strings.catalog("en")!!.keys).isEmpty())
 
         // every locale has all 16, and none is blank
@@ -227,7 +269,7 @@ class CatalogAuditTest {
         }
         println("[i18n] $full of ${cats.size} locales serve every key the desktop uses.")
         println("[i18n] NOTE: this is the DESKTOP's coverage, over ${usedKeys.size} keys — not iOS's " +
-            "coverage over 3820. Reporting the latter as the former would claim a translated " +
+            "coverage over 3987. Reporting the latter as the former would claim a translated " +
             "desktop client on the strength of a translated phone.")
         println("[i18n] =============================================")
     }

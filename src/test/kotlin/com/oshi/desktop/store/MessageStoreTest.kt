@@ -3,6 +3,7 @@ package com.oshi.desktop.store
 import java.io.File
 import java.io.RandomAccessFile
 import java.nio.file.Files
+import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -64,6 +65,54 @@ class MessageStoreTest {
         assertEquals(2, reopened.size)
         assertEquals("first", reopened[0].content)
         assertEquals("second", reopened[1].content)
+    }
+
+    @Test
+    fun `encrypted history never writes message plaintext and survives a reopen`() {
+        val key = ByteArray(32) { (it + 1).toByte() }
+        val encrypted = MessageStore(dir, key)
+        encrypted.append(msg("m1", sentAtMs = 1_000L, content = "never on disk in clear"))
+
+        val file = File(dir, encrypted.fileNameFor("peer-a"))
+        val raw = file.readText()
+        assertTrue("the envelope, not a message object, must be written", raw.contains("\"nonce\""))
+        assertTrue("the envelope, not a message object, must be written", raw.contains("\"ct\""))
+        assertTrue("message content leaked to the journal", !raw.contains("never on disk in clear"))
+        assertEquals(
+            "never on disk in clear",
+            MessageStore(dir, key).messages("peer-a").single().content,
+        )
+    }
+
+    @Test
+    fun `opening a legacy plaintext journal with a history key migrates it atomically`() {
+        val plaintext = store()
+        plaintext.append(msg("m1", sentAtMs = 1_000L, content = "old local history"))
+        val file = File(dir, plaintext.fileNameFor("peer-a"))
+        assertTrue(file.readText().contains("old local history"))
+
+        val key = ByteArray(32) { (0x40 + it).toByte() }
+        val migrated = MessageStore(dir, key)
+        assertEquals("old local history", migrated.messages("peer-a").single().content)
+        assertTrue("migration left plaintext behind", !file.readText().contains("old local history"))
+        assertEquals("old local history", MessageStore(dir, key).messages("peer-a").single().content)
+    }
+
+    @Test
+    fun `tampered encrypted row is rejected without being read as plaintext`() {
+        val key = ByteArray(32) { (0x20 + it).toByte() }
+        val encrypted = MessageStore(dir, key)
+        encrypted.append(msg("m1", sentAtMs = 1_000L, content = "intact"))
+        encrypted.append(msg("m2", sentAtMs = 2_000L, content = "must not appear"))
+        val file = File(dir, encrypted.fileNameFor("peer-a"))
+        val lines = file.readLines().toMutableList()
+        val envelope = JSONObject(lines[1])
+        val ct = envelope.getString("ct")
+        envelope.put("ct", (if (ct[0] == 'A') "B" else "A") + ct.drop(1))
+        lines[1] = envelope.toString()
+        file.writeText(lines.joinToString("\n", postfix = "\n"))
+
+        assertEquals(listOf("intact"), MessageStore(dir, key).messages("peer-a").map { it.content })
     }
 
     // ------------------------------------------------------------------------ dedup

@@ -59,18 +59,36 @@ class V2Http(
         val isSuccessOrPartial: Boolean get() = code in 200..207
     }
 
+    /**
+     * __PER_DEVICE_MAILBOX_2026_09_23__ Signs the per-device request string for calls made
+     * with `device = true` (CLIENT_SPEC.md §2). Null = no device identity: such a call is
+     * sent with the account headers only, which the server answers in its LEGACY view — the
+     * caller decides whether that is acceptable, this class never invents a device.
+     */
+    fun interface DeviceRequestSigner {
+        /** @return (deviceId, signature) over `OSHI-DEVICE/1\n<id>\n<method>\n<path>\n<bodyHash>\n<ts>`. */
+        fun signDeviceRequest(method: String, path: String, bodySha256Hex: String, timestamp: String): Pair<String, String>
+    }
+
+    @Volatile var deviceSigner: DeviceRequestSigner? = null
+
     private val http: HttpClient = HttpClient.newBuilder()
         .connectTimeout(connectTimeout)
         .followRedirects(HttpClient.Redirect.NEVER)   // a signed request must not be replayed elsewhere
+        // Cleartext (a self-hosted relay, a loopback test server): never attempt the h2c
+        // upgrade. The JDK sends `Upgrade: h2c` on plain http, and the v2 server listens for
+        // `upgrade` (the devsync WebSocket) — it answers any other upgrade with a 404, so every
+        // request failed. TLS negotiates HTTP/2 by ALPN and is untouched.
+        .apply { if (baseUrl.startsWith("http://")) version(HttpClient.Version.HTTP_1_1) }
         .build()
 
-    fun get(path: String, query: String? = null, withUserHeader: Boolean = false): Response =
-        request("GET", path, query, bodyToHash = EMPTY, body = null, withUserHeader = withUserHeader)
+    fun get(path: String, query: String? = null, withUserHeader: Boolean = false, device: Boolean = false): Response =
+        request("GET", path, query, bodyToHash = EMPTY, body = null, withUserHeader = withUserHeader, device = device)
 
     /** @param json the EXACT bytes to send; they are also the bytes hashed. */
-    fun postJson(path: String, json: ByteArray, withUserHeader: Boolean = false): Response =
+    fun postJson(path: String, json: ByteArray, withUserHeader: Boolean = false, device: Boolean = false): Response =
         request("POST", path, null, bodyToHash = json, body = json,
-            contentType = "application/json; charset=utf-8", withUserHeader = withUserHeader)
+            contentType = "application/json; charset=utf-8", withUserHeader = withUserHeader, device = device)
 
     /** A POST whose body is empty but which still hashes zero bytes (the commit routes). */
     fun postEmpty(path: String, withUserHeader: Boolean = false): Response =
@@ -98,8 +116,19 @@ class V2Http(
         body: ByteArray?,
         contentType: String? = null,
         withUserHeader: Boolean = false,
+        device: Boolean = false,
     ): Response {
-        val headers = signer.sign(method, path, bodyToHash, withUserHeader)
+        val headers = signer.sign(method, path, bodyToHash, withUserHeader).toMutableMap()
+        if (device) {
+            // The device signature reuses the account signature's timestamp: the server
+            // reads ONE `x-oshi-timestamp` for both, so two clocks here would be a 401.
+            val ds = deviceSigner ?: return Response(-2, "no device identity for a device-mode request")
+            val (id, sig) = ds.signDeviceRequest(
+                method, path, DesktopV2Signer.sha256Hex(bodyToHash), headers.getValue("x-oshi-timestamp"),
+            )
+            headers["x-oshi-device"] = id
+            headers["x-oshi-device-signature"] = sig
+        }
         val url = baseUrl + path + if (query.isNullOrEmpty()) "" else "?$query"
         val publisher = if (body == null) HttpRequest.BodyPublishers.noBody()
         else HttpRequest.BodyPublishers.ofByteArray(body)

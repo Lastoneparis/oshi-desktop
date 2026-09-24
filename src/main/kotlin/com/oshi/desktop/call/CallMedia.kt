@@ -1,13 +1,27 @@
 package com.oshi.desktop.call
 
+import com.oshi.desktop.call.media.VideoMediaFrame
 import com.oshi.desktop.call.media.CallAudio
 import com.oshi.desktop.call.media.CallAudioSession
+import com.oshi.desktop.call.media.CallMediaFrame
+import com.oshi.desktop.call.media.InBandCallEnd
+import com.oshi.desktop.call.media.ReplayWindow
 import com.oshi.desktop.call.transport.HolePunch
 import com.oshi.desktop.call.transport.IceCandidate
 import com.oshi.desktop.call.transport.IceCandidateType
 import com.oshi.desktop.call.transport.IcePriority
 import com.oshi.desktop.call.transport.MediaSocket
+import com.oshi.desktop.call.transport.RelayToken
+import com.oshi.desktop.call.transport.RelayTokenSource
 import com.oshi.desktop.call.transport.StunBinding
+import com.oshi.desktop.call.transport.TlsLink
+import com.oshi.desktop.call.transport.TurnClient
+import com.oshi.desktop.call.transport.TurnLink
+import com.oshi.desktop.call.transport.UdpLink
+import com.oshi.desktop.call.transport.WsRelayClient
+import com.oshi.desktop.call.transport.TurnCredentials
+import com.oshi.desktop.call.transport.UdpRelayClient
+import com.oshi.desktop.call.video.CallVideoSession
 import java.net.DatagramSocket
 import java.net.InetSocketAddress
 import java.util.concurrent.atomic.AtomicBoolean
@@ -80,7 +94,7 @@ import javax.sound.sampled.LineUnavailableException
  *    hardware and this machine's device is shared with other sessions.
  *  - **No NAT has ever been traversed by it.** Loopback has no mapping to open, so the
  *    hole punch is exercised as a protocol and not as a traversal. Behind a symmetric
- *    NAT on both ends there is still no path at all — [MediaSocket]'s TURN IS NOT HERE.
+ *    NAT on both ends the path is the TURN relay or the `:8089` relay (row 2.1-t).
  *  - **No packet from this class has reached a phone**, and no real STUN server has
  *    answered one: the srflx path is exercised against hand-built response bytes in
  *    `MediaSocketTest`.
@@ -109,10 +123,28 @@ class CallMediaLeg internal constructor(
      * ever run these tests. The production default is the real one.
      */
     private val hostCandidates: (MediaSocket) -> List<IceCandidate> = { it.hostCandidates() },
+    /**
+     * PARITY.md row 2.1-v. Builds the call's video half from the socket's send lambda and
+     * the audio session's counter. Null = a leg with no video at all (deviceless tests).
+     */
+    private val videoFor: ((send: (ByteArray) -> Boolean, nextAudioSeq: (() -> Long)?) -> CallVideoSession)? = null,
+    /**
+     * PARITY.md row 2.1-t. The phones' fallback ladder under the direct pairs: a TURN
+     * relay candidate (probed like any other pair) and the `:8089` UDP relay carrier.
+     * Null = direct pairs only, which is what every loopback test wants.
+     */
+    private val relayConfig: CallRelayConfig? = null,
 ) : AutoCloseable {
 
     private val started = AtomicBoolean(false)
     private val closed = AtomicBoolean(false)
+
+    // __CALL_LOG_AT_REST_2026_09_23__ iOS/Android-shaped path diagnostics. One volatile
+    // read and a compare per packet; a line only on the first frame and on a change.
+    // Declared before `socket` so a packet delivered during construction finds them set.
+    private val diagRxFirst = AtomicBoolean(false)
+    private val diagTxFirst = AtomicBoolean(false)
+    @Volatile private var diagTxPrimary = "none"
 
     /**
      * When [start] ran, or 0 before it did. The clock the media-path watchdog measures
@@ -146,7 +178,7 @@ class CallMediaLeg internal constructor(
 
     /**
      * The pair audio is currently leaving on, or null while the punch has not landed.
-     * Null is a real answer: with no TURN under this package there is nowhere else to go.
+     * Null is a real answer: no direct or TURN pair is live; [sendMedia] falls to `:8089`.
      */
     @Volatile
     var selected: IceCandidate? = null
@@ -161,14 +193,8 @@ class CallMediaLeg internal constructor(
         object : MediaSocket.Listener {
 
             override fun onSealedMedia(sealed: ByteArray, from: InetSocketAddress): Boolean {
-                // Read through the field rather than a captured value: this listener is
-                // built while `audioSession` is still null (the session needs this
-                // socket's send lambda, so one of the two has to exist first) and is only
-                // ever INVOKED after the receive loop starts, which is after `start()`.
-                val audio = audioSession ?: return false
-                if (audio.onFrame(sealed)) framesAccepted.incrementAndGet()
-                else framesRefused.incrementAndGet()
-                return true
+                lastP2pRxMs = System.currentTimeMillis()
+                return deliver(sealed, viaP2p = true)
             }
 
             override fun onReflexiveAddress(mapped: StunBinding.Mapped) {
@@ -188,12 +214,243 @@ class CallMediaLeg internal constructor(
         },
     )
 
+    @Volatile
+    private var videoSession: CallVideoSession? = null
+
+    // ------------------------------------------------------------ relay ladder (row 2.1-t)
+
+    @Volatile private var turn: TurnClient? = null
+    @Volatile private var udpRelay: UdpRelayClient? = null
+    @Volatile private var wsRelay: WsRelayClient? = null
+
+    /** "udp" or "tls" once a TURN allocation succeeded. */
+    @Volatile var turnTransport: String? = null
+        private set
+
+    /** Media handed to the WebSocket relay. */
+    val wsSent = AtomicLong()
+
+    /** When P2P (direct or TURN) last delivered media, and when a pair was first selected. */
+    @Volatile private var lastP2pRxMs = 0L
+
+    /**
+     * When P2P last delivered an AUDIO frame that authenticated. Measured on CI between two
+     * cloud hosts: 1 957-byte PCM datagrams are IP-fragmented and the path dropped every
+     * fragmented datagram while 1 100-byte video fragments crossed fine — so "P2P delivers
+     * media" was true and both people heard nothing for the whole call, with the relay
+     * registered and idle. Audio's carrier ladder is judged on audio arriving.
+     */
+    @Volatile private var lastP2pAudioRxMs = 0L
+    @Volatile private var selectedSinceMs = 0L
+
+    /** Media handed to the :8089 relay / received from it. */
+    val relaySent = AtomicLong()
+    val relayReceived = AtomicLong()
+
+    /** The TURN allocation this leg advertises, or null. */
+    val turnAllocation: TurnClient.Allocation? get() = turn?.allocation
+
+    /** Test seam: sees every sealed packet delivered, from any carrier, before the halves do. */
+    @Volatile internal var tap: ((ByteArray) -> Unit)? = null
+
+    /** The UDP relay client, for tests and diagnostics. */
+    internal val udpRelayClient: UdpRelayClient? get() = udpRelay
+
+    /** The WebSocket relay client, for tests and diagnostics. */
+    internal val wsRelayClient: WsRelayClient? get() = wsRelay
+
+    /** This call's relay token (contract §2), once [startRelays] ran with a fetcher. */
+    @Volatile internal var relayTokens: RelayTokenSource? = null
+        private set
+
     init {
-        audioSession = audioFor?.invoke { sealed -> socket.sendSealed(sealed) }
+        socket.relayOnly = relayConfig?.relayOnly == true
+        audioSession = audioFor?.invoke { sealed -> sendMedia(sealed) }
+        val a = audioSession
+        videoSession = videoFor?.invoke({ bytes -> sendMedia(bytes) }, a?.let { { it.nextSequence() } })
     }
+
+    /**
+     * Hand one authenticated-or-not sealed packet to the video or audio half, whichever
+     * transport carried it. See the listener's comment for the order.
+     */
+    private fun deliver(sealed: ByteArray, viaP2p: Boolean = false): Boolean {
+        tap?.invoke(sealed)
+        // The phones' in-band hang-up (sealed `0x0D`) before anything else: it is neither
+        // video control (whose `0x0D` is the nine-byte cleartext toggle, never this size)
+        // nor audio, and the audio session would count it as a refused frame and drop it.
+        if (InBandCallEnd.looksLike(sealed)) {
+            onInBandEnd(sealed)
+            return true
+        }
+        // Video and video control first: `0xF1`, the 9-byte cleartext `0x0B/0x0C/0x0D`
+        // and the sealed `0x0E/0x0F`. None of them is audio, and handing `0x0E` to the
+        // audio session would burn its sequence number in the audio replay window.
+        if (videoSession?.onMedia(sealed) == true) return true
+        val audio = audioSession ?: return false
+        if (audio.onFrame(sealed)) {
+            framesAccepted.incrementAndGet()
+            if (viaP2p) lastP2pAudioRxMs = System.currentTimeMillis()
+            if (diagRxFirst.compareAndSet(false, true)) {
+                log("DIAG_RX_AUDIO_FIRST | path=${if (viaP2p) "p2p" else "relay"} | size=${sealed.size} | decryptOk=true")
+            }
+        } else framesRefused.incrementAndGet()
+        return true
+    }
+
+    // DIAG_TX_* helper — the fields live at the top of the class (initialised before the
+    // socket can deliver anything).
+    private fun diagTx(path: String, isVideo: Boolean, size: Int) {
+        if (isVideo) return
+        if (diagTxFirst.compareAndSet(false, true)) log("DIAG_TX_AUDIO_FIRST | path=$path | size=$size")
+        val previous = diagTxPrimary
+        if (previous != path) {
+            diagTxPrimary = path
+            log("DIAG_TX_PRIMARY | $previous -> $path | frameBytes=$size")
+        }
+    }
+
+    /**
+     * The periodic DIAG_PATH / DIAG_JITTER (/ DIAG_VIDEO) snapshot [CallLane.mediaTick]
+     * writes every ~2 s. Counters and path TYPES only — no addresses, no keys.
+     */
+    fun diagSnapshot(nowMs: Long): List<String> {
+        val sel = selected
+        val a = audioSession
+        val v = videoSession
+        val lines = mutableListOf(
+            "DIAG_PATH | txPrimary=$diagTxPrimary | pair=${sel?.type?.name?.lowercase() ?: "none"} | " +
+                "txCount=${a?.framesSent?.get() ?: 0} | rxDecrypted=${framesAccepted.get()} | " +
+                "authFail=${framesRefused.get()} | relaySent=${relaySent.get()} | relayRecv=${relayReceived.get()} | " +
+                "wsSent=${wsSent.get()} | turn=${turnTransport ?: "none"} | " +
+                "lastP2pRxAge=${if (lastP2pRxMs > 0) "${nowMs - lastP2pRxMs}ms" else "never"}",
+        )
+        if (a != null) {
+            lines += "DIAG_JITTER | depthPackets=${a.playback.size()} | overflowDrops=${a.playback.overflowDrops.get()} | " +
+                "micSilentFrames=${a.consecutiveSilentFrames.get()} | muted=${a.muted}"
+        }
+        if (v != null && v.active) {
+            lines += "DIAG_VIDEO | txFrames=${v.localFrameCount} | rxFrames=${v.remoteFrameCount} | " +
+                "camera=${v.cameraRunning} | bitrate=${v.sendBitrate / 1000}k | fps=${v.sendFps}"
+        }
+        return lines
+    }
+
+    private fun onInBandEnd(sealed: ByteArray) {
+        val opened = InBandCallEnd.decode(spec.sessionKey, sealed)
+        // Our OWN hang-up reflected back at us opens under the same key; the direction bit
+        // in the salt is what tells it apart (see CallMediaFrame.txSalt).
+        val reflected = opened != null &&
+            opened.nonceSalt.contentEquals(CallMediaFrame.txSalt(spec.nonceSalt, spec.isCaller))
+        if (opened == null || reflected || !inBandReplay.accept(opened.seq)) {
+            inBandEndsRefused.incrementAndGet()
+            return
+        }
+        if (closed.get() || !inBandFired.compareAndSet(false, true)) return
+        inBandEndsAccepted.incrementAndGet()
+        log("call: ${spec.callId} the peer hung up in-band (${opened.reason.wire})")
+        val cb = onInBandCallEnd
+        Thread({ runCatching { cb(opened.reason) } }, "oshi-call-inband-end").apply { isDaemon = true; start() }
+    }
+
+    /**
+     * Tell the peer we hung up ON THE MEDIA PATH, as both phones do on every local hang-up
+     * (iOS `sendInBandCallEnd`, Android `sendInBandCallEnd`): [InBandCallEnd.BURST] copies,
+     * each sealed with a fresh counter from the shared audio sequence, over every carrier
+     * that is up — the selected pair, `:8089` when registered, and the WebSocket relay when
+     * P2P is not the live carrier. Must run BEFORE the leg is closed.
+     *
+     * @return how many copies left on at least one carrier.
+     */
+    fun sendInBandCallEnd(reason: CallEndReason): Int {
+        if (closed.get()) return 0
+        val audio = audioSession ?: return 0
+        val now = System.currentTimeMillis()
+        var sent = 0
+        repeat(InBandCallEnd.BURST) {
+            val packet = runCatching {
+                InBandCallEnd.encode(spec.sessionKey, spec.nonceSalt, spec.isCaller, audio.nextSequence(), reason)
+            }.getOrNull() ?: return sent
+            var any = false
+            if (selected != null && runCatching { socket.sendSealed(packet) }.getOrDefault(false)) any = true
+            val relay = udpRelay
+            if (relay != null && relay.usable(now) && runCatching { relay.send(packet) }.getOrDefault(false)) any = true
+            val ws = wsRelay
+            if (!p2pHealthy(now) && ws != null && ws.usable(now) && runCatching { ws.send(packet) }.getOrDefault(false)) any = true
+            if (any) sent++
+        }
+        log("call: ${spec.callId} in-band hang-up sent ($sent/${InBandCallEnd.BURST}, ${reason.wire})")
+        return sent
+    }
+
+    /**
+     * THE CARRIER LADDER, the phones' order (`VoiceCallManager.swift` sendAudioPacket,
+     * `EnhancedCallManager.kt` `AudioTxPrimary { P2P, UDP_RELAY, WS }`):
+     *
+     *  1. **P2P** — the selected pair, direct or through our TURN allocation — whenever
+     *     one is selected.
+     *  2. **The :8089 relay** when P2P is not healthy: no pair selected, or a pair
+     *     selected for more than [P2P_GRACE_MS] that has not delivered media for
+     *     [P2P_STALE_MS] (Android's `p2pCanCarryAudio`, the "pongs fine, black-holes media"
+     *     fix). Both may carry the same packet during a hand-over; the receiver's replay
+     *     windows drop the duplicate, which is why the phones mirror too.
+     *  3. **The WebSocket relay** when P2P is not healthy and `:8089` is not usable (no
+     *     register ack inside [UdpRelayClient.STALE_MS] — every UDP datagram to the server
+     *     blocked). The server bridges carriers, so the peer receives on whichever one IT
+     *     registered — `:8089` first, its WebSocket otherwise.
+     */
+    fun sendMedia(sealed: ByteArray): Boolean {
+        val now = System.currentTimeMillis()
+        val sel = selected
+        var sent = false
+        if (sel != null) sent = socket.sendSealed(sealed)
+        val isVideo = sealed.isNotEmpty() && (sealed[0].toInt() and 0xFF) == VideoMediaFrame.TYPE_VIDEO
+        if (if (isVideo || audioSession == null) p2pHealthy(now) else p2pAudioHealthy(now)) {
+            diagTx("P2P", isVideo, sealed.size)
+            return sent
+        }
+        val relay = udpRelay
+        if (relay != null && relay.usable(now)) {
+            if (relay.send(sealed)) { relaySent.incrementAndGet(); sent = true }
+            diagTx("UDP_RELAY", isVideo, sealed.size)
+            return sent
+        }
+        val ws = wsRelay
+        if (ws != null && ws.usable(now)) {
+            if (ws.send(sealed)) { wsSent.incrementAndGet(); sent = true }
+            diagTx("WS_RELAY", isVideo, sealed.size)
+        } else if (sel != null) {
+            diagTx("P2P_UNVERIFIED", isVideo, sealed.size)
+        }
+        return sent
+    }
+
+    /** [p2pHealthy] for audio: the pair must be carrying AUDIO, not just any media. */
+    private fun p2pAudioHealthy(now: Long): Boolean {
+        if (selected == null) return false
+        if (now - selectedSinceMs < P2P_GRACE_MS) return true
+        return lastP2pAudioRxMs > 0 && now - lastP2pAudioRxMs < P2P_STALE_MS
+    }
+
+    private fun p2pHealthy(now: Long): Boolean {
+        if (selected == null) return false
+        if (now - selectedSinceMs < P2P_GRACE_MS) return true
+        return lastP2pRxMs > 0 && now - lastP2pRxMs < P2P_STALE_MS
+    }
+
+    /**
+     * True while the `:8089` relay is delivering media — the media-path watchdog must not
+     * end a call whose only live carrier is the relay.
+     */
+    fun relayCarrying(nowMs: Long = System.currentTimeMillis()): Boolean =
+        udpRelay?.delivering(nowMs, RELAY_LIVENESS_MS) == true ||
+            wsRelay?.delivering(nowMs, RELAY_LIVENESS_MS) == true
 
     /** The audio half, or null for a transport-only leg. Internal: tests assert on it. */
     internal val audio: CallAudioSession? get() = audioSession
+
+    /** This call's video half, or null when the leg was built without one. */
+    val video: CallVideoSession? get() = videoSession
 
     /**
      * Called with the FULL local candidate set every time it grows — once for the host
@@ -204,6 +461,23 @@ class CallMediaLeg internal constructor(
      * way and a peer that missed the first one still learns everything from the second.
      */
     var onLocalCandidates: (List<IceCandidate>) -> Unit = {}
+
+    /**
+     * The peer hung up and said so ON THE MEDIA PATH — the phones' in-band `0x0D`, see
+     * [InBandCallEnd]. Fired at most once per leg, on its own thread (the receive thread
+     * must not tear down the socket it is reading from). [CallLane] feeds it to the state
+     * machine as the peer's `callEnd`, so the same grace windows and the same history row
+     * apply as to the signalled one.
+     */
+    @Volatile
+    var onInBandCallEnd: (CallEndReason) -> Unit = {}
+
+    /** In-band hang-ups that opened and were acted on (0 or 1) / refused (forged, replayed, reflected). */
+    val inBandEndsAccepted = AtomicLong()
+    val inBandEndsRefused = AtomicLong()
+
+    private val inBandReplay = ReplayWindow()
+    private val inBandFired = AtomicBoolean(false)
 
     val isClosed: Boolean get() = closed.get()
 
@@ -230,11 +504,109 @@ class CallMediaLeg internal constructor(
             throw t
         }
         gather()
+        startRelays()
+        videoSession?.start(spec.video)
     }
 
     /** Add every candidate the peer signalled. Returns how many were new. */
-    fun addRemoteCandidates(candidates: List<IceCandidate>): Int =
-        if (closed.get()) 0 else socket.addRemoteCandidates(candidates)
+    fun addRemoteCandidates(candidates: List<IceCandidate>): Int {
+        if (closed.get()) return 0
+        val n = socket.addRemoteCandidates(candidates)
+        // Both phones bind a channel for each remote RELAY candidate as it arrives
+        // (`P2PTransport.kt:387-389`), so the first relayed ping is not queued behind it.
+        turn?.let { t -> candidates.filter { it.type == IceCandidateType.RELAY }.forEach { t.bindChannel(it.ip, it.port) } }
+        return n
+    }
+
+    /**
+     * Allocate the TURN relay and open the `:8089` carrier, off the calling thread: a
+     * credential fetch and an Allocate are two round trips to a server, and the direct
+     * pairs must start probing without waiting for them. Allocation is EAGER, as on both
+     * phones since the symmetric-NAT fix: the relay candidate is in the peer's hands before
+     * the direct punch has had time to fail.
+     */
+    private fun startRelays() {
+        val cfg = relayConfig ?: return
+        val self = spec.selfKey
+        val peer = spec.peerKey
+        // __CALL_MEDIA_AUTH_DESKTOP_2026_09_23__ contract §2: one relay token per call, fetched
+        // as soon as the leg exists and EVEN IF :8089 is not used — under `enforce` the server
+        // relays media (UDP, WS or HTTP) only between two parties holding mutual live tokens.
+        // With :8089 the relay client's heartbeat thread fetches it before its first register;
+        // without, a one-shot thread does.
+        val tokens = spec.relayToken?.let { RelayTokenSource(it) }
+        relayTokens = tokens
+        if (tokens != null && (cfg.udpRelay == null || self == null || peer == null)) {
+            Thread({ if (!closed.get()) tokens.current() }, "oshi-call-relay-token").apply { isDaemon = true; start() }
+        }
+        if (cfg.udpRelay != null && self != null && peer != null) {
+            runCatching {
+                UdpRelayClient(self, peer, spec.callId, cfg.udpRelay, log, tokens = tokens).also { r ->
+                    r.onPayload = { payload ->
+                        if (!closed.get()) {
+                            relayReceived.incrementAndGet()
+                            deliver(payload)
+                        }
+                    }
+                    udpRelay = r
+                    r.start()
+                }
+            }.onFailure { log("call: ${spec.callId} udp relay did not open — ${it.javaClass.simpleName}") }
+        }
+        val wsUrl = cfg.webSocketUrl
+        if (wsUrl != null && self != null && peer != null) {
+            runCatching {
+                WsRelayClient(self, peer, spec.callId, wsUrl, spec.wsUpgradeHeaders ?: { emptyMap() }, log).also { w ->
+                    w.onPayload = { payload ->
+                        if (!closed.get()) {
+                            relayReceived.incrementAndGet()
+                            deliver(payload)
+                        }
+                    }
+                    wsRelay = w
+                    w.start()
+                }
+            }.onFailure { log("call: ${spec.callId} ws relay did not open — ${it.javaClass.simpleName}") }
+        }
+        val creds = cfg.turn ?: return
+        Thread({
+            // Signed GET (contract §9 Desktop note: it used to go out unsigned).
+            val c = creds.get(sign = spec.signedGet)
+            if (c == null) {
+                log("call: ${spec.callId} no TURN credentials — this call has direct pairs only")
+                return@Thread
+            }
+            if (closed.get()) return@Thread
+            val server = if (c.server.isUnresolved) InetSocketAddress(c.server.hostString, c.server.port) else c.server
+            var client: TurnClient? = null
+            var a: TurnClient.Allocation? = null
+            for (kind in cfg.turnOrder()) {
+                if (closed.get()) return@Thread
+                val link: TurnLink = runCatching {
+                    if (kind == "tls") TlsLink(cfg.turnTlsHost, cfg.turnTlsPort) else UdpLink(server)
+                }.getOrNull() ?: continue
+                val attempt = TurnClient(link, c.username, c.password, log)
+                attempt.onData = { data, ip, port ->
+                    socket.handleRelayed(data, ip, port) { reply -> attempt.send(reply, ip, port) }
+                }
+                turn = attempt
+                val got = attempt.allocate()
+                if (got != null) { client = attempt; a = got; turnTransport = kind; break }
+                runCatching { attempt.close() }
+                turn = null
+                log("call: ${spec.callId} TURN over $kind failed")
+            }
+            if (client == null || a == null || closed.get()) {
+                if (client == null) log("call: ${spec.callId} TURN allocation failed on every transport — no relay path")
+                return@Thread
+            }
+            socket.relay = MediaSocket.RelayRouter { data, remote -> client.send(data, remote.ip, remote.port) }
+            socket.remoteCandidates().filter { it.type == IceCandidateType.RELAY }.forEach { client.bindChannel(it.ip, it.port) }
+            val family = if (a.relayIp.contains(':')) 6 else 4
+            addLocal(IceCandidate(IceCandidateType.RELAY, a.relayIp, a.relayPort, IcePriority.ios(IceCandidateType.RELAY, family)))
+            publish()
+        }, "oshi-call-relay").apply { isDaemon = true; start() }
+    }
 
     /** The local set as signalled. Host addresses, plus the srflx once STUN answers. */
     fun localCandidates(): List<IceCandidate> = synchronized(localSet) { localSet.values.toList() }
@@ -243,8 +615,8 @@ class CallMediaLeg internal constructor(
      * One probe round and one re-selection. Driven by [CallLane] at 2 Hz.
      *
      * A transition to null is logged as a LOSS rather than ignored: it is the moment a
-     * live call went silent, and with no relay under this package it is also the moment
-     * there is nothing left to try.
+     * live call went silent on P2P; [sendMedia] then falls to the `:8089` relay, if one is
+     * registered.
      */
     fun tick(nowMs: Long = System.currentTimeMillis()): IceCandidate? {
         if (closed.get() || !started.get()) return null
@@ -252,6 +624,7 @@ class CallMediaLeg internal constructor(
         val now = socket.updateSelection(nowMs)
         val before = selected
         selected = now
+        if (now != null && before?.key != now.key) selectedSinceMs = nowMs
         if (now != null && before == null) {
             log("call: ${spec.callId} media path selected ${now.key} (${now.type})")
         } else if (now == null && before != null) {
@@ -278,8 +651,12 @@ class CallMediaLeg internal constructor(
      */
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
+        runCatching { videoSession?.close() }
         runCatching { audioSession?.stop() }
         runCatching { socket.close() }
+        runCatching { turn?.close() }
+        runCatching { udpRelay?.close() }
+        runCatching { wsRelay?.close() }
         selected = null
     }
 
@@ -304,7 +681,10 @@ class CallMediaLeg internal constructor(
 
     private fun publish() {
         if (closed.get()) return
-        val set = localCandidates()
+        // Relay-only withholds every non-relay candidate from the peer, as iOS's
+        // forceRelay does (`P2PTransport.swift:273-282`) — the point of the mode is that
+        // the peer never learns our addresses.
+        val set = localCandidates().filter { relayConfig?.relayOnly != true || it.type == IceCandidateType.RELAY }
         if (set.isEmpty()) return
         // Bounded because every publish is an HTTP POST to the call server. Two is the
         // expected number (host, then host+srflx); the cap only matters if a future
@@ -326,6 +706,15 @@ class CallMediaLeg internal constructor(
          * otherwise spend the call's signalling budget on candidates.
          */
         const val MAX_CANDIDATE_PUBLISHES = 4L
+
+        /** Android `P2P_GRACE_PERIOD_MS`: a freshly selected pair is trusted this long. */
+        const val P2P_GRACE_MS = 5_000L
+
+        /** Android `P2P_INBOUND_STALE_MS`: no media on P2P for this long = unhealthy. */
+        const val P2P_STALE_MS = 2_000L
+
+        /** How recent relay media must be for the watchdog to count the relay as a path. */
+        const val RELAY_LIVENESS_MS = 5_000L
 
         /**
          * Resolve an address that [StunBinding.DEFAULT_SERVER] deliberately leaves
@@ -352,18 +741,38 @@ data class CallMediaSpec(
     val nonceSalt: ByteArray,
     /** True when WE sent the offer and minted the salt. */
     val isCaller: Boolean,
+    /** A video call (`0x08`/`0x09`): both ends start their camera on connect, as the phones do. */
+    val video: Boolean = false,
+    /** Our X25519 identity key, standard base64. Needed by the `:8089` relay only. */
+    val selfKey: String? = null,
+    /** The peer's X25519 identity key, standard base64. Needed by the `:8089` relay only. */
+    val peerKey: String? = null,
+    /** Signs the WebSocket relay's upgrade GET (`x-oshi-*` headers for a path), or null. */
+    val wsUpgradeHeaders: ((path: String) -> Map<String, String>)? = null,
+    /**
+     * __CALL_MEDIA_AUTH_DESKTOP_2026_09_23__ The signed `POST /relay-token` for exactly
+     * (selfKey, peerKey, callId), blocking; null result = refused/unreachable. Null = no token
+     * (legacy token-less `:8089` register).
+     */
+    val relayToken: (() -> RelayToken?)? = null,
+    /** `x-oshi-*` headers for an empty-body GET of a path (`/voip/turn-creds`), or null = unsigned. */
+    val signedGet: ((path: String) -> Map<String, String>)? = null,
+    /** __WB_ADPCM_CODEC_2026_09_23__ the peer advertised 0x18 — TX it instead of 0x15. */
+    val wbAdpcm: Boolean = false,
+    /** __OPUS_CODEC_2026_09_23__ the peer advertised 0x19 — TX Opus (preferred over 0x18). */
+    val opus: Boolean = false,
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is CallMediaSpec) return false
-        return callId == other.callId && isCaller == other.isCaller &&
+        return callId == other.callId && isCaller == other.isCaller && video == other.video &&
             sessionKey.contentEquals(other.sessionKey) && nonceSalt.contentEquals(other.nonceSalt)
     }
 
     override fun hashCode(): Int = callId.hashCode() * 31 + isCaller.hashCode()
 
     /** Never print a session key. */
-    override fun toString(): String = "CallMediaSpec($callId, isCaller=$isCaller)"
+    override fun toString(): String = "CallMediaSpec($callId, isCaller=$isCaller, video=$video)"
 }
 
 /**
@@ -399,7 +808,10 @@ object CallMedia {
      *   where it is unreachable: the call then advertises host candidates only, which is
      *   enough on one LAN and nothing at all across two NATs.
      */
-    fun real(stunServer: InetSocketAddress? = StunBinding.DEFAULT_SERVER): CallMediaOpener =
+    fun real(
+        stunServer: InetSocketAddress? = StunBinding.DEFAULT_SERVER,
+        relay: CallRelayConfig? = CallRelayConfig.production(),
+    ): CallMediaOpener =
         CallMediaOpener { spec, log ->
             if (!CallAudio.isAvailable()) {
                 throw LineUnavailableException(
@@ -423,13 +835,59 @@ object CallMedia {
                     datagram = datagram,
                     audioFor = { send ->
                         CallAudioSession(spec.sessionKey, spec.nonceSalt, spec.isCaller, send)
+                            .also { it.useWbAdpcm = spec.wbAdpcm; it.useOpus = spec.opus }
+                    },
+                    videoFor = { send, nextSeq ->
+                        CallVideoSession(spec.sessionKey, spec.nonceSalt, spec.isCaller, send, nextSeq, log = log)
                     },
                     stunServer = stunServer,
                     log = log,
+                    relayConfig = relay,
                 )
             } catch (t: Throwable) {
                 runCatching { datagram.close() }
                 throw t
             }
         }
+}
+
+/**
+ * The relay half of a call — PARITY.md row 2.1-t. [turn] supplies ephemeral credentials for
+ * the coturn relay candidate; [udpRelay] is the `:8089` carrier; [relayOnly] withholds and
+ * ignores every direct pair (the phones' "Always use relay").
+ */
+data class CallRelayConfig(
+    val turn: TurnCredentials? = null,
+    val udpRelay: InetSocketAddress? = null,
+    val relayOnly: Boolean = false,
+    /** The call server's WebSocket relay (`wss://…/voip/`), the last carrier; null = off. */
+    val webSocketUrl: String? = null,
+    /**
+     * Which leg to coturn: `"udp"`, `"tls"`, or `"auto"`. AUTO is iOS's placement — TLS
+     * (`oshi-messenger.com:5349`) when relay-only, UDP (`:3478`) otherwise
+     * (`VoiceCallManager.swift:14490-14505`) — plus one desktop addition, stated as ours: if
+     * the first transport cannot allocate, the other is tried, so a network that drops
+     * every UDP datagram still gets a TURN relay over TLS.
+     */
+    val turnTransport: String = "auto",
+    val turnTlsHost: String = TurnCredentials.TLS_HOST,
+    val turnTlsPort: Int = TurnCredentials.TLS_PORT,
+) {
+    fun turnOrder(): List<String> = when (turnTransport) {
+        "udp" -> listOf("udp")
+        "tls" -> listOf("tls")
+        else -> if (relayOnly) listOf("tls", "udp") else listOf("udp", "tls")
+    }
+
+    companion object {
+        /** What the phones use: `/voip/turn-creds` + coturn, `:8089`, and the WebSocket relay. */
+        fun production(relayOnly: Boolean = false): CallRelayConfig =
+            CallRelayConfig(
+                PRODUCTION_CREDS, UdpRelayClient.DEFAULT_SERVER, relayOnly,
+                webSocketUrl = WsRelayClient.urlFor(com.oshi.desktop.net.V2Http.defaultBaseUrl()),
+            )
+
+        /** One cache for the process: credentials are good for an hour. */
+        private val PRODUCTION_CREDS = TurnCredentials()
+    }
 }

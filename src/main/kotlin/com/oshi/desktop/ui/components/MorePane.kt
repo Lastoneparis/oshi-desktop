@@ -25,6 +25,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.oshi.desktop.i18n.t
+import com.oshi.desktop.i18n.dt
 import com.oshi.desktop.ui.OshiTheme
 import com.oshi.desktop.ui.state.ContactRow
 import com.oshi.desktop.ui.state.Pane
@@ -64,8 +66,21 @@ fun MorePane(
     onSelect: (String) -> Unit,
     onSetBlocked: (String, Boolean) -> Unit,
     onRename: (String, String?) -> Unit,
+    onVerifySafetyNumber: (String, String) -> Boolean,
     onCopy: (String) -> Unit,
     modifier: Modifier = Modifier,
+    /** __ENCRYPTED_MESSAGE_EXPORT_2026_09_22__ Pick a target, then [ChatShellModel.exportMessages]. */
+    onExportMessages: () -> Unit = {},
+    /** Pick an `.oshiexport`, then [ChatShellModel.importMessages]. */
+    onImportMessages: () -> Unit = {},
+    /** __SHARED_NICKNAME_2026_09_22__ [ChatShellModel.setOwnNickname]; null/blank removes it. */
+    onSetNickname: (String?) -> Unit = {},
+    /** [ChatShellModel.pullNicknameFromPhone]. */
+    onPullNickname: () -> Unit = {},
+    /** [ChatShellModel.pushNicknameToPhone]. */
+    onPushNickname: () -> Unit = {},
+    /** __CALL_LOG_AT_REST_2026_09_23__ Pick a target, then [ChatShellModel.exportCallDiagnostics]. */
+    onExportCallDiagnostics: () -> Unit = {},
 ) {
     val known = state.contacts.filterNot { it.blocked }
     val blocked = state.contacts.filter { it.blocked }
@@ -81,7 +96,7 @@ fun MorePane(
         Column(Modifier.widthIn(max = 720.dp)) {
 
             PaneHeading(
-                "More",
+                t("tab_more"),
                 "Everyone this machine knows about, and the account it knows them as.",
             )
 
@@ -98,11 +113,58 @@ fun MorePane(
                     TextAction("Copy address") { onCopy(state.selfAddress) }
                 }
                 Spacer(Modifier.height(OshiTheme.lg))
+                NicknameEditor(state, onSetNickname, onPullNickname, onPushNickname)
+                Spacer(Modifier.height(OshiTheme.lg))
+                SettingsRow(t("mail.title"), "Mailbox, drafts, aliases and encrypted drive") { onShow(Pane.MAIL) }
+                Hairline()
                 SettingsRow("Account and relay", "Keys, gate, delivery model") { onShow(Pane.ACCOUNT) }
                 Hairline()
                 SettingsRow("What this client will not do", "Every gap, with the ledger row behind it") { onShow(Pane.LIMITS) }
                 Hairline()
                 SettingsRow("Covert text", "Hide a message inside ordinary prose, and carry it yourself") { onShow(Pane.COVERT) }
+                Hairline()
+                SettingsRow("Scheduled messages", "Local delivery queue; OSHI must be running at the due time") { onShow(Pane.SCHEDULED) }
+                Hairline()
+                // __DEVSYNC_DIRECT_2026_09_22__ Direct own-device sync.
+                SettingsRow("Linked devices", "Sync your history directly with your phone and other devices") { onShow(Pane.DEVICES) }
+                Hairline()
+                // __CALL_LOG_AT_REST_2026_09_23__ Same label and promise as the phones: a
+                // REDACTED copy of the sealed call log, saved where the person chooses.
+                SettingsRow(t("settings.calls.diaglog.title"), t("settings.calls.diaglog.subtitle")) {
+                    if (!state.busy) onExportCallDiagnostics()
+                }
+            }
+
+            Spacer(Modifier.height(OshiTheme.lg))
+
+            // ---------------------------------------------------------------- background
+            // __DESKTOP_BACKGROUND_2026_09_23__ PARITY.md row 2.3: no push, so the process
+            // has to be running — this is where the person decides it starts with the session.
+            BackgroundCard()
+
+            Spacer(Modifier.height(OshiTheme.lg))
+
+            // ---------------------------------------------------------------- history backup
+            // __ENCRYPTED_MESSAGE_EXPORT_2026_09_22__ Same container as iOS: sealed with the
+            // ACCOUNT key, so only an OSHI session holding this account can open it. There is
+            // no plaintext export on this client, on purpose.
+            PaneCard {
+                Text(dt("desktop.export.card.title"), style = OshiTheme.typography.titleMedium, color = Ink.strong)
+                Spacer(Modifier.height(OshiTheme.xs))
+                Text(dt("desktop.export.card.body"), style = OshiTheme.typography.bodySmall, color = Ink.soft)
+                Spacer(Modifier.height(OshiTheme.md))
+                Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.md)) {
+                    PrimaryButton(t("export.messages"), enabled = !state.busy, onClick = onExportMessages)
+                    PrimaryButton(dt("desktop.import.action"), enabled = !state.busy, onClick = onImportMessages)
+                }
+                state.backupNotice?.let { outcome ->
+                    Spacer(Modifier.height(OshiTheme.md))
+                    Text(
+                        outcome.text,
+                        style = OshiTheme.typography.bodySmall,
+                        color = if (outcome.severity == com.oshi.desktop.ui.state.Severity.ERROR) OshiTheme.danger else Ink.strong,
+                    )
+                }
             }
 
             Spacer(Modifier.height(OshiTheme.lg))
@@ -127,6 +189,7 @@ fun MorePane(
                             onSelect = { onSelect(c.address) },
                             onCopy = onCopy,
                             onRename = { onRename(c.address, it) },
+                            onVerifySafetyNumber = { onVerifySafetyNumber(c.address, it) },
                         ) { onSetBlocked(c.address, true) }
                         Hairline(inset = Metrics.separatorInset)
                     }
@@ -136,7 +199,7 @@ fun MorePane(
             if (blocked.isNotEmpty()) {
                 Spacer(Modifier.height(OshiTheme.lg))
                 PaneCard {
-                    Text("Blocked", style = OshiTheme.typography.titleMedium, color = Ink.strong)
+                    Text(t("contact.blocked"), style = OshiTheme.typography.titleMedium, color = Ink.strong)
                     Spacer(Modifier.height(OshiTheme.xs))
                     Text(
                         "Their conversations are hidden from the list and were NOT deleted. " +
@@ -151,6 +214,7 @@ fun MorePane(
                             onSelect = null,
                             onCopy = onCopy,
                             onRename = { onRename(c.address, it) },
+                            onVerifySafetyNumber = { onVerifySafetyNumber(c.address, it) },
                         ) { onSetBlocked(c.address, false) }
                         Hairline(inset = Metrics.separatorInset)
                     }
@@ -168,9 +232,9 @@ fun MorePane(
  * One person: their name, their safety number, and the two things you can do about them.
  *
  * **The name is EDITABLE and it is local.** Without this, a contact whose profile update
- * never arrived is a truncated base64 key forever — and PARITY.md row 0.18 says an Android
- * peer's profile rides the legacy lane and never reaches this client at all, so "forever"
- * is the common case rather than the edge one. Editing writes `ContactStore.setDisplayName`
+ * never arrived is a truncated base64 key forever — and until 2026-09-22 an Android peer's
+ * profile rode the legacy lane only and never reached this client (PARITY.md row 0.18; older
+ * Android builds still do). Editing writes `ContactStore.setDisplayName`
  * and nothing leaves the machine: the peer is not told what you called them.
  */
 @Composable
@@ -179,13 +243,20 @@ private fun PersonRow(
     onSelect: (() -> Unit)?,
     onCopy: (String) -> Unit,
     onRename: (String?) -> Unit,
+    onVerifySafetyNumber: (String) -> Boolean,
     onToggleBlock: () -> Unit,
 ) {
     val (source, hovered) = rememberRowInteraction()
     // Keyed by address: switching rows must not carry one person's half-typed name onto
     // another, which a bare `remember` in a reused row slot would do.
     var editing by remember(c.address) { mutableStateOf(false) }
-    var typed by remember(c.address) { mutableStateOf(c.label) }
+    // __SHARED_NICKNAME_2026_09_22__ The field edits OUR alias, so it starts from the alias
+    // and not from `label`: `label` can now be the peer's shared nickname (or the short
+    // key), and pre-filling it would turn "Save" into silently freezing their name as ours.
+    var typed by remember(c.address) { mutableStateOf(c.alias.orEmpty()) }
+    var verifying by remember(c.address) { mutableStateOf(false) }
+    var safetyPayload by remember(c.address) { mutableStateOf("") }
+    var safetyResult by remember(c.address) { mutableStateOf<Boolean?>(null) }
     Row(
         Modifier
             .fillMaxWidth()
@@ -208,8 +279,8 @@ private fun PersonRow(
                         cursorBrush = androidx.compose.ui.graphics.SolidColor(OshiTheme.brand),
                         modifier = Modifier.weight(1f),
                     )
-                    TextAction("Save") { onRename(typed); editing = false }
-                    TextAction("Cancel") { typed = c.label; editing = false }
+                    TextAction(t("contact.save_contact")) { onRename(typed); editing = false }
+                    TextAction(t("common.cancel")) { typed = c.alias.orEmpty(); editing = false }
                 } else {
                     Text(c.label, style = OshiTheme.typography.titleSmall, color = Ink.strong, fontWeight = FontWeight.SemiBold)
                     Spacer(Modifier.widthIn(min = OshiTheme.xs))
@@ -219,6 +290,16 @@ private fun PersonRow(
                         VerifiedChip()
                     }
                 }
+            }
+            // __SHARED_NICKNAME_2026_09_22__ What they call themselves, whenever the line above
+            // is not already showing it (i.e. we gave them an alias, or we are editing one).
+            val shared = c.sharedNickname
+            if (shared != null && (editing || shared != c.label)) {
+                Text(
+                    t("contact.shared_nickname", shared),
+                    style = OshiTheme.typography.bodySmall,
+                    color = Ink.soft,
+                )
             }
             Spacer(Modifier.height(OshiTheme.xxs))
             // Sixty digits is the point: a truncated safety number is not comparable, and a
@@ -230,11 +311,106 @@ private fun PersonRow(
                 color = Ink.soft,
                 fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
             )
+            if (!c.verified) {
+                Spacer(Modifier.height(OshiTheme.xxs))
+                if (verifying) {
+                    Text(
+                        dt("desktop.safety.verify.hint"),
+                        style = OshiTheme.typography.bodySmall,
+                        color = Ink.soft,
+                    )
+                    androidx.compose.foundation.text.BasicTextField(
+                        value = safetyPayload,
+                        onValueChange = { safetyPayload = it; safetyResult = null },
+                        singleLine = true,
+                        textStyle = OshiTheme.typography.bodySmall.copy(color = Ink.strong),
+                        cursorBrush = androidx.compose.ui.graphics.SolidColor(OshiTheme.brand),
+                        modifier = Modifier.fillMaxWidth().padding(vertical = OshiTheme.xxs),
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm)) {
+                        TextAction(dt("desktop.safety.verify.action")) { safetyResult = onVerifySafetyNumber(safetyPayload) }
+                        TextAction(t("common.cancel")) { verifying = false; safetyPayload = ""; safetyResult = null }
+                    }
+                    if (safetyResult == false) Text(
+                        dt("desktop.safety.verify.mismatch"),
+                        style = OshiTheme.typography.bodySmall,
+                        color = OshiTheme.danger,
+                    )
+                } else {
+                    TextAction(dt("desktop.safety.verify.action")) { verifying = true }
+                }
+            }
         }
         Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(OshiTheme.xxs)) {
-            TextAction("Copy number") { onCopy(c.safetyNumber) }
-            TextAction(if (c.blocked) "Unblock" else "Block", onToggleBlock)
+            TextAction(t("common.copy")) { onCopy(c.safetyNumber) }
+            TextAction(if (c.blocked) t("contact.unblock_contact") else t("contact.block_contact"), onToggleBlock)
         }
+    }
+}
+
+/**
+ * __SHARED_NICKNAME_2026_09_22__ THIS account's nickname — the desktop counterpart of the
+ * phones' Settings → nickname. Saving sends it to every contact we have written to, inside
+ * the silent `📸PROFILE_UPDATE📸`; an empty field removes it. The two archive actions reach
+ * the user's phones only when this machine holds the same account.
+ */
+@Composable
+private fun NicknameEditor(
+    state: ShellState,
+    onSetNickname: (String?) -> Unit,
+    onPullNickname: () -> Unit,
+    onPushNickname: () -> Unit,
+) {
+    // Keyed on the stored value: a pull (or a save) that changes it re-seeds the field.
+    var typed by remember(state.ownNickname) { mutableStateOf(state.ownNickname.orEmpty()) }
+    Text(dt("desktop.nickname.title"), style = OshiTheme.typography.titleSmall, color = Ink.strong)
+    Spacer(Modifier.height(OshiTheme.xxs))
+    Text(
+        if (state.nicknameBroadcasts) dt("desktop.nickname.body") else dt("desktop.nickname.withheld"),
+        style = OshiTheme.typography.bodySmall,
+        color = Ink.soft,
+    )
+    Spacer(Modifier.height(OshiTheme.sm))
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            Modifier
+                .weight(1f)
+                .clip(OshiTheme.radiusMd)
+                .background(OshiTheme.surface)
+                .padding(horizontal = OshiTheme.sm, vertical = OshiTheme.xs),
+        ) {
+            if (typed.isEmpty()) {
+                Text(dt("desktop.nickname.placeholder"), style = OshiTheme.typography.bodyLarge, color = Ink.soft)
+            }
+            androidx.compose.foundation.text.BasicTextField(
+                value = typed,
+                // Same cap as both phones' Settings field; the wire sanitizer caps again.
+                onValueChange = { v -> typed = if (v.codePointCount(0, v.length) > 48) typed else v },
+                singleLine = true,
+                textStyle = OshiTheme.typography.bodyLarge.copy(color = Ink.strong),
+                cursorBrush = androidx.compose.ui.graphics.SolidColor(OshiTheme.brand),
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        Spacer(Modifier.widthIn(min = OshiTheme.md))
+        PrimaryButton(
+            t("common.save"),
+            enabled = !state.busy && typed.trim() != state.ownNickname.orEmpty(),
+        ) { onSetNickname(typed.trim().ifEmpty { null }) }
+    }
+    Spacer(Modifier.height(OshiTheme.xs))
+    Text(dt("desktop.nickname.sync.hint"), style = OshiTheme.typography.bodySmall, color = Ink.soft)
+    Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.md)) {
+        TextAction(dt("desktop.nickname.pull")) { if (!state.busy) onPullNickname() }
+        TextAction(dt("desktop.nickname.push")) { if (!state.busy) onPushNickname() }
+    }
+    state.profileNotice?.let { outcome ->
+        Spacer(Modifier.height(OshiTheme.xs))
+        Text(
+            outcome.text,
+            style = OshiTheme.typography.bodySmall,
+            color = if (outcome.severity == com.oshi.desktop.ui.state.Severity.ERROR) OshiTheme.danger else Ink.strong,
+        )
     }
 }
 
@@ -249,7 +425,7 @@ private fun VerifiedChip() {
     ) {
         GlyphIcon(Glyph.CHECK, OshiTheme.success, 11.dp)
         Spacer(Modifier.widthIn(min = OshiTheme.xxs))
-        Text("Verified", style = OshiTheme.typography.labelSmall, color = OshiTheme.success)
+        Text(t("safety.verified"), style = OshiTheme.typography.labelSmall, color = OshiTheme.success)
     }
 }
 
@@ -275,6 +451,39 @@ private fun SettingsRow(title: String, detail: String, onClick: () -> Unit) {
     }
 }
 
+/**
+ * __ENCRYPTED_MESSAGE_EXPORT_2026_09_22__ The native save / open dialogs for `.oshiexport`.
+ * Cancel returns null. A save target always gets the extension, so the file a user hands to
+ * another device is recognisable as what it is.
+ */
+fun pickMessageExportTarget(): java.io.File? {
+    val dialog = java.awt.FileDialog(null as java.awt.Frame?, t("export.select_location"), java.awt.FileDialog.SAVE)
+    dialog.file = com.oshi.desktop.store.EncryptedMessageExport.defaultFileName()
+    dialog.isVisible = true
+    val name = dialog.file ?: return null
+    val dir = dialog.directory ?: return null
+    return com.oshi.desktop.store.EncryptedMessageExport.withExtension(java.io.File(dir, name))
+}
+
+/** Save target for the redacted call diagnostics (`.txt`). Cancel returns null. */
+fun pickCallDiagnosticsTarget(): java.io.File? {
+    val dialog = java.awt.FileDialog(null as java.awt.Frame?, t("export.select_location"), java.awt.FileDialog.SAVE)
+    dialog.file = com.oshi.messenger.service.diag.CallFileLogger.EXPORT_FILE_NAME
+    dialog.isVisible = true
+    val name = dialog.file ?: return null
+    val dir = dialog.directory ?: return null
+    return java.io.File(dir, name)
+}
+
+fun pickMessageExportSource(): java.io.File? {
+    val dialog = java.awt.FileDialog(null as java.awt.Frame?, t("import.select_file"), java.awt.FileDialog.LOAD)
+    dialog.isMultipleMode = false
+    dialog.isVisible = true
+    val name = dialog.file ?: return null
+    val dir = dialog.directory ?: return null
+    return java.io.File(dir, name).takeIf { it.isFile }
+}
+
 /** A full-width box for a pane that has nothing to show yet. */
 @Composable
 fun EmptyPaneNote(title: String, body: String) {
@@ -290,6 +499,32 @@ fun EmptyPaneNote(title: String, body: String) {
                 color = Ink.soft,
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center,
             )
+        }
+    }
+}
+
+@Composable
+private fun BackgroundCard() {
+    var atLogin by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(com.oshi.desktop.ui.LoginItem.isEnabled()) }
+    var problem by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<String?>(null) }
+    PaneCard {
+        Text(dt("desktop.background.title"), style = OshiTheme.typography.titleMedium, color = Ink.strong)
+        Spacer(Modifier.height(OshiTheme.xs))
+        Text(dt("desktop.background.body"), style = OshiTheme.typography.bodySmall, color = Ink.soft)
+        Spacer(Modifier.height(OshiTheme.md))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(dt("desktop.background.login"), style = OshiTheme.typography.bodyMedium, color = Ink.strong, modifier = Modifier.weight(1f))
+            androidx.compose.material3.Switch(
+                checked = atLogin,
+                onCheckedChange = { want ->
+                    problem = com.oshi.desktop.ui.LoginItem.setEnabled(want)
+                    atLogin = com.oshi.desktop.ui.LoginItem.isEnabled()
+                },
+            )
+        }
+        problem?.let {
+            Spacer(Modifier.height(OshiTheme.xs))
+            Text(dt("desktop.background.login.failed", it), style = OshiTheme.typography.bodySmall, color = OshiTheme.danger)
         }
     }
 }

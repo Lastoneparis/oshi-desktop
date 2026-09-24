@@ -43,6 +43,8 @@ object SourceKeys {
         // t("key") / t("key", arg) — the short wrapper in Strings.kt
         Regex("""(?<![A-Za-z0-9_.])t\s*\(\s*"([^"\\]+)""""),
         Regex("""Strings\s*\.\s*(?:get|format|lookup)\s*\(\s*"([^"\\]+)""""),
+        // catalogKey("call.missed") — a key stored as data and rendered later with t().
+        Regex("""(?<![A-Za-z0-9_.])catalogKey\s*\(\s*"([^"\\]+)""""),
         // Named-argument spellings, e.g. `Strings.get(key = "chat.send")`.
         //
         // The lookbehind is what makes this an ARGUMENT rather than an assignment, and it
@@ -73,10 +75,10 @@ object SourceKeys {
      * design — see [com.oshi.desktop.i18n.DesktopStrings] — so putting `dt` in [ACCESSORS]
      * would turn a true statement about the extracted iOS asset into a permanently red one
      * about a deliberate choice, and the only way anyone would make it green again is by
-     * machine-translating 45 strings this project has no business inventing.
+     * machine-translating the desktop-only overlay this project has no business inventing.
      *
-     * **Nothing calls [usedDesktop] yet.** It is the seam a test needs to assert the three
-     * things that are currently unchecked:
+     * [com.oshi.desktop.i18n.CatalogAuditTest] uses [usedDesktop] to assert the three
+     * things that would otherwise be unchecked:
      *
      *  1. every key reached by `dt` exists in `DesktopStrings.overlayKeys` (else the window
      *     draws `⟦desktop.…⟧`, which is visible but only to whoever opens that screen);
@@ -87,9 +89,12 @@ object SourceKeys {
      *     screen that said it.
      */
     val DESKTOP_ACCESSORS: List<Regex> = listOf(
-        // The lookbehind is the same guard [ACCESSORS] needs and for the same reason: without
-        // it this also matches the tail of any identifier ending in `dt`.
-        Regex("""(?<![A-Za-z0-9_.])dt\s*\(\s*"([^"\\]+)""""),
+        // `ConversationFilter` is deliberately plain Kotlin, so it calls the helper by its
+        // fully-qualified name rather than importing a Compose-facing package. Match that
+        // spelling too: a scanner that recognised only bare `dt` would label live copy stale.
+        // The lookbehind rejects the tail of an identifier ending in `dt` without rejecting a
+        // package separator.
+        Regex("""(?<![A-Za-z0-9_])(?:[A-Za-z_][A-Za-z0-9_]*\.)*dt\s*\(\s*"([^"\\]+)""""),
         Regex("""DesktopStrings\s*\.\s*(?:get|format|lookup)\s*\(\s*"([^"\\]+)""""),
     )
 

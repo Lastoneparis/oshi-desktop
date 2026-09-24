@@ -132,7 +132,7 @@ object WelcomeSeeder {
      */
     private val DESKTOP_TAIL: String
         get() = "You are on the desktop client (beta). Two things worth knowing: this is a " +
-            "separate OSHI account from your phone — there is no identity import yet — and " +
+            "separate OSHI account from your phone unless you restored your recovery key — and " +
             "messages arrive only while this window is open, because there is no push on " +
             "desktop. Reply here and it reaches a real person. Something broken? $SUPPORT_EMAIL"
 

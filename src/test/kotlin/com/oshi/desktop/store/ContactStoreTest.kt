@@ -139,4 +139,50 @@ class ContactStoreTest {
         // org.json round-trips it; if this throws, the format broke.
         org.json.JSONObject(text)
     }
+
+    // ------------------------------------------------------------------------ shared nickname
+    // __SHARED_NICKNAME_2026_09_22__
+
+    @Test
+    fun `a shared nickname survives a reopen and never touches the alias`() {
+        val s = store()
+        s.seen("addr-1", atMs = 1_000L)
+        s.setSharedNickname("addr-1", "Hugo")
+
+        val reopened = store().get("addr-1")!!
+        assertEquals("Hugo", reopened.sharedNickname)
+        assertNull("the peer's name must not become our alias", reopened.displayName)
+        assertEquals("Hugo", reopened.label("addr-1…"))
+    }
+
+    @Test
+    fun `the local alias wins over the shared nickname, and clearing works`() {
+        val s = store()
+        s.seen("addr-1", atMs = 1_000L, displayNameHint = "Mum")
+        s.setSharedNickname("addr-1", "Hugo")
+        assertEquals("Mum", s.get("addr-1")!!.label("addr-1…"))
+
+        s.setDisplayName("addr-1", null)
+        assertEquals("Hugo", s.get("addr-1")!!.label("addr-1…"))
+
+        s.setSharedNickname("addr-1", null)
+        assertEquals("addr-1…", store().get("addr-1")!!.label("addr-1…"))
+    }
+
+    @Test
+    fun `a shared nickname for an unknown contact is not invented into a row`() {
+        val s = store()
+        assertNull(s.setSharedNickname("nobody", "Hugo"))
+        assertNull(s.get("nobody"))
+    }
+
+    @Test
+    fun `a contacts file written before the field still parses`() {
+        file.writeText(
+            """{"v":1,"contacts":[{"address":"addr-1","displayName":"Alice","firstSeenMs":5,"verification":"unverified"}]}"""
+        )
+        val c = store().get("addr-1")!!
+        assertEquals("Alice", c.displayName)
+        assertNull(c.sharedNickname)
+    }
 }

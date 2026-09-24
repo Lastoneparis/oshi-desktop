@@ -69,10 +69,13 @@ import org.json.JSONObject
  * than by this paragraph. Point the client at `:8083` directly and set `apiPrefix = ""`;
  * the signed path is then the same string either way.
  *
- * None of it matters in production today and this file will not pretend otherwise:
- * `SIGNATURE_REQUIRED = false` (`:65`) makes EVERY failure branch of `verifySignature`
- * return `{valid:true}`, including the one that catches a cryptographically invalid
- * signature. We sign because signing costs nothing and the flag may flip.
+ * __CALL_PUSH_AUTH_DESKTOP_2026_09_23__ SUPERSEDED by `docs/CALL_PUSH_AUTH_CONTRACT.md`
+ * (STABLE 1.0): the server now verifies the full requested path too, binds the signing key
+ * to the identity each route claims (TOFU from the `/v2` key publication — so the key MUST
+ * be the [DesktopV2Signer] one), and in `dual` mode already answers 403 to a valid signature
+ * by a key bound to someone else. This client therefore signs the FULL path it requests
+ * ([signedPathFor]), sends `sender` on `/end`, signs `/push/signal-answered` through the
+ * same helper, and announces itself as `OSHI-Desktop/<version>`.
  *
  * ============================================================ WHAT A 200 DOES NOT MEAN
  *
@@ -119,6 +122,13 @@ class CallSignalClient(
     private val apiPrefix: String = API_PREFIX,
     connectTimeout: Duration = Duration.ofSeconds(5),
     private val readTimeout: Duration = Duration.ofSeconds(8),
+    /**
+     * The signing clock, epoch ms. Injectable ONLY so a test can reproduce the contract's
+     * fixed-timestamp vectors byte for byte (docs/CALL_PUSH_AUTH_CONTRACT.md §6).
+     */
+    private val clockMs: () -> Long = { System.currentTimeMillis() },
+    /** Contract §7: the server's enforce-readiness report counts traffic per UA. */
+    private val userAgent: String = defaultUserAgent(),
 ) {
 
     private val base: String = baseUrl.trimEnd('/')
@@ -213,10 +223,70 @@ class CallSignalClient(
      * Best effort and never load-bearing: the row only feeds a health counter, and the
      * signal that actually ends a call for the peer is the sealed `callEnd` packet.
      */
-    fun endCall(callId: String): Boolean {
-        val body = JSONObject().put("callId", callId).toString().toByteArray(Charsets.UTF_8)
+    fun endCall(callId: String, sender: String? = null): Boolean {
+        // __CALL_PUSH_AUTH_DESKTOP_2026_09_23__ contract §3 row 3: the identity `/end`
+        // proves is read from body `sender`, so it is added (base64url, as on `/signal`).
+        val o = JSONObject().put("callId", callId)
+        if (!sender.isNullOrEmpty()) o.put("sender", base64Url(sender))
+        val body = o.toString().toByteArray(Charsets.UTF_8)
         return request("POST", "/end", null, body, "application/json").first in 200..299
     }
+
+    /**
+     * Where push_service `/signal-answered` lives for THIS transport: the same origin as the
+     * call server, behind nginx `location /push/`. Derived rather than hard-coded so a lane
+     * pointed at a local test server never reaches production push.
+     */
+    val signalAnsweredUrl: String get() = "$base$PUSH_PREFIX/signal-answered"
+
+    /**
+     * `POST /push/signal-answered` — make the account's OTHER devices stop ringing
+     * (dismiss CallKit / the ringing notification on a suspended phone).
+     *
+     * Signed like every other call/push request (contract §3 row 6: the claimed identity is
+     * body `identity`, which must be bound to our signing key). Returns the HTTP status, or
+     * -1 when the push service was not reachable.
+     */
+    fun signalAnswered(
+        identity: String,
+        callId: String,
+        exceptDeviceId: String,
+        url: String = signalAnsweredUrl,
+    ): Int {
+        val body = JSONObject()
+            .put("identity", identity)
+            .put("callId", callId)
+            .put("exceptDeviceId", exceptDeviceId)
+            .toString().toByteArray(Charsets.UTF_8)
+        return send("POST", URI.create(url), body, "application/json").first
+    }
+
+    /** What `POST /relay-token` said: the token, or the HTTP code (-1 = unreachable) and reason. */
+    data class RelayTokenReply(val code: Int, val token: com.oshi.desktop.call.transport.RelayToken?, val reason: String)
+
+    /**
+     * __CALL_MEDIA_AUTH_DESKTOP_2026_09_23__ `POST /api/call/relay-token` —
+     * `docs/CALL_MEDIA_RELAY_AUTH_CONTRACT.md` (STABLE 1.0) §2. Signed through [send] like
+     * every call request (the route never accepts unsigned). Body exact bytes, key order
+     * `identity`, `peer`, `callId`, keys base64url unpadded — the spelling of the UDP frame.
+     */
+    fun relayToken(identity: String, peer: String, callId: String): RelayTokenReply {
+        val body = relayTokenBody(identity, peer, callId).toByteArray(Charsets.UTF_8)
+        val (code, text) = request("POST", "/relay-token", null, body, "application/json")
+        if (code !in 200..299) {
+            val json = runCatching { JSONObject(text) }.getOrNull()
+            val reason = json?.optString("reason")?.takeIf { it.isNotEmpty() }
+                ?: json?.optString("error")?.takeIf { it.isNotEmpty() }
+                ?: text.take(120)
+            return RelayTokenReply(code, null, reason)
+        }
+        val t = com.oshi.desktop.call.transport.RelayToken.parse(text)
+            ?: return RelayTokenReply(code, null, "a 200 that is not a relay token")
+        return RelayTokenReply(code, t, "ok")
+    }
+
+    /** `GET` headers for [path] (empty body) — `/voip/turn-creds`, the WS upgrade. Empty when unsigned. */
+    fun signedGetHeaders(path: String): Map<String, String> = webSocketUpgradeHeaders(path)
 
     /** `POST /api/call/ping` — is the call server there at all. */
     fun ping(): Boolean = request("POST", "/ping", null, ByteArray(0), "application/json").first in 200..299
@@ -232,13 +302,22 @@ class CallSignalClient(
     ): Pair<Int, String> {
         val sentPath = apiPrefix + path
         val url = base + sentPath + if (query.isNullOrEmpty()) "" else "?$query"
+        return send(method, URI.create(url), body, contentType)
+    }
+
+    /**
+     * The ONE place a call/push request is built, signed and sent — contract §7 "one signing
+     * helper shared by all call sites". The signature covers the exact [body] bytes that go
+     * on the wire and the path of the URL as requested (query excluded).
+     */
+    private fun send(method: String, uri: URI, body: ByteArray?, contentType: String?): Pair<Int, String> {
         val publisher =
             if (body == null) HttpRequest.BodyPublishers.noBody()
             else HttpRequest.BodyPublishers.ofByteArray(body)
-        val builder = HttpRequest.newBuilder(URI.create(url)).timeout(readTimeout)
-        signer?.sign(method, signedPathFor(sentPath), body ?: ByteArray(0))?.forEach { (k, v) ->
-            builder.header(k, v)
-        }
+        val builder = HttpRequest.newBuilder(uri).timeout(readTimeout)
+        signer?.sign(method, signedPathFor(uri.rawPath), body ?: ByteArray(0), timestampMs = clockMs())
+            ?.forEach { (k, v) -> builder.header(k, v) }
+        builder.header("User-Agent", userAgent)
         contentType?.let { builder.header("Content-Type", it) }
         builder.method(method, publisher)
         return try {
@@ -253,20 +332,34 @@ class CallSignalClient(
     }
 
     /**
-     * The path the SERVER hashes, given the path we SENT: [apiPrefix] removed. See SIGNING.
+     * The path we SIGN, given the path we SENT: the full request path, prefix INCLUDED.
      *
-     * Exposed so a test can assert the string itself. A round trip through our own fake
-     * server would prove only that both halves agree with each other — the vacuous shape
-     * this project has been burned by — so `FakeCallServer` strips the prefix the way nginx
-     * does and verifies against what it, not we, computed.
+     * __CALL_PUSH_AUTH_DESKTOP_2026_09_23__ `docs/CALL_PUSH_AUTH_CONTRACT.md` §2 (STABLE 1.0):
+     * "sign the path exactly as it appears in the request line you send"; the server
+     * re-adds the prefixes nginx strips (`/api/call`, `/voip`, `/push`) when verifying.
+     * Until that contract this client signed the STRIPPED path — which the server still
+     * accepts — and the SIGNING section above explains why that used to be the only spelling
+     * that verified. `FakeCallServer` verifies the way the patched server does.
      */
-    fun signedPathFor(sentPath: String): String =
-        if (apiPrefix.isNotEmpty() && sentPath.startsWith(apiPrefix)) sentPath.removePrefix(apiPrefix)
-        else sentPath
+    fun signedPathFor(sentPath: String): String = sentPath
+
+    /**
+     * The three `x-oshi-*` headers for the WebSocket relay's upgrade GET — contract §4, what
+     * iOS signs: `GET\n<path as sent>\n<sha256 of nothing>\n<ts>`. Empty when unsigned.
+     */
+    fun webSocketUpgradeHeaders(path: String): Map<String, String> =
+        signer?.sign("GET", path, ByteArray(0), timestampMs = clockMs()) ?: emptyMap()
 
     companion object {
         /** nginx's `location /api/call/`. Both shipped clients hard-code it. */
         const val API_PREFIX = "/api/call"
+
+        /** nginx's `location /push/` → push_service :8084 (prefix stripped). */
+        const val PUSH_PREFIX = "/push"
+
+        /** `OSHI-Desktop/<version>` — contract §7. The version is the jar manifest's, "dev" in a source run. */
+        fun defaultUserAgent(): String =
+            "OSHI-Desktop/" + (CallSignalClient::class.java.`package`?.implementationVersion ?: "dev")
 
         /** The call server's own port, for a direct connection with no proxy in front. */
         const val DIRECT_PORT = 8083
@@ -283,5 +376,11 @@ class CallSignalClient(
          */
         fun base64Url(address: String): String =
             address.trim().replace('+', '-').replace('/', '_').trimEnd('=')
+
+        /** Contract §2/§7 T1: `{"identity":…,"peer":…,"callId":…}` in that order, no spaces. */
+        fun relayTokenBody(identity: String, peer: String, callId: String): String =
+            "{\"identity\":" + JSONObject.quote(base64Url(identity)) +
+                ",\"peer\":" + JSONObject.quote(base64Url(peer)) +
+                ",\"callId\":" + JSONObject.quote(callId) + "}"
     }
 }
