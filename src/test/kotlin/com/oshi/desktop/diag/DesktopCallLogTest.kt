@@ -79,8 +79,21 @@ class DesktopCallLogTest {
         assertTrue(text.contains("] DIAG_PATH | txPrimary=UDP_RELAY | desktop-marker\n"))
 
         // Same vault, next start ⇒ same key ⇒ the previous run is still readable.
-        val again = logger(vaultKey(File(home, KeyVault.FILE_NAME)))
+        // A real restart starts from a file no live process holds open. `l` still does (its
+        // channel lives until the process ends), and Windows refuses to rename an open file,
+        // so rotating current → previous in place failed on the Windows runner only
+        // (CI 35990173979). Copy the run into a fresh directory, as the next start sees it.
+        l.close()
+        val next = Files.createTempDirectory("DesktopCallLogTest-next").toFile()
+        File(next, DesktopCallLog.LOG_DIR).mkdirs()
+        File(home, "${DesktopCallLog.LOG_DIR}/${CallFileLogger.CURRENT_LOG_NAME}")
+            .copyTo(File(next, "${DesktopCallLog.LOG_DIR}/${CallFileLogger.CURRENT_LOG_NAME}"))
+        val nextKey = vaultKey(File(home, KeyVault.FILE_NAME))
+        val again = CallFileLogger(File(next, DesktopCallLog.LOG_DIR), File(next, DesktopCallLog.EXPORT_SCRATCH_DIR), { nextKey })
+            .also { loggers += it }
         assertTrue(again.decryptedLogs().first { it.first == CallFileLogger.PREVIOUS_LOG_NAME }.second.contains("desktop-marker"))
+        again.close()
+        next.deleteRecursively()
     }
 
     @Test fun `a different vault cannot read it and the old run is dropped`() {
