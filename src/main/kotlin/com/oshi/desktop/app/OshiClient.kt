@@ -3,6 +3,8 @@ package com.oshi.desktop.app
 import com.oshi.desktop.DesktopIdentity
 import com.oshi.desktop.DesktopV2Signer
 import com.oshi.desktop.block.BlockPolicy
+import com.oshi.desktop.block.BlockedByPeerStore
+import com.oshi.desktop.block.BlockedNoticeGate
 import com.oshi.desktop.call.CallLane
 import com.oshi.desktop.call.CallSignalClient
 import com.oshi.desktop.call.CallStateMachine
@@ -174,6 +176,17 @@ class OshiClient(
     private val localDataRoot: ByteArray = LocalDataKeys.root(vault)
 
     val contacts = ContactStore(File(home, "contacts.json"), LocalDataKeys.derive(localDataRoot, LocalDataKeys.CONTACTS))
+    // __BLOCKED_NOTICE_SWITCH_2026_09_23__ rate-limit stamps for the "you are blocked" notice.
+    private val blockedNotice = BlockedNoticeGate(
+        File(home, "blocked_notice.json"), LocalDataKeys.derive(localDataRoot, LocalDataKeys.BLOCKED_NOTICE),
+    )
+    /**
+     * __BLOCKED_BY_PEER_2026_09_24__ peers whose 🚫BLOCKED🚫 notice told us they block us: never
+     * dialled (no offer, no VoIP push) until they write to us again. See [BlockedByPeerStore].
+     */
+    val blockedByPeers = BlockedByPeerStore(
+        File(home, "blocked_by_peer.json"), LocalDataKeys.derive(localDataRoot, LocalDataKeys.BLOCKED_BY_PEER),
+    )
     private val receiptPreferences = ReceiptPreferences(File(home, ReceiptPreferences.FILE_NAME))
     // A distinct random data-encryption key keeps an exported history from becoming
     // readable merely because another vault entry is later repurposed. The vault itself is
@@ -186,6 +199,13 @@ class OshiClient(
     private val prekeys = PrekeyStore(vault)
     private val sessions = SessionStore(vault)
     private val http = V2Http(DesktopV2Signer(identity), serverUrl)
+
+    /** __DESKTOP_REPORT_2026_09_23__ "Signaler" — see [V2ReportClient] for the privacy contract. */
+    val reports = com.oshi.desktop.net.V2ReportClient(
+        http, { identity.userKey },
+        File(home, "reports.json"), LocalDataKeys.derive(localDataRoot, LocalDataKeys.REPORTS),
+    )
+    @Volatile private var lastReportRetryMs = 0L
     val config = V2ConfigGate(baseUrl = serverUrl, log = log)
     private val keys = V2KeysClient(http, identity, prekeys)
     private val relay = V2MessagesClient(http)
@@ -370,6 +390,16 @@ class OshiClient(
      * nothing a client that never places a call should pay for.
      */
     private val callsLazy: Lazy<CallLane> = lazy {
+        // __CALL_LOG_AT_REST_2026_09_23__ Every call-lane line also goes to the sealed call
+        // log (OSHILOG1, same file format and same redacted export as iOS / Android). Installed
+        // here, with the lane, so a client that never places a call never opens one.
+        com.oshi.desktop.diag.DesktopCallLog.install(
+            home, LocalDataKeys.derive(localDataRoot, LocalDataKeys.CALL_LOG),
+        )
+        val callLog: (String) -> Unit = { line ->
+            log(line)
+            com.oshi.desktop.diag.DesktopCallLog.log(line)
+        }
         CallLane(
             myAddress = address,
             myPrivateKey = identity.identity.priv,
@@ -377,7 +407,10 @@ class OshiClient(
             deviceId = syncCursor.deviceId(),
             // The SAME ContactStore every other ingress uses, so a blocked peer cannot ring
             // this client — enforcement, not a second flag (PARITY.md 0.21).
-            machine = CallStateMachine(address, contacts, syncCursor.deviceId()),
+            machine = CallStateMachine(address, contacts, syncCursor.deviceId()).also { m ->
+                // __BLOCKED_BY_PEER_2026_09_24__ never dial a peer that told us it blocks us.
+                m.isBlockedBy = { peer -> blockedByPeers.isBlockedBy(peer) }
+            },
             // AUDIO. Opens a UDP socket, the microphone and the speaker on a connected
             // call, signals ICE candidates, and ENDS the call if no device can be opened
             // rather than connecting it in silence — a silent connected call makes two
@@ -389,8 +422,22 @@ class OshiClient(
             // between two real people on two real machines. Audio has been shown crossing
             // LOOPBACK in a test; that is not the same claim.
             mediaOpener = com.oshi.desktop.call.CallMedia.real(),
-            log = log,
-        ).also { lane -> lane.onEvent = { event -> onCall(event) } }
+            log = callLog,
+        ).also { lane ->
+            lane.onEvent = { event ->
+                // Seal the call's last lines now: the process may be quit right after a hang-up.
+                if (event is CallLane.CallEvent.Ended) com.oshi.desktop.diag.DesktopCallLog.flush()
+                // A blocked caller never rings here; they get the same (rate-limited)
+                // notice a blocked message gets, instead of ringing out into nothing.
+                if (event is CallLane.CallEvent.Refused &&
+                    event.refusal == com.oshi.desktop.call.CallRefusal.BLOCKED) {
+                    event.from?.let { noticeBlockedSender(it, null) }
+                }
+                // __BLOCKED_BY_PEER_2026_09_24__ a peer that rings us no longer blocks us.
+                if (event is CallLane.CallEvent.Ringing && event.incoming) blockedByPeers.clear(event.peer)
+                onCall(event)
+            }
+        }
     }
 
     val calls: CallLane by callsLazy
@@ -663,6 +710,12 @@ class OshiClient(
                     .onFailure { log("client: device mailbox tick failed: ${it.javaClass.simpleName}: ${it.message}") }
                 router.poll()
                 tick()
+                // __DESKTOP_REPORT_2026_09_23__ a report filed offline goes out once the
+                // server answers again ("sent automatically" is what the UI promises).
+                if (System.currentTimeMillis() - lastReportRetryMs > 10 * 60_000L) {
+                    lastReportRetryMs = System.currentTimeMillis()
+                    runCatching { reports.retryPending() }
+                }
                 // __DEVSYNC_DIRECT_2026_09_22__ gate + engine lifecycle (a no-op while the flag is off).
                 runCatching { devSync.tick() }.onFailure { log("client: devsync tick failed: ${it.javaClass.simpleName}: ${it.message}") }
             }
@@ -1144,7 +1197,9 @@ class OshiClient(
         val mime = probeMime(file)
         return sendMedia(
             peerAddress = peerAddress,
-            bytes = file.readBytes(),
+            // Through the vault: a GIF from GifOutbox is sealed at rest (a user's own file
+            // passes through as is). __PLAINTEXT_LEFTOVERS_2026_09_24__
+            bytes = mediaVault.openStream(file).use { it.readBytes() },
             filename = file.name,
             mime = mime,
             mediaType = mediaType ?: MediaType.forMime(mime),
@@ -1485,10 +1540,10 @@ class OshiClient(
      * personal preference: never sent as true (the wire always says false, as Android pins
      * it) and re-imposed from the local copy on every ingest, exactly as iOS does (`swift:1028`).
      */
-    fun setGroupMuted(groupId: String, muted: Boolean): GroupDefinition? {
-        val g = groups.get(groupId) ?: return null
-        return groups.put(g.copy(isMuted = muted))
-    }
+    fun setGroupMuted(groupId: String, muted: Boolean): GroupDefinition? =
+        // __GROUP_MUTE_SYNC_2026_09_24__ stamped (mutedAt) so the account's other devices follow
+        // through devsync GROUPS; the group-update WIRE still never carries it.
+        groups.setMuted(groupId, muted, System.currentTimeMillis())
 
     fun isGroupMuted(groupId: String): Boolean = groups.get(groupId)?.isMuted == true
 
@@ -1718,7 +1773,7 @@ class OshiClient(
     fun sendGroupFile(groupId: String, file: File, caption: String? = null): GroupSendReport? {
         val g = groups.get(groupId) ?: return null
         if (!config.isEnabledCached()) return null
-        val bytes = file.readBytes()
+        val bytes = mediaVault.openStream(file).use { it.readBytes() }   // sealed GIF or a user's own file
         if (bytes.isEmpty() || bytes.size > V2BlobClient.MAX_PLAINTEXT_BYTES) return null
         val mime = probeMime(file)
         val mediaType = MediaType.forMime(mime)
@@ -2073,10 +2128,39 @@ class OshiClient(
         // able to delete our messages — blocking someone must not leave them holding a
         // write primitive against our own history.
         if (BlockPolicy.inbound(contacts, inbound.from) == BlockPolicy.Inbound.DROP_BLOCKED) {
+            // __BLOCKED_MEMBER_GROUPS_2026_09_24__ the ONE exception: a group STATE update (roster,
+            // name, a member leaving) from a blocked member still reaches the authorizer, which
+            // applies its own membership/admin rules — otherwise the roster here drifts from
+            // everyone else's (iOS / Android keep processing group control from a blocked member
+            // too). Their CONTENT stays dropped, 1:1 and group alike (owner decision 2026-09-24:
+            // a blocked member's group messages are not stored — so not shown, not counted).
+            if (inbound.groupId.isNullOrBlank() && ControlPrefix.match(inbound.text) == ControlPrefix.GROUP_UPDATE) {
+                log("client: group update from a blocked contact ${inbound.from.take(12)}… — roster only")
+                dispatch(inbound)
+                return
+            }
             log("client: dropped a message from a blocked contact ${inbound.from.take(12)}…")
+            // Group traffic is not answered: being in a group with someone you blocked
+            // is not them trying to reach you 1:1.
+            if (inbound.groupId.isNullOrBlank()) noticeBlockedSender(inbound.from, inbound.text)
             return
         }
         dispatch(inbound)
+    }
+
+    /**
+     * __BLOCKED_NOTICE_SWITCH_2026_09_23__ Tell a blocked peer, once a day at most, that
+     * nothing they send arrives — parity with both phones. Rules and switch live in
+     * [BlockedNoticeGate]. Bypasses [sendPlaintext] on purpose: that gate refuses every
+     * send to a blocked key, and this is the one message that must reach one. No stored
+     * row, no push, no self-copy.
+     */
+    internal fun noticeBlockedSender(peer: String, text: String?) {
+        if (!blockedNotice.claim(peer, text, address)) return
+        val sent = runCatching {
+            router.sendText(peer, ControlPrefix.BLOCKED_NOTICE.toByteArray(Charsets.UTF_8), UUID.randomUUID().toString())
+        }.getOrDefault(false)
+        log("client: blocked notice to ${peer.take(12)}… ${if (sent) "sent" else "not sent"}")
     }
 
     /**
@@ -2133,6 +2217,8 @@ class OshiClient(
             is ControlEvent.Delivered, is ControlEvent.Read, is ControlEvent.Typing,
             is ControlEvent.Reaction, is ControlEvent.Action,
             -> {
+                // __BLOCKED_BY_PEER_2026_09_24__ a receipt = the peer takes our traffic again.
+                blockedByPeers.observe(inbound.from, text)
                 contacts.seen(inbound.from, inbound.ts)
                 onControl(inbound.from, event, outcome)
                 return
@@ -2156,8 +2242,12 @@ class OshiClient(
                     storeInbound(
                         inbound,
                         "🚫 " + t("chat.blocked_by_contact"),
-                        suppressNotification = false,
+                        // Phones' rule 3: the row is enough — the person is looking at the
+                        // thread they just wrote in, an alert "you were blocked" helps no one.
+                        suppressNotification = true,
                     )
+                    // __BLOCKED_BY_PEER_2026_09_24__ from now on this peer is never dialled.
+                    blockedByPeers.noteBlocked(inbound.from)
                     return
                 }
                 // __SHARED_NICKNAME_2026_09_22__ A profile update: the only thing this
@@ -2265,6 +2355,9 @@ class OshiClient(
         )
         val outcome = messages.append(stored)
         contacts.seen(inbound.from, inbound.ts)
+        // __BLOCKED_BY_PEER_2026_09_24__ a real row (not the notice, not a silent ping) from the
+        // peer = it writes to us again. Same rule as iOS `observeStoredInbound`.
+        if (!suppressNotification) blockedByPeers.clear(inbound.from)
         if (outcome != MessageStore.AppendOutcome.DUPLICATE && !suppressNotification) onMessage(stored)
     }
 
@@ -2488,6 +2581,8 @@ class OshiClient(
         val held = heldGroupContent.remove(gid) ?: return
         val cutoff = System.currentTimeMillis() - HELD_GROUP_CONTENT_TTL_MS
         val batch = synchronized(held) { held.filter { it.first >= cutoff }.map { it.second } }
+            // __BLOCKED_MEMBER_GROUPS_2026_09_24__ held before the sender was blocked: still dropped.
+            .filter { BlockPolicy.inbound(contacts, it.from) != BlockPolicy.Inbound.DROP_BLOCKED }
         for (inbound in batch) runCatching { dispatch(inbound) }
             .onFailure { log("client: replay of held group content failed: ${it.javaClass.simpleName}") }
     }
@@ -2573,6 +2668,7 @@ class OshiClient(
         )
         val outcome = messages.append(stored)
         contacts.seen(inbound.from, inbound.ts)
+        blockedByPeers.clear(inbound.from)   // __BLOCKED_BY_PEER_2026_09_24__ media = a person writing
         if (outcome != MessageStore.AppendOutcome.DUPLICATE) onMessage(stored)
         if (deliveryReceiptsEnabled) {
             sendPlaintext(inbound.from, DeliveryReceipt.encode(inbound.msgId), storeRow = false)
@@ -2654,6 +2750,29 @@ class OshiClient(
      * closed with a banner and no notification is raised (`PushNotificationManager.swift:183`).
      * Messages still arrive and are stored, as on iOS. Nothing is sent to anyone.
      */
+    /**
+     * __DESKTOP_REPORT_2026_09_23__ File a report about a contact (address) or a group
+     * (group id), optionally blocking in the same gesture — the phones' "Also block"
+     * toggle. Blocking here is the SAME [block] / [setGroupBlocked] every other surface
+     * uses; reporting never leaves a group by itself (iOS/Android parity).
+     */
+    fun report(
+        subject: com.oshi.desktop.net.V2ReportClient.Subject,
+        subjectId: String,
+        reason: com.oshi.desktop.net.V2ReportClient.Reason,
+        details: String,
+        alsoBlock: Boolean,
+    ): com.oshi.desktop.net.V2ReportClient.Report {
+        val filed = reports.file(subject, subjectId, reason, details)
+        if (alsoBlock) {
+            when (subject) {
+                com.oshi.desktop.net.V2ReportClient.Subject.CONTACT -> block(subjectId)
+                com.oshi.desktop.net.V2ReportClient.Subject.GROUP -> setGroupBlocked(subjectId, true)
+            }
+        }
+        return filed
+    }
+
     fun setGroupBlocked(groupId: String, blocked: Boolean): GroupDefinition? {
         groups.get(groupId) ?: return null
         groups.setBlocked(groupId, blocked)

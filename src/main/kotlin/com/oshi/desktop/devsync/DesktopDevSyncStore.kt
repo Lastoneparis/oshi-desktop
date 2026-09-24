@@ -1,5 +1,6 @@
 package com.oshi.desktop.devsync
 
+import com.oshi.desktop.block.BlockPolicy
 import com.oshi.desktop.app.GroupStore
 import com.oshi.desktop.group.GroupDefinition
 import com.oshi.desktop.group.GroupMember
@@ -286,8 +287,13 @@ class DesktopDevSyncStore(
         if (!isKey(c.address)) return@mapNotNull null
         val pk = ExportV2.canonicalKey(c.address)
         if (pk == ExportV2.canonicalKey(selfAddress())) return@mapNotNull null
-        // No per-field timestamps on this client: legacy data, gap-fill only (design §8.5).
-        SyncContact(pk, alias = c.displayName?.takeIf { it.isNotBlank() }, blocked = c.blocked.takeIf { it },
+        // __BLOCK_SYNC_LWW_2026_09_24__ `blocked` travels WITH `blockedAt` once this install has
+        // seen it change (a local block/unblock, or a synced one keeping its own time): an
+        // unblock is then exported as blocked:false + blockedAt and wins over an older block.
+        // Never toggled here → legacy: a block untimestamped (gap-fill only, §8.5), an absence
+        // as absent — never false@now, which would undo a block made earlier on another device.
+        val (blocked, blockedAt) = if (c.blockedAtMs != null) c.blocked to c.blockedAtMs else c.blocked.takeIf { it } to null
+        SyncContact(pk, alias = c.displayName?.takeIf { it.isNotBlank() }, blocked = blocked, blockedAtMs = blockedAt,
             verified = (c.verification == ContactStore.VerificationState.VERIFIED).takeIf { it })
     }
 
@@ -295,10 +301,16 @@ class DesktopDevSyncStore(
         val pk = contact.publicKey
         val existing = contacts.get(pk) ?: contacts.seen(pk, System.currentTimeMillis(), displayNameHint = contact.alias)
         if (contact.alias != null && contact.alias != existing.displayName) contacts.setDisplayName(pk, contact.alias)
-        when (contact.blocked) {
-            true -> if (!existing.blocked) contacts.block(pk)
-            false -> if (existing.blocked) contacts.unblock(pk)
-            null -> Unit
+        // __BLOCK_SYNC_LWW_2026_09_24__ the MERGED value and its time, on every stored spelling
+        // of the key (an unblock that missed one spelling would leave the peer blocked).
+        contact.blocked?.let { b ->
+            val wanted = BlockPolicy.normalizeKey(pk)
+            val rows = contacts.all().filter { BlockPolicy.normalizeKey(it.address) == wanted }
+            for (row in rows) {
+                if (row.blocked != b || (contact.blockedAtMs != null && row.blockedAtMs != contact.blockedAtMs)) {
+                    contacts.applySyncedBlock(row.address, b, contact.blockedAtMs)
+                }
+            }
         }
         if (contact.verified == true && existing.verification != ContactStore.VerificationState.VERIFIED) {
             contacts.setVerification(pk, ContactStore.VerificationState.VERIFIED)
@@ -367,6 +379,10 @@ class DesktopDevSyncStore(
                 avatarEmoji = g.avatar,
                 pinnedMessageId = g.pinnedMessageId,
                 pinnedBy = g.pinnedBy,
+                // __GROUP_MUTE_SYNC_2026_09_24__ the account's mute: with its time once toggled
+                // (or synced) here; never toggled → a mute untimestamped, no mute absent.
+                muted = groups.mutedAt(g.groupId)?.let { g.isMuted } ?: g.isMuted.takeIf { it },
+                mutedAtMs = groups.mutedAt(g.groupId),
             )
         }
     }
@@ -412,13 +428,16 @@ class DesktopDevSyncStore(
             groupWallpaperBase64 = existing?.groupWallpaperBase64,
             groupWallpaperUpdatedAtUnixMillis = existing?.groupWallpaperUpdatedAtUnixMillis,
             groupWallpaperUpdatedBy = existing?.groupWallpaperUpdatedBy,
-            isMuted = existing?.isMuted ?: false,
+            isMuted = existing?.isMuted ?: (group.muted ?: false),
             pinnedMessageId = group.pinnedMessageId,
             pinnedBy = group.pinnedBy,
             avatar = group.avatarEmoji ?: existing?.avatar,
             stateVersion = if (group.epoch > 0) group.epoch.toInt() else existing?.stateVersion,
         )
         groups.put(def)
+        // __GROUP_MUTE_SYNC_2026_09_24__ the merged mute (and its time) from the account's
+        // other devices. Absent = no information: the local value stays.
+        group.muted?.let { groups.setMuted(def.groupId, it, group.mutedAtMs, synced = true) }
     }
 
     /** canonical groupId → (leftAt, name). */

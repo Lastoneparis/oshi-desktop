@@ -15,7 +15,7 @@ plugins {
 }
 
 group = "com.oshi.desktop"
-version = "0.0.1"
+version = "1.3.0"
 
 /**
  * Where the two shipped trees live.
@@ -182,6 +182,13 @@ sourceSets {
             // desktop that freezes where the phone does not.
             "**/VideoReorderReassembler.kt",
             "**/VideoRateController.kt",
+            // __CALL_LOG_AT_REST_2026_09_23__ The sealed call diagnostics log (OSHILOG1) and
+            // its allow-list redaction — `service/diag/CallFileLogger.kt`, pure JVM. Shared so
+            // the file format and the redacted export cannot drift between the phone and the
+            // desktop; iOS parity is pinned by fixtures in the Android test resources, which
+            // this build already reads. The Android seams (`CallDiag`, `CallLogKey`) are NOT
+            // included: they are Context + Keystore.
+            "**/CallFileLogger.kt",
             // __DEVSYNC_DIRECT_2026_09_22__ The own-device sync core
             // (docs/OSHI_DEVICE_SYNC_DIRECT.md): Noise XXpsk0, framing, diff/merge, linked-device
             // registry, sessions, LAN + relay plumbing. The whole `network/v2/devsync/` package is
@@ -820,7 +827,7 @@ val linuxPackageName = "oshi-desktop"
  * Installer version. Override with `-PappVersion=1.2.3`.
  *
  * THE PROJECT VERSION IS NOT A LEGAL INSTALLER VERSION, and this was OBSERVED, not read
- * in a manual. `version` is `0.0.1`, and jpackage 17 on macOS refuses it outright:
+ * in a manual. `version` used to be `0.0.1`, and jpackage 17 on macOS refused it outright:
  *
  *     Bundler Mac Application Image skipped because of a configuration problem:
  *     The first number in an app-version cannot be zero or negative.

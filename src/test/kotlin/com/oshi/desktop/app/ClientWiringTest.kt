@@ -249,12 +249,14 @@ class ClientWiringTest {
 
         a.send(b.address, "hello")
         b.router.poll()
-        val before = a.messages.messages(b.address).single().deliveryStatus
+        val before = a.messages.messages(b.address).single { it.fromMe }.deliveryStatus
         a.router.poll()
 
+        // No receipt: the tick does not move. (__BLOCKED_NOTICE_SWITCH_2026_09_23__ the
+        // blocked sender IS told, by one explicit 🚫 notice row — not by a receipt.)
         assertEquals(
             "blocking became observable to the person blocked (PARITY.md 0.21 defect 1)",
-            before, a.messages.messages(b.address).single().deliveryStatus,
+            before, a.messages.messages(b.address).single { it.fromMe }.deliveryStatus,
         )
     }
 

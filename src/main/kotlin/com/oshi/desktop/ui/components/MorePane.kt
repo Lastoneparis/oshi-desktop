@@ -79,6 +79,8 @@ fun MorePane(
     onPullNickname: () -> Unit = {},
     /** [ChatShellModel.pushNicknameToPhone]. */
     onPushNickname: () -> Unit = {},
+    /** __CALL_LOG_AT_REST_2026_09_23__ Pick a target, then [ChatShellModel.exportCallDiagnostics]. */
+    onExportCallDiagnostics: () -> Unit = {},
 ) {
     val known = state.contacts.filterNot { it.blocked }
     val blocked = state.contacts.filter { it.blocked }
@@ -125,6 +127,12 @@ fun MorePane(
                 Hairline()
                 // __DEVSYNC_DIRECT_2026_09_22__ Direct own-device sync.
                 SettingsRow("Linked devices", "Sync your history directly with your phone and other devices") { onShow(Pane.DEVICES) }
+                Hairline()
+                // __CALL_LOG_AT_REST_2026_09_23__ Same label and promise as the phones: a
+                // REDACTED copy of the sealed call log, saved where the person chooses.
+                SettingsRow(t("settings.calls.diaglog.title"), t("settings.calls.diaglog.subtitle")) {
+                    if (!state.busy) onExportCallDiagnostics()
+                }
             }
 
             Spacer(Modifier.height(OshiTheme.lg))
@@ -455,6 +463,16 @@ fun pickMessageExportTarget(): java.io.File? {
     val name = dialog.file ?: return null
     val dir = dialog.directory ?: return null
     return com.oshi.desktop.store.EncryptedMessageExport.withExtension(java.io.File(dir, name))
+}
+
+/** Save target for the redacted call diagnostics (`.txt`). Cancel returns null. */
+fun pickCallDiagnosticsTarget(): java.io.File? {
+    val dialog = java.awt.FileDialog(null as java.awt.Frame?, t("export.select_location"), java.awt.FileDialog.SAVE)
+    dialog.file = com.oshi.messenger.service.diag.CallFileLogger.EXPORT_FILE_NAME
+    dialog.isVisible = true
+    val name = dialog.file ?: return null
+    val dir = dialog.directory ?: return null
+    return java.io.File(dir, name)
 }
 
 fun pickMessageExportSource(): java.io.File? {

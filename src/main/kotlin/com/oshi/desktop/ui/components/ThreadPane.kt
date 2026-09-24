@@ -134,8 +134,13 @@ fun ThreadPane(
     onCopy: (String) -> Unit = {},
     /** __MENTIONS_2026_09_23__ a member picked from the `@` picker (groups only). */
     onPickMention: (com.oshi.desktop.group.MentionWire.Mention) -> Unit = {},
+    /** __DESKTOP_REPORT_2026_09_23__ null = no report action (bot / radio threads). */
+    onReport: ((com.oshi.desktop.net.V2ReportClient.Reason, String, Boolean) -> Unit)? = null,
 ) {
     var pickerOpen by remember(thread.conversationId) { mutableStateOf(false) }
+    var reportOpen by remember(thread.conversationId) { mutableStateOf(false) }
+    val reportable = onReport != null &&
+        (thread.kind == ConversationKind.DIRECT || thread.kind == ConversationKind.GROUP)
 
     Box(modifier.fillMaxSize()) {
         WallpaperBackdrop(wallpaper)
@@ -159,8 +164,18 @@ fun ThreadPane(
                     // __DESKTOP_CALL_UI_2026_09_23__ 1:1 only — like iOS, which offers no call in a
                     // group, and never in a bot or radio thread: neither has a peer that can answer.
                     onCall = onCall?.takeIf { thread.kind == ConversationKind.DIRECT },
+                    onReport = if (reportable) ({ reportOpen = !reportOpen }) else null,
                 ) { pickerOpen = !pickerOpen }
                 Hairline()
+                if (reportOpen && onReport != null) {
+                    ReportPanel(
+                        isGroup = thread.kind == ConversationKind.GROUP,
+                        alreadyReported = false,
+                        onSubmit = { r, d, b -> onReport(r, d, b) },
+                        onClose = { reportOpen = false },
+                    )
+                    Hairline()
+                }
                 thread.groupPinned?.let { PinnedBar(it, canUnpin = thread.groupCanEditInfo) { onPin(null) } }
                 thread.botSealing?.let { BotSealLabel(it) }
 
@@ -218,6 +233,7 @@ private fun ThreadHeader(
     onSetGroupBlocked: (Boolean) -> Unit = {},
     onDeleteGroup: () -> Unit = {},
     onCopy: (String) -> Unit = {},
+    onReport: (() -> Unit)? = null,
     onWallpaper: () -> Unit,
 ) {
     var editingDescription by remember(thread.conversationId) { mutableStateOf(false) }
@@ -262,6 +278,10 @@ private fun ThreadHeader(
                     if (thread.groupAdmin) TextAction(dt("desktop.group.rename.action")) { editingName = true }
                 }
                 KindBadge(thread.kind)
+                // __DESKTOP_REPORT_2026_09_23__ "Signaler", like the phones' contact/group sheet.
+                onReport?.let { open ->
+                    TextAction(if (thread.kind == ConversationKind.GROUP) t("group.report_group") else t("report.contact_title")) { open() }
+                }
             }
             Spacer(Modifier.height(OshiTheme.xxs))
             Text(

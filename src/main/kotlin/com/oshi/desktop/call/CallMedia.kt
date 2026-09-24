@@ -139,6 +139,13 @@ class CallMediaLeg internal constructor(
     private val started = AtomicBoolean(false)
     private val closed = AtomicBoolean(false)
 
+    // __CALL_LOG_AT_REST_2026_09_23__ iOS/Android-shaped path diagnostics. One volatile
+    // read and a compare per packet; a line only on the first frame and on a change.
+    // Declared before `socket` so a packet delivered during construction finds them set.
+    private val diagRxFirst = AtomicBoolean(false)
+    private val diagTxFirst = AtomicBoolean(false)
+    @Volatile private var diagTxPrimary = "none"
+
     /**
      * When [start] ran, or 0 before it did. The clock the media-path watchdog measures
      * from — see [CallLane.MEDIA_PATH_TIMEOUT_MS].
@@ -284,8 +291,49 @@ class CallMediaLeg internal constructor(
         if (audio.onFrame(sealed)) {
             framesAccepted.incrementAndGet()
             if (viaP2p) lastP2pAudioRxMs = System.currentTimeMillis()
+            if (diagRxFirst.compareAndSet(false, true)) {
+                log("DIAG_RX_AUDIO_FIRST | path=${if (viaP2p) "p2p" else "relay"} | size=${sealed.size} | decryptOk=true")
+            }
         } else framesRefused.incrementAndGet()
         return true
+    }
+
+    // DIAG_TX_* helper — the fields live at the top of the class (initialised before the
+    // socket can deliver anything).
+    private fun diagTx(path: String, isVideo: Boolean, size: Int) {
+        if (isVideo) return
+        if (diagTxFirst.compareAndSet(false, true)) log("DIAG_TX_AUDIO_FIRST | path=$path | size=$size")
+        val previous = diagTxPrimary
+        if (previous != path) {
+            diagTxPrimary = path
+            log("DIAG_TX_PRIMARY | $previous -> $path | frameBytes=$size")
+        }
+    }
+
+    /**
+     * The periodic DIAG_PATH / DIAG_JITTER (/ DIAG_VIDEO) snapshot [CallLane.mediaTick]
+     * writes every ~2 s. Counters and path TYPES only — no addresses, no keys.
+     */
+    fun diagSnapshot(nowMs: Long): List<String> {
+        val sel = selected
+        val a = audioSession
+        val v = videoSession
+        val lines = mutableListOf(
+            "DIAG_PATH | txPrimary=$diagTxPrimary | pair=${sel?.type?.name?.lowercase() ?: "none"} | " +
+                "txCount=${a?.framesSent?.get() ?: 0} | rxDecrypted=${framesAccepted.get()} | " +
+                "authFail=${framesRefused.get()} | relaySent=${relaySent.get()} | relayRecv=${relayReceived.get()} | " +
+                "wsSent=${wsSent.get()} | turn=${turnTransport ?: "none"} | " +
+                "lastP2pRxAge=${if (lastP2pRxMs > 0) "${nowMs - lastP2pRxMs}ms" else "never"}",
+        )
+        if (a != null) {
+            lines += "DIAG_JITTER | depthPackets=${a.playback.size()} | overflowDrops=${a.playback.overflowDrops.get()} | " +
+                "micSilentFrames=${a.consecutiveSilentFrames.get()} | muted=${a.muted}"
+        }
+        if (v != null && v.active) {
+            lines += "DIAG_VIDEO | txFrames=${v.localFrameCount} | rxFrames=${v.remoteFrameCount} | " +
+                "camera=${v.cameraRunning} | bitrate=${v.sendBitrate / 1000}k | fps=${v.sendFps}"
+        }
+        return lines
     }
 
     private fun onInBandEnd(sealed: ByteArray) {
@@ -357,15 +405,22 @@ class CallMediaLeg internal constructor(
         var sent = false
         if (sel != null) sent = socket.sendSealed(sealed)
         val isVideo = sealed.isNotEmpty() && (sealed[0].toInt() and 0xFF) == VideoMediaFrame.TYPE_VIDEO
-        if (if (isVideo || audioSession == null) p2pHealthy(now) else p2pAudioHealthy(now)) return sent
+        if (if (isVideo || audioSession == null) p2pHealthy(now) else p2pAudioHealthy(now)) {
+            diagTx("P2P", isVideo, sealed.size)
+            return sent
+        }
         val relay = udpRelay
         if (relay != null && relay.usable(now)) {
             if (relay.send(sealed)) { relaySent.incrementAndGet(); sent = true }
+            diagTx("UDP_RELAY", isVideo, sealed.size)
             return sent
         }
         val ws = wsRelay
         if (ws != null && ws.usable(now)) {
             if (ws.send(sealed)) { wsSent.incrementAndGet(); sent = true }
+            diagTx("WS_RELAY", isVideo, sealed.size)
+        } else if (sel != null) {
+            diagTx("P2P_UNVERIFIED", isVideo, sealed.size)
         }
         return sent
     }

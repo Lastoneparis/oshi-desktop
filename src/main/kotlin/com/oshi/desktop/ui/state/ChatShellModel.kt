@@ -315,6 +315,30 @@ class ChatShellModel(
     }
 
     /**
+     * __CALL_LOG_AT_REST_2026_09_23__ "Share call diagnostics": decrypt the sealed call log,
+     * apply the cross-platform allow-list redaction (iOS `redact(logs:)`, byte-identical) and
+     * write it to [target]. On the worker: decrypting an hour of call log is not UI work.
+     */
+    fun exportCallDiagnostics(target: File) {
+        synchronized(lock) { busy = true; backupNotice = null }
+        publish()
+        worker.execute {
+            val result = runCatching { com.oshi.desktop.diag.DesktopCallLog.exportTo(target) }
+            synchronized(lock) {
+                busy = false
+                backupNotice = result.fold(
+                    onSuccess = { f ->
+                        if (f == null) Notice(dt("desktop.calldiag.empty"), Severity.ERROR)
+                        else Notice(dt("desktop.calldiag.done", f.path), Severity.OK)
+                    },
+                    onFailure = { Notice(dt("desktop.calldiag.failed", it.message ?: it.javaClass.simpleName), Severity.ERROR) },
+                )
+            }
+            publish()
+        }
+    }
+
+    /**
      * Merge an `.oshiexport` made by this account on any desktop. Additive and silent:
      * existing messages are kept as they are and nothing is replayed (no receipts, no
      * notifications); the conversation list is rebuilt from the store afterwards.
@@ -1099,6 +1123,43 @@ class ChatShellModel(
         }
     }
 
+    /**
+     * __DESKTOP_REPORT_2026_09_23__ "Signaler" a contact or a group. Off the UI thread (it
+     * is a network POST); the notice says what REALLY happened — sent, saved for retry, or
+     * refused — in the phones' own words (`report.*` strings, 34 languages).
+     */
+    fun report(
+        conversationId: String,
+        isGroup: Boolean,
+        reason: com.oshi.desktop.net.V2ReportClient.Reason,
+        details: String,
+        alsoBlock: Boolean,
+    ) {
+        synchronized(lock) { busy = true; notice = null }
+        publish()
+        worker.execute {
+            val outcome = runCatching {
+                client.report(
+                    if (isGroup) com.oshi.desktop.net.V2ReportClient.Subject.GROUP else com.oshi.desktop.net.V2ReportClient.Subject.CONTACT,
+                    conversationId, reason, details, alsoBlock,
+                )
+            }
+            synchronized(lock) {
+                busy = false
+                val state = outcome.getOrNull()?.state
+                notice = when (state) {
+                    com.oshi.desktop.net.V2ReportClient.State.SENT ->
+                        Notice(t("report.sent_title") + " — " + t("report.sent_message"), Severity.OK)
+                    com.oshi.desktop.net.V2ReportClient.State.REJECTED ->
+                        Notice("The server refused this report (${outcome.getOrNull()?.lastError ?: "4xx"}).", Severity.ERROR)
+                    else -> Notice(t("report.queued_title") + " — " + t("report.queued_message"), Severity.OK)
+                }
+                if (alsoBlock && !isGroup && selectedId == conversationId) selectedId = null
+            }
+            refresh()
+        }
+    }
+
     private fun runGroupInfoChange(what: String, change: () -> com.oshi.desktop.group.GroupDefinition?) {
         synchronized(lock) { busy = true; notice = null }
         publish()
@@ -1192,7 +1253,9 @@ class ChatShellModel(
         val shouldNotify: Boolean
         synchronized(lock) {
             val unseen = !m.fromMe && m.conversationId != selectedId
-            if (unseen) {
+            // A BLOCKED group's messages are kept (iOS parity) but must not grow a badge the
+            // user asked never to hear from again; a muted one still counts, quietly.
+            if (unseen && !client.isGroupBlocked(m.conversationId)) {
                 unread[m.conversationId] = (unread[m.conversationId] ?: 0) + 1
             }
             // __MENTIONS_2026_09_23__ an admitted `@you` breaks through mute (never through a block).

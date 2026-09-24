@@ -100,6 +100,13 @@ class ContactStore(
          * user of this machine chose, and [seen]'s hint path never writes here.
          */
         val sharedNickname: String? = null,
+        /**
+         * __BLOCK_SYNC_LWW_2026_09_24__ When [blocked] last CHANGED by a deliberate act (the user
+         * blocking/unblocking here, or a synced value from another of the account's devices,
+         * which keeps ITS time). Null = never toggled on this install (legacy): devsync then
+         * exports a block without a timestamp and an unblock not at all (gap-fill only).
+         */
+        val blockedAtMs: Long? = null,
     ) {
         init {
             require(address.isNotBlank()) { "contact address must not be blank" }
@@ -170,11 +177,31 @@ class ContactStore(
     @Synchronized
     fun setVerification(address: String, state: VerificationState) = mutate(address) { it.copy(verification = state) }
 
+    /**
+     * Block. Stamps [Contact.blockedAtMs] only when the state actually changes, strictly after
+     * any previous stamp (last-writer-wins across the account's devices).
+     */
     @Synchronized
-    fun block(address: String) = mutate(address) { it.copy(blocked = true) }
+    fun block(address: String, atMs: Long = System.currentTimeMillis()) = setBlocked(address, true, atMs)
 
     @Synchronized
-    fun unblock(address: String) = mutate(address) { it.copy(blocked = false) }
+    fun unblock(address: String, atMs: Long = System.currentTimeMillis()) = setBlocked(address, false, atMs)
+
+    /** A LOCAL block/unblock: a change is stamped max([atMs], previous + 1); no change, no stamp. */
+    @Synchronized
+    fun setBlocked(address: String, blocked: Boolean, atMs: Long): Contact? = mutate(address) {
+        if (it.blocked == blocked) it
+        else it.copy(blocked = blocked, blockedAtMs = maxOf(atMs, (it.blockedAtMs ?: Long.MIN_VALUE) + 1))
+    }
+
+    /**
+     * __BLOCK_SYNC_LWW_2026_09_24__ Apply a value merged from another device: its timestamp is
+     * kept as-is (never "now"), so the next export does not look newer than it is.
+     */
+    @Synchronized
+    fun applySyncedBlock(address: String, blocked: Boolean, atMs: Long?): Contact? = mutate(address) {
+        it.copy(blocked = blocked, blockedAtMs = atMs ?: it.blockedAtMs)
+    }
 
     /** True deletion: distinct from [block], and never a side effect of it. */
     @Synchronized
@@ -247,6 +274,7 @@ class ContactStore(
         c.lastSeenMs?.let { put("lastSeenMs", it) }
         put("verification", c.verification.wire)
         if (c.blocked) put("blocked", true)
+        c.blockedAtMs?.let { put("blockedAtMs", it) }
         c.avatarRef?.let { put("avatarRef", it) }
         c.sharedNickname?.let { put("sharedNickname", it) }
     }
@@ -258,6 +286,7 @@ class ContactStore(
         lastSeenMs = if (o.has("lastSeenMs")) o.getLong("lastSeenMs") else null,
         verification = VerificationState.fromWire(o.optString("verification", "")),
         blocked = o.optBoolean("blocked", false),
+        blockedAtMs = if (o.has("blockedAtMs")) o.getLong("blockedAtMs") else null,
         avatarRef = o.optString("avatarRef", "").ifEmpty { null },
         // Absent in every file written before __SHARED_NICKNAME_2026_09_22__.
         sharedNickname = o.optString("sharedNickname", "").ifEmpty { null },

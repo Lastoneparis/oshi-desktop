@@ -219,6 +219,12 @@ data class SyncGroup(
     val avatarEmoji: String? = null,
     val pinnedMessageId: String? = null,
     val pinnedBy: String? = null,
+    /**
+     * __GROUP_MUTE_SYNC_2026_09_24__ the account's per-group mute (optional, additive: a peer that
+     * predates it sends neither field and ignores them). Later [mutedAtMs] wins ([SyncMerge.group]).
+     */
+    val muted: Boolean? = null,
+    val mutedAtMs: Long? = null,
 ) {
     val conversationId: String get() = SyncJson.groupConversationId(groupId)
 
@@ -260,6 +266,8 @@ data class SyncGroup(
         m["left"] = c.left
         c.leftAtMs?.let { m["leftAt"] = SyncJson.iso(it) }
         c.joinedAtMs?.let { m["joinedAt"] = SyncJson.iso(it) }
+        c.muted?.let { m["muted"] = it }
+        c.mutedAtMs?.let { m["mutedAt"] = SyncJson.iso(it) }
         m["updatedAt"] = SyncJson.iso(c.updatedAtMs)
         return CanonicalJson.write(m)
     }
@@ -283,6 +291,8 @@ data class SyncGroup(
         avatarEmoji?.let { put("avatarEmoji", it) }
         pinnedMessageId?.let { put("pinnedMessageId", it) }
         pinnedBy?.let { put("pinnedBy", it) }
+        muted?.let { put("muted", it) }
+        mutedAtMs?.let { put("mutedAt", SyncJson.iso(it)) }
     }
 
     companion object {
@@ -323,6 +333,8 @@ data class SyncGroup(
                 avatarEmoji = o.optStr("avatarEmoji"),
                 pinnedMessageId = o.optStr("pinnedMessageId"),
                 pinnedBy = o.optStr("pinnedBy"),
+                muted = if (o.has("muted") && !o.isNull("muted")) o.optBoolean("muted") else null,
+                mutedAtMs = o.optIsoOrNull("mutedAt"),
             )
         }.getOrNull()
     }

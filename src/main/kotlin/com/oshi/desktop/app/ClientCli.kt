@@ -246,6 +246,11 @@ object ClientCommands {
           /peers                             OSHI devices found on this local network
           /block <address>                   stop storing anything from them (reversible)
           /unblock <address>                 unblocks EVERY base64 spelling of that key
+          /report <address> <reason> [+block] [details…]
+                                             report a contact to OSHI moderation (reason: spam|harassment|
+                                             inappropriate|other). Sends ONLY the reason, your text and the id.
+          /reportgroup <group> <reason> [+block] [details…]   same, for a group
+          /reports                           your filed reports and their delivery state
           /react <address> <msgId> <emoji>   add a reaction
           /unreact <address> <msgId> <emoji> remove yours
           /edit <address> <msgId> <text>     edit one of YOUR messages, for everyone
@@ -461,6 +466,33 @@ object ClientCommands {
                     // client.block, not contacts.block: the store's flag needs a row to sit
                     // on, and blocking someone never messaged before must still work.
                     client.block(it); out("   blocked ${short(it)} — nothing from them will be stored")
+                }
+
+                // __DESKTOP_REPORT_2026_09_23__
+                input.startsWith("/report ") || input.startsWith("/reportgroup ") -> {
+                    val isGroup = input.startsWith("/reportgroup ")
+                    val parts = input.substringAfter(' ').trim().split(Regex("\\s+"), limit = 3)
+                    val reason = com.oshi.desktop.net.V2ReportClient.Reason.entries
+                        .firstOrNull { it.wire == parts.getOrNull(1)?.lowercase() }
+                    val target = parts.getOrNull(0)?.let { if (isGroup) resolveGroup(client, it) else resolve(client, it) }
+                    if (target == null || reason == null) {
+                        out("   usage: ${if (isGroup) "/reportgroup <group>" else "/report <address>"} <spam|harassment|inappropriate|other> [+block] [details]")
+                    } else {
+                        var rest = parts.getOrNull(2).orEmpty()
+                        val alsoBlock = rest.startsWith("+block")
+                        if (alsoBlock) rest = rest.removePrefix("+block").trim()
+                        val r = client.report(
+                            if (isGroup) com.oshi.desktop.net.V2ReportClient.Subject.GROUP else com.oshi.desktop.net.V2ReportClient.Subject.CONTACT,
+                            target, reason, rest, alsoBlock,
+                        )
+                        out("   report ${r.id.take(8)}: ${r.state}${r.lastError?.let { " ($it)" } ?: ""}${if (alsoBlock) " — also blocked" else ""}")
+                    }
+                }
+
+                input == "/reports" -> {
+                    val all = client.reports.all()
+                    if (all.isEmpty()) out("   (no reports filed)")
+                    all.forEach { out("   ${it.id.take(8)}  ${it.subject.wire} ${short(it.subjectId)}  ${it.reason.wire}  ${it.state}") }
                 }
 
                 input.startsWith("/unblock ") -> withPeer(client, input, "/unblock ", out) {

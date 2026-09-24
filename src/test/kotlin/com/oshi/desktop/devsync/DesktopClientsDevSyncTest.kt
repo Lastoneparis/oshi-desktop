@@ -267,4 +267,46 @@ class DesktopClientsDevSyncTest {
         assertNull(a.groups.get(gid))
         assertTrue(sa.refusesGroup(gid))
     }
+
+    // ------------------------------------------------------------------ block / mute (LWW)
+
+    /**
+     * __BLOCK_SYNC_LWW_2026_09_24__ / __GROUP_MUTE_SYNC_2026_09_24__ A block and a group mute made on
+     * one desktop reach the other, and so do the UNBLOCK and the UNMUTE (they travel as
+     * `blocked:false` / `muted:false` with their time and beat the older values), over loopback LAN.
+     */
+    @Test
+    fun blockUnblockAndGroupMute_propagateBetweenTwoDesktops_overLoopbackLan() {
+        val noServer = "http://127.0.0.1:9"
+        val recovery = IdentityStore.exportRecoveryKey(DesktopIdentity.generate())
+        val a = client(noServer, "mac", recovery)
+        val b = client(noServer, "linux", recovery)
+        a.groups.put(GroupDefinition(gid, "Team", GroupType.COLLABORATIVE, a.address,
+            listOf(GroupMember(a.address, joinedAtUnixMillis = base, isAdmin = true), GroupMember(bob, joinedAtUnixMillis = base)),
+            base, base + 1000))
+        a.block(bob)
+        a.setGroupMuted(gid, true)
+        assertNotNull(a.contacts.get(bob)!!.blockedAtMs)
+        assertNotNull(a.groups.mutedAt(gid))
+        val sa = devSync(a, "mac")
+        val sb = devSync(b, "linux")
+        waitUntil("engines up") { (sb.engineOrNull?.lan?.port ?: -1) > 0 && (sa.engineOrNull?.lan?.port ?: -1) > 0 }
+        sa.dial("127.0.0.1", sb.engineOrNull!!.lan!!.port)
+        waitUntil("pairing prompt") { sa.snapshot().pending.isNotEmpty() }
+        sa.approve(sa.snapshot().pending.first().peerId, true)
+        waitUntil("block and mute reached B") {
+            com.oshi.desktop.block.BlockPolicy.isBlocked(b.contacts, bob) && b.groups.get(gid)?.isMuted == true
+        }
+        assertEquals("B keeps A's block time, not its own", a.contacts.get(bob)!!.blockedAtMs, b.contacts.get(bob)!!.blockedAtMs)
+        assertEquals(a.groups.mutedAt(gid), b.groups.mutedAt(gid))
+
+        // Unblock + unmute on A, live: they must win on B.
+        a.unblock(bob)
+        a.setGroupMuted(gid, false)
+        sa.tick()
+        waitUntil("unblock and unmute reached B") {
+            !com.oshi.desktop.block.BlockPolicy.isBlocked(b.contacts, bob) && b.groups.get(gid)?.isMuted == false
+        }
+        assertTrue(b.contacts.get(bob)!!.blockedAtMs!! > base)
+    }
 }

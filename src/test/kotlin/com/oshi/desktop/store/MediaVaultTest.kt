@@ -221,6 +221,18 @@ class MediaVaultTest {
     }
 
     @Test
+    fun `legacy plaintext GIFs under media-gifs are sealed too`() {
+        // __PLAINTEXT_LEFTOVERS_2026_09_24__ GifOutbox wrote plaintext one level down.
+        val gifs = File(vault.mediaDir, MediaVault.GIFS_SUBDIR).apply { mkdirs() }
+        val plain = "GIF89a-old".toByteArray()
+        val g = File(gifs, "1a2b3c4d-cat.gif").apply { writeBytes(plain); setLastModified(System.currentTimeMillis() - 120_000) }
+        assertEquals(listOf(g), vault.legacyCandidates())
+        assertEquals(MediaVault.MigrationReport(1, 0, 0), vault.migratePlaintext(vault.legacyCandidates()))
+        assertTrue(MediaVault.isSealed(g))
+        assertArrayEquals(plain, vault.readBytes(g, Long.MAX_VALUE))
+    }
+
+    @Test
     fun `a file written in the last moments is not picked up`() {
         vault.mediaDir.mkdirs()
         val fresh = File(vault.mediaDir, "fresh.jpg").apply { writeBytes(ByteArray(10)) }

@@ -401,5 +401,30 @@ object DevSyncVectorCheck {
             r.eq("devices step $i linked", after.getJSONArray("linked").toString(), JSONArray(reg.linked().map { it.deviceId }.sorted()).toString())
             r.eq("devices step $i revoked", after.getJSONArray("revoked").toString(), JSONArray(reg.revoked().sorted()).toString())
         }
+        records(v.optJSONObject("records"), r)
+    }
+
+    /**
+     * __BLOCK_MUTE_RECORDS_2026_09_24__ record parity: parse a CONTACTS / GROUPS entry and write it
+     * back. An unblock (`blocked:false` + `blockedAt`) and an unmute survive with their timestamps,
+     * unknown fields are dropped, keys come out canonical — byte-for-byte what iOS and the Python
+     * reference produce (merge.json `records`).
+     */
+    fun records(v: JSONObject?, r: Report) {
+        if (v == null) { r.ok("records present", false); return }
+        fun sorted(o: JSONObject): String = CanonicalJson.write(o.keys().asSequence().associateWith { k -> o.get(k).let { if (it == JSONObject.NULL) null else it } }.toSortedMap())
+        val contacts = v.getJSONArray("contacts")
+        for (i in 0 until contacts.length()) {
+            val c = contacts.getJSONObject(i)
+            val parsed = SyncContact.fromJson(c.getJSONObject("wire"))
+            r.eq("record contact ${c.getString("name")}", sorted(c.getJSONObject("json")), parsed?.toJson()?.let(::sorted))
+        }
+        val groups = v.getJSONArray("groups")
+        for (i in 0 until groups.length()) {
+            val g = groups.getJSONObject(i)
+            val parsed = SyncGroup.fromJson(g.getJSONObject("wire"))
+            r.eq("record group ${g.getString("name")}", g.getString("canonical"), parsed?.canonicalJson())
+            r.eq("record group ${g.getString("name")} round trip", g.getString("canonical"), parsed?.toJson()?.let(SyncGroup::fromJson)?.canonicalJson())
+        }
     }
 }

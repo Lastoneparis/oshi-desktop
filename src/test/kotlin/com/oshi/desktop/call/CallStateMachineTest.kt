@@ -520,6 +520,19 @@ class CallStateMachineTest {
         assertEquals(CallRefusal.BLOCKED, d.refusal)
     }
 
+    /** __BLOCKED_BY_PEER_2026_09_24__ a peer that told us it blocks us is not dialled. */
+    @Test
+    fun `dialling a peer that blocks us is refused as unavailable, with nothing to send`() {
+        val m = machine()
+        m.isBlockedBy = { it == peer }
+        val d = m.startCall(peer, t0, newCallId = callId)
+        assertEquals(CallRefusal.UNAVAILABLE, d.refusal)
+        assertEquals(CallState.IDLE, d.state)
+        assertTrue("no offer, no ring", d.actions.isEmpty())
+        m.isBlockedBy = { false }
+        assertEquals(CallState.RINGING, m.startCall(peer, t0, newCallId = callId).state)
+    }
+
     @Test
     fun `an unblocked contact rings normally`() {
         val contacts = store()

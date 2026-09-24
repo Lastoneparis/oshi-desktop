@@ -26,6 +26,14 @@ object LocalDataKeys {
     const val GROUPS = "groups-v1"
     const val SCHEDULED = "scheduled-messages-v1"
     const val MEDIA = "media-v1"
+    /** __CALL_LOG_AT_REST_2026_09_23__ The sealed call diagnostics log ([com.oshi.desktop.diag.DesktopCallLog]). */
+    const val CALL_LOG = "call-log-v1"
+    /** __BLOCKED_NOTICE_SWITCH_2026_09_23__ [com.oshi.desktop.block.BlockedNoticeGate] stamps. */
+    const val BLOCKED_NOTICE = "blocked-notice-v1"
+    /** __BLOCKED_BY_PEER_2026_09_24__ [com.oshi.desktop.block.BlockedByPeerStore] records. */
+    const val BLOCKED_BY_PEER = "blocked-by-peer-v1"
+    /** __DESKTOP_REPORT_2026_09_23__ [com.oshi.desktop.net.V2ReportClient] local report log. */
+    const val REPORTS = "reports-v1"
 
     private val SALT = "oshi-desktop-local-data-at-rest-v1".toByteArray(Charsets.UTF_8)
 

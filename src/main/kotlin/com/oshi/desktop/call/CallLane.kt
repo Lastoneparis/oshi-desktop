@@ -243,6 +243,15 @@ class CallLane(
 
     var onEvent: (CallEvent) -> Unit = {}
 
+    init {
+        // __CALL_LOG_AT_REST_2026_09_23__ iOS-shaped diagnostic lines, so the redacted
+        // export (same allow-list on every platform) carries the desktop's side of a call.
+        machine.onStateChange = { from, to -> log("🔄 STATE CHANGE: $from → $to") }
+    }
+
+    /** Last time [mediaTick] wrote its DIAG_PATH snapshot. */
+    @Volatile private var lastPathDiagMs = 0L
+
     /**
      * Whether this lane was built with a media opener — i.e. whether a connected call will
      * open a microphone and a speaker, or be two devices agreeing and silence.
@@ -406,6 +415,9 @@ class CallLane(
             ?: return Dialled.Refused("'$peerAddress' is not an OSHI address")
 
         val decision = machine.startCall(canonical, nowMs, video, newCallId)
+        if (decision.refusal == CallRefusal.UNAVAILABLE) {
+            log("call: not dialling ${canonical.take(12)}… — it told us it blocks us (unavailable)")
+        }
         if (decision.refusal != CallRefusal.NONE) {
             return Dialled.Refused(refusalText(decision.refusal), decision.refusal)
         }
@@ -682,6 +694,7 @@ class CallLane(
         val added = live.addRemoteCandidates(candidates)
         candidatesReceived += added
         log("call: ${machine.callId} learned $added of ${candidates.size} remote candidates")
+        log("DIAG_ICE_RX | count=${candidates.size} | typesCsv=${diagTypes(candidates)} | added=$added")
     }
 
     /**
@@ -707,6 +720,11 @@ class CallLane(
     fun mediaTick(nowMs: Long = System.currentTimeMillis()): IceCandidate? {
         val live = leg ?: return null
         val selected = live.tick(nowMs)
+        // DIAG_PATH / DIAG_JITTER — the periodic snapshot iOS and Android write, ~every 2 s.
+        if (nowMs - lastPathDiagMs >= PATH_DIAG_INTERVAL_MS) {
+            lastPathDiagMs = nowMs
+            runCatching { live.diagSnapshot(nowMs).forEach(log) }
+        }
         // A call carried by the :8089 relay alone has a media path too (row 2.1-t).
         if (selected != null || live.isClosed || live.relayCarrying(nowMs)) return selected
 
@@ -857,6 +875,10 @@ class CallLane(
             return
         }
 
+        log(
+            "DIAG_CODEC | role=${if (action.isCaller) "caller" else "callee"} | useOpus=${action.opus} | " +
+                "useWbAdpcm=${action.wbAdpcm} | isVideo=${machine.isVideo}",
+        )
         opened.audio?.muted = muted
         // __VIDEO_PLI_SIGNAL_2026_09_23__ Every keyframe request the video half puts on the
         // media channel also goes out as a sealed call signal (≤ 1/s): iOS up to b145 reads
@@ -919,12 +941,16 @@ class CallLane(
         if (post is CallSignalClient.Post.Queued) {
             candidatesSent++
             log("call: $callId signalled ${candidates.size} candidates")
+            log("DIAG_ICE_TX | count=${candidates.size} | typesCsv=${diagTypes(candidates)} | sentVia=call_signal")
         }
         // A refusal is already counted and announced by deliver(). It is NOT fatal the way
         // a refused offer is: the peer may still reach us from its own candidates, and
         // ending a live call because one of two candidate signals bounced would be worse
         // than the degraded path it is trying to avoid.
     }
+
+    private fun diagTypes(candidates: List<IceCandidate>): String =
+        candidates.joinToString(",") { it.type.name.lowercase() }
 
     private fun apply(decision: CallDecision, nowMs: Long): CallRefusal {
         for (action in decision.actions) perform(action, nowMs)
@@ -988,6 +1014,8 @@ class CallLane(
                     callLog += entry
                     while (callLog.size > MAX_CALL_LOG) callLog.removeAt(0)
                 }
+                // Same line as iOS `📞 CALL ENDED - <reason>` (call-end reason in the export).
+                log("📞 CALL ENDED - ${action.reason.wire} | connected=${action.connected} | incoming=${entry.incoming}")
                 // Best effort, and never load-bearing — see CallSignalClient.endCall.
                 transport.endCall(action.callId, myAddress)
                 onEvent(CallEvent.Ended(action.peer, action.callId, action.reason, action.connected))
@@ -1044,6 +1072,7 @@ class CallLane(
 
     private fun refusalText(refusal: CallRefusal): String = when (refusal) {
         CallRefusal.BLOCKED -> "that contact is blocked"
+        CallRefusal.UNAVAILABLE -> "unavailable"
         CallRefusal.BUSY -> "this client is already on a call"
         else -> refusal.name.lowercase().replace('_', ' ')
     }
@@ -1103,6 +1132,9 @@ class CallLane(
          * touched; this watchdog is what makes the outcome survivable anyway.
          */
         const val MEDIA_PATH_TIMEOUT_MS = 20_000L
+
+        /** DIAG_PATH / DIAG_JITTER cadence — the phones' 2 s snapshot. */
+        const val PATH_DIAG_INTERVAL_MS = 2_000L
 
         /**
          * How long a processed signal stays remembered.

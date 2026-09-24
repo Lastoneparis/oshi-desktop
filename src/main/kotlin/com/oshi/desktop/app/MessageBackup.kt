@@ -5,6 +5,7 @@ import com.oshi.desktop.store.ContactStore
 import com.oshi.desktop.store.DesktopExportV2
 import com.oshi.desktop.store.DesktopPaths
 import com.oshi.desktop.store.EncryptedMessageExport
+import com.oshi.desktop.store.MediaVault
 import com.oshi.desktop.store.ExportV2
 import com.oshi.desktop.store.MessageStore
 import java.io.File
@@ -32,6 +33,12 @@ class MessageBackup(
     private val groups: GroupStore? = null,
     /** Where imported media bytes are written; null = media is not restored. */
     private val mediaDir: File? = null,
+    /**
+     * __PLAINTEXT_LEFTOVERS_2026_09_24__ Seals imported media on write ("OSHIMED1"). Imported
+     * files used to land in `media/` in clear and wait for the next start's migration; with
+     * no vault (this one, or the process-wide one) media is simply not restored.
+     */
+    private val mediaVault: MediaVault? = null,
 ) {
 
     data class ExportResult(
@@ -52,7 +59,7 @@ class MessageBackup(
     )
 
     /** Client wiring: the stores the window and the REPL both hold. */
-    constructor(client: OshiClient) : this(client.identity, client.messages, client.contacts, client.groups, client.mediaDir)
+    constructor(client: OshiClient) : this(client.identity, client.messages, client.contacts, client.groups, client.mediaDir, client.mediaVault)
 
     private val v2 = DesktopExportV2(
         selfAddress = identity.userKey,
@@ -60,12 +67,19 @@ class MessageBackup(
         groupExists = { gid -> groups == null || groups.get(gid) != null },
         mediaWriter = mediaDir?.let { dir ->
             { id, fileName, bytes ->
-                val safe = fileName.replace(Regex("[^A-Za-z0-9._-]"), "_").take(120).ifEmpty { "file" }
-                DesktopPaths.ensurePrivateDir(dir)
-                val f = File(dir, "${id.take(8)}-import-$safe")
-                f.writeBytes(bytes)
-                DesktopPaths.makePrivate(f)
-                f.absolutePath
+                (mediaVault ?: MediaVault.current())?.let { vault ->
+                    val safe = fileName.replace(Regex("[^A-Za-z0-9._-]"), "_").take(120).ifEmpty { "file" }
+                    DesktopPaths.ensurePrivateDir(dir)
+                    val f = File(dir, "${id.take(8)}-import-$safe")
+                    try {
+                        // Sealed as it is written (sealingStream makes it 0600 first): no plaintext window.
+                        vault.sealingStream(f).use { it.write(bytes) }
+                    } catch (e: Throwable) {
+                        f.delete()
+                        throw e
+                    }
+                    f.absolutePath
+                }
             }
         },
     )

@@ -454,6 +454,10 @@ private fun Shell(
                 onSetNickname = { model.setOwnNickname(it) },
                 onPullNickname = { model.pullNicknameFromPhone() },
                 onPushNickname = { model.pushNicknameToPhone() },
+                // __CALL_LOG_AT_REST_2026_09_23__ modal dialog on the AWT thread, work on the worker.
+                onExportCallDiagnostics = {
+                    com.oshi.desktop.ui.components.pickCallDiagnosticsTarget()?.let { model.exportCallDiagnostics(it) }
+                },
             )
             Destination.MESSAGES -> MessagesDestination(
                 state = state,
@@ -639,6 +643,10 @@ private fun MessagesDestination(
                             onForward = model::forwardMessage,
                             onCopy = { copyToClipboard(it) },
                             onPickMention = model::pickMention,   // __MENTIONS_2026_09_23__
+                            // __DESKTOP_REPORT_2026_09_23__ contacts and groups only (not bots / radio).
+                            onReport = { reason, details, alsoBlock ->
+                                model.report(thread.conversationId, thread.kind == com.oshi.desktop.ui.state.ConversationKind.GROUP, reason, details, alsoBlock)
+                            },
                         )
                     }
                 }

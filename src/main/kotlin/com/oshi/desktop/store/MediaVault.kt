@@ -138,7 +138,9 @@ class MediaVault(
      * Listed SYNCHRONOUSLY at start, before this process downloads anything.
      */
     fun legacyCandidates(nowMs: Long = System.currentTimeMillis(), quietMs: Long = 30_000): List<File> {
-        val files = mediaDir.listFiles() ?: return emptyList()
+        // __PLAINTEXT_LEFTOVERS_2026_09_24__ `media/gifs/` too: GifOutbox wrote plaintext there
+        // and this listing never looked below the top level.
+        val files = (mediaDir.listFiles() ?: return emptyList()) + (File(mediaDir, GIFS_SUBDIR).listFiles() ?: emptyArray())
         files.filter { it.isFile && it.name.endsWith(MIGRATION_SUFFIX) }.forEach { it.delete() }
         return files.filter {
             it.isFile && !it.name.endsWith(MIGRATION_SUFFIX) && it.lastModified() <= nowMs - quietMs &&
@@ -216,6 +218,8 @@ class MediaVault(
     companion object {
         const val SCRATCH_DIR_NAME = "media-tmp"
         const val MIGRATION_SUFFIX = ".oshimig"
+        /** Outbound GIFs (`GifOutbox`), the one subdirectory of `media/` holding attachments. */
+        const val GIFS_SUBDIR = "gifs"
         private const val COPY_BUFFER = 64 * 1024
 
         @Volatile

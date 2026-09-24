@@ -38,7 +38,8 @@ jobs:
                     network/v2/V2FileKeyMessage.kt network/v2/V2RetryBudget.kt
                     service/LlamaCpp.kt service/CallRatingPolicy.kt
                     service/VideoReorderReassembler.kt service/VideoRateController.kt
-                    network/encryption/PostQuantumKEM.kt network/encryption/RatchetSecurityMode.kt"
+                    network/encryption/PostQuantumKEM.kt network/encryption/RatchetSecurityMode.kt
+                    service/diag/CallFileLogger.kt"
           REFERENCED="network/v2/V2KeysClient.kt service/LocalLLMManager.kt"
           for f in $COMPILED $REFERENCED; do
             [ -f "$v/$f" ] || { echo "::error::missing vendored source: $f"; exit 1; }

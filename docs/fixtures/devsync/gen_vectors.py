@@ -479,6 +479,21 @@ def merge_vectors():
     ccase("unblock_later_wins", {"publicKey": BOB, "blocked": True, "blockedAt": "2026-09-01T00:00:00.000Z"},
           {"publicKey": BOB, "blocked": False, "blockedAt": "2026-09-05T00:00:00.000Z"})
     ccase("legacy_block_gap_fill", {"publicKey": BOB}, {"publicKey": BOB, "blocked": True})
+    # __BLOCK_SYNC_LWW_2026_09_24__ an unblock travels as blocked:false WITH its blockedAt, and an
+    # older record (a device that has not seen the unblock yet) can never re-block.
+    ccase("stale_block_does_not_undo_newer_unblock",
+          {"publicKey": BOB, "blocked": False, "blockedAt": "2026-09-05T00:00:00.000Z"},
+          {"publicKey": BOB, "blocked": True, "blockedAt": "2026-09-01T00:00:00.000Z"})
+    ccase("stale_unblock_does_not_undo_newer_block",
+          {"publicKey": BOB, "blocked": True, "blockedAt": "2026-09-05T00:00:00.000Z"},
+          {"publicKey": BOB, "blocked": False, "blockedAt": "2026-09-01T00:00:00.000Z"})
+    ccase("unblock_timestamp_reaches_a_device_that_never_blocked",
+          {"publicKey": BOB},
+          {"publicKey": BOB, "blocked": False, "blockedAt": "2026-09-05T00:00:00.000Z"})
+    # ... so that a device which never saw the block cannot be re-blocked by a stale third device:
+    ccase("adopted_unblock_then_stale_block_stays_unblocked",
+          R.merge_contact({"publicKey": BOB}, {"publicKey": BOB, "blocked": False, "blockedAt": "2026-09-05T00:00:00.000Z"}),
+          {"publicKey": BOB, "blocked": True, "blockedAt": "2026-09-01T00:00:00.000Z"})
 
     profile = [
         {"local": {"name": "Hugo", "updatedAt": "2026-09-01T00:00:00.000Z"},
@@ -518,6 +533,11 @@ def merge_vectors():
     g_left_later = dict(g_local, left=True, leftAt="2026-09-27T00:00:00.000Z", updatedAt="2026-09-27T00:00:00.000Z")
     g_left_legacy = dict(g_local, left=True)
     g_left_same_ms = dict(g_local, left=True, leftAt="2026-09-20T00:00:00.000Z", updatedAt="2026-09-20T00:00:00.000Z")
+    # __GROUP_MUTE_SYNC_2026_09_24__ optional muted / mutedAt: later mutedAt wins.
+    g_muted = dict(g_local, muted=True, mutedAt="2026-09-12T00:00:00.000Z")
+    g_unmuted_later = dict(g_local, muted=False, mutedAt="2026-09-14T00:00:00.000Z")
+    g_unmuted_earlier = dict(g_local, muted=False, mutedAt="2026-09-11T00:00:00.000Z")
+    g_muted_legacy = dict(g_local, muted=True)
     groups = []
     for name, lo, re in [
         ("higher_epoch_wins_membership_later_nameAt_wins_keys_union", g_local, g_remote),
@@ -532,6 +552,11 @@ def merge_vectors():
         ("untimestamped_legacy_leave_is_sticky_without_a_join", g_left_legacy, g_remote),
         ("leave_at_the_join_millisecond_counts", g_left_same_ms, g_joined),
         ("stale_leave_is_normalised_on_insert", None, dict(g_joined, left=True, leftAt="2026-09-15T00:00:00.000Z")),
+        ("mute_later_wins", g_unmuted_earlier, g_muted),
+        ("unmute_later_wins", g_muted, g_unmuted_later),
+        ("peer_without_mute_fields_keeps_the_mute", g_muted, g_remote),
+        ("timestamped_unmute_beats_untimestamped_mute", g_muted_legacy, g_unmuted_earlier),
+        ("untimestamped_mute_gap_fills", g_local, g_muted_legacy),
     ]:
         merged = R.merge_group(lo, re)
         if lo is not None:
@@ -540,7 +565,8 @@ def merge_vectors():
         groups.append({"name": name, "local": lo, "remote": re, "merged": merged, "canonical": R.cjson(merged)})
     # Associativity (three devices, any meeting order): leave@15 on A, rejoin@20 on C, leave@27 on B
     # must end LEFT@27 whatever the order (an "earliest leftAt" rule loses B's leave when A meets B first).
-    trio = [g_left, g_joined, g_left_later, g_left_legacy, g_left_after_rejoin, g_remote]
+    trio = [g_left, g_joined, g_left_later, g_left_legacy, g_left_after_rejoin, g_remote,
+            g_muted, g_unmuted_later, g_muted_legacy]
     for x in trio:
         for y in trio:
             for z in trio:
@@ -548,6 +574,34 @@ def merge_vectors():
                 r = R.cjson(R.merge_group(x, R.merge_group(y, z)))
                 assert l == r, "group merge is not associative"
     assert R.merge_group(R.merge_group(g_left, g_left_later), g_joined)["leftAt"] == "2026-09-27T00:00:00.000Z"
+
+    # __BLOCK_MUTE_RECORDS_2026_09_24__ record parity (parse -> write back): every implementation keeps
+    # an unblock / unmute WITH its timestamp and ignores fields it does not know (old peers too).
+    bob_urlsafe = BOB.replace("+", "-").replace("/", "_").rstrip("=")
+    rec_contacts = [
+        {"name": "unblock_is_kept_with_its_timestamp",
+         "wire": {"publicKey": BOB, "blocked": False, "blockedAt": "2026-09-24T10:00:00.000Z"}},
+        {"name": "block_with_timestamp",
+         "wire": {"publicKey": BOB, "alias": "Bob", "aliasAt": "2026-09-01T00:00:00.000Z",
+                  "blocked": True, "blockedAt": "2026-09-24T09:00:00.000Z"}},
+        {"name": "urlsafe_unpadded_key_is_canonicalised",
+         "wire": {"publicKey": bob_urlsafe, "blocked": True, "blockedAt": "2026-09-24T09:00:00.000Z"}},
+        {"name": "unknown_fields_are_ignored",
+         "wire": {"publicKey": BOB, "blocked": False, "blockedAt": "2026-09-24T10:00:00.000Z",
+                  "blockedBy": "future", "reason": "spam"}},
+    ]
+    for c in rec_contacts:
+        c["json"] = R.contact_record(c["wire"])
+    rec_groups = [
+        {"name": "mute_fields_round_trip", "wire": dict(g_local, muted=True, mutedAt="2026-09-24T08:00:00.000Z")},
+        {"name": "unmute_is_kept_with_its_timestamp", "wire": dict(g_local, muted=False, mutedAt="2026-09-24T09:00:00.000Z")},
+        {"name": "old_peer_without_mute_fields", "wire": dict(g_local)},
+        {"name": "unknown_fields_are_ignored", "wire": dict(g_local, muted=True, mutedAt="2026-09-24T08:00:00.000Z",
+                                                            mutedUntil="2026-10-01T00:00:00.000Z", colour="red")},
+    ]
+    for g in rec_groups:
+        g["canonical"] = R.cjson(R.group_record(g["wire"]))
+    records = {"contacts": rec_contacts, "groups": rec_groups}
 
     a, b, c = (device(DK_A), device(DK_B), device(DK_C))
     local_dev = {"linked": {b["deviceId"]: {"deviceId": b["deviceId"], "dk": b["pub"], "name": "Mac", "platform": "desktop",
@@ -581,14 +635,16 @@ def merge_vectors():
                        "failed only if neither side has better; read = OR; edited = later 'at' wins (an edit with 'at' beats one "
                        "without, ties by UTF-8 bytes of canonical JSON); deleted = sticky true and clears text/edited/reactions; "
                        "reactions = union. Contacts: per field (alias/blocked/verified) the later *At wins; if either side lacks "
-                       "a timestamp, gap-fill only. Profile: later updatedAt wins. Read state: max. Groups (design §8.4): "
+                       "a timestamp, gap-fill only (a local side with neither value nor timestamp adopts the remote value AND its "
+                       "timestamp, even blocked:false: an unblock is a timestamped fact). Profile: later updatedAt wins. Read state: max. Groups (design §8.4): "
                        "members/admins = the higher epoch as a whole, the union at equal epoch (absent epoch = 0), epochAt "
                        "follows; name (+ descriptive extras description/type/creator/avatarEmoji/pinned*) = later nameAt; "
                        "avatar = later avatarAt (a timestamped value beats an untimestamped one, ties by canonical-JSON "
                        "bytes); keys = union by (kind, version), never dropped, sorted by (kind, version); joinedAt = max; "
                        "left: a leave counts only if not older than joinedAt (timestamped leftAt >= joinedAt; an "
                        "untimestamped legacy leave only while no join is known), left = any leave that counts, "
-                       "leftAt = the latest such leave (associative); updatedAt = max. Member/admin lists are sorted unique (UTF-8 order). 'canonical' "
+                       "leftAt = the latest such leave (associative); muted (optional) = later mutedAt, a timestamped value beats an "
+                       "untimestamped one, ties by canonical-JSON bytes; updatedAt = max. Member/admin lists are sorted unique (UTF-8 order). 'canonical' "
                        "is the canonical JSON of the merged group (every field present, lists sorted).",
         "messages": cases,
         "contacts": contacts,
@@ -596,6 +652,7 @@ def merge_vectors():
         "readState": read_state,
         "groups": groups,
         "devices": devices,
+        "records": records,
     }
 
 

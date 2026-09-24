@@ -132,8 +132,13 @@ class CallScreenModel(
                         it.copy(
                             phase = Phase.ENDED,
                             endedAtMs = clock(),
-                            endedKey = if (d.refusal == CallRefusal.BLOCKED) catalogKey("call.error.blocked") else catalogKey("call.ended.network"),
-                            problem = if (d.refusal == CallRefusal.BLOCKED) null else d.why,
+                            endedKey = when (d.refusal) {
+                                CallRefusal.BLOCKED -> catalogKey("call.error.blocked")
+                                // __BLOCKED_BY_PEER_2026_09_24__ the peer blocks us: nothing was sent.
+                                CallRefusal.UNAVAILABLE -> catalogKey("call.error.unavailable")
+                                else -> catalogKey("call.ended.network")
+                            },
+                            problem = if (d.refusal == CallRefusal.BLOCKED || d.refusal == CallRefusal.UNAVAILABLE) null else d.why,
                         )
                     }
                 }

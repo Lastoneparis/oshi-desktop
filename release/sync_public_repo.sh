@@ -50,20 +50,25 @@ echo "== 2/6 shared Android sources the desktop compiles (see build.gradle.kts i
 J="$SRC/OSHI-Android/app/src/main/java/com/oshi/messenger"
 A="$PUB/shared/OSHI-Android/app/src"
 M="$A/main/java/com/oshi/messenger"
-mkdir -p "$M/network/v2/devsync" "$M/network/encryption" "$M/service" "$A/test/resources" "$A/main/assets"
+mkdir -p "$M/network/v2/devsync" "$M/network/encryption" "$M/service/diag" "$A/test/resources" "$A/main/assets"
 cp "$J"/network/v2/{OSHICryptoV2,OSHICryptoV2Streaming,OSHIRatchetV2,V2Session,V2FileKeyMessage,V2RetryBudget}.kt "$M/network/v2/"
 cp "$J"/network/v2/devsync/*.kt "$M/network/v2/devsync/"
 cp "$J"/network/encryption/{PostQuantumKEM,RatchetSecurityMode}.kt "$M/network/encryption/"
 cp "$J"/service/{LlamaCpp,CallRatingPolicy,VideoReorderReassembler,VideoRateController}.kt "$M/service/"
+cp "$J"/service/diag/CallFileLogger.kt "$M/service/diag/"
 # Read by parity tests only, never compiled (they import android.* — the CI positive control).
 cp "$J"/network/v2/V2KeysClient.kt "$M/network/v2/"
 cp "$J"/service/LocalLLMManager.kt "$M/service/"
 cp "$SRC"/OSHI-Android/app/src/test/resources/*.json "$A/test/resources/"
+# OSHILOG1 vectors + redaction fixtures. The .log inputs are gitignored in the monorepo: copy from a
+# checkout that has them.
+rsync -a --delete "$SRC/OSHI-Android/app/src/test/resources/call_log" "$A/test/resources/"
 # GIF & sticker pack (byte-identical to iOS) — bundled into the installer on purpose.
 rsync -a --delete "$SRC/OSHI-Android/app/src/main/assets/GifPack" "$SRC/OSHI-Android/app/src/main/assets/StickerPack" "$A/main/assets/"
 if grep -l '^import android\.' "$M"/network/v2/{OSHICryptoV2,OSHICryptoV2Streaming,OSHIRatchetV2,V2Session,V2FileKeyMessage,V2RetryBudget}.kt \
      "$M"/network/v2/devsync/*.kt "$M"/network/encryption/{PostQuantumKEM,RatchetSecurityMode}.kt \
-     "$M"/service/{LlamaCpp,CallRatingPolicy,VideoReorderReassembler,VideoRateController}.kt; then
+     "$M"/service/{LlamaCpp,CallRatingPolicy,VideoReorderReassembler,VideoRateController}.kt \
+     "$M"/service/diag/CallFileLogger.kt; then
   echo "ABORT: android.* import in a shared source the desktop compiles" >&2; exit 1; fi
 
 echo "== 3/6 test fixtures + vendored Opus (Concentus) SOURCE"

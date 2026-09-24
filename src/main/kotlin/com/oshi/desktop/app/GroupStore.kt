@@ -80,6 +80,40 @@ class GroupStore(
         if (if (isBlocked) blocked.add(gid) else blocked.remove(gid)) persist(map)
     }
 
+    /**
+     * __GROUP_MUTE_SYNC_2026_09_24__ When this account last CHANGED a group's mute (ms), for
+     * own-device sync (devsync `GROUPS.muted/mutedAt`, later wins). Kept beside the
+     * definitions like `muted` itself; null = never toggled here (legacy: exported
+     * untimestamped when muted, not at all when not).
+     */
+    private var mutedAt: MutableMap<String, Long> = mutableMapOf()
+
+    @Synchronized
+    fun mutedAt(groupId: String): Long? { load(); return mutedAt[GroupIdentity.canonicalGroupId(groupId)] }
+
+    /**
+     * Mute / unmute. A LOCAL change ([synced] false) is stamped max([atMs], previous + 1) and
+     * only when the value changes; a SYNCED value keeps the merged timestamp as-is.
+     */
+    @Synchronized
+    fun setMuted(groupId: String, muted: Boolean, atMs: Long?, synced: Boolean = false): GroupDefinition? {
+        val map = load()
+        val gid = GroupIdentity.canonicalGroupId(groupId)
+        val g = map[gid] ?: return null
+        val prev = mutedAt[gid]
+        if (synced) {
+            if (g.isMuted == muted && (atMs == null || atMs == prev)) return g
+            atMs?.let { mutedAt[gid] = it }
+        } else {
+            if (g.isMuted == muted) return g
+            mutedAt[gid] = maxOf(atMs ?: System.currentTimeMillis(), (prev ?: Long.MIN_VALUE) + 1)
+        }
+        val updated = g.copy(isMuted = muted)
+        map[gid] = updated
+        persist(map)
+        return updated
+    }
+
     /** Forget a group entirely — what leaving one does locally. */
     @Synchronized
     fun delete(groupId: String): Boolean {
@@ -115,6 +149,7 @@ class GroupStore(
             // definitions rather than inside them.
             val muted = o.optJSONArray("muted")?.let { m -> (0 until m.length()).map { m.optString(it) }.toSet() }.orEmpty()
             blocked = o.optJSONArray("blocked")?.let { b -> (0 until b.length()).map { b.optString(it) }.toMutableSet() } ?: mutableSetOf()
+            mutedAt = o.optJSONObject("mutedAt")?.let { m -> m.keys().asSequence().associateWith { m.optLong(it) }.toMutableMap() } ?: mutableMapOf()
             for (i in 0 until arr.length()) {
                 val body = arr.optString(i, "")
                 if (body.isEmpty()) continue
@@ -145,7 +180,8 @@ class GroupStore(
         val muted = JSONArray()
         for ((gid, g) in map) if (g.isMuted) muted.put(gid)
         val json = JSONObject().put("v", 1).put("groups", arr).put("muted", muted)
-            .put("blocked", JSONArray(blocked.sorted())).toString()
+            .put("blocked", JSONArray(blocked.sorted()))
+            .put("mutedAt", JSONObject(mutedAt.toSortedMap() as Map<*, *>)).toString()
         SealedJsonFile.write(file, atRestKey, LocalDataKeys.GROUPS, json) { back ->
             JSONObject(back).getJSONArray("groups").length() == map.size
         }

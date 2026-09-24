@@ -217,6 +217,13 @@ enum class CallRefusal {
     /** The peer is blocked. Nothing was sent back. See [BlockPolicy.incomingCall]. */
     BLOCKED,
 
+    /**
+     * __BLOCKED_BY_PEER_2026_09_24__ outgoing only: the peer told us (🚫BLOCKED🚫) that it
+     * blocks us. Not dialled — no offer, no VoIP push — and shown as "Contact unavailable".
+     * See [com.oshi.desktop.block.BlockedByPeerStore].
+     */
+    UNAVAILABLE,
+
     /** We are already in a call. See GLARE for why this is not always the answer. */
     BUSY,
 
@@ -374,6 +381,19 @@ class CallStateMachine(
     var state: CallState = CallState.IDLE
         private set
 
+    /**
+     * __BLOCKED_BY_PEER_2026_09_24__ "did this peer tell us it blocks us?" — consulted by
+     * [startCall] only. Default: nobody did.
+     */
+    @Volatile var isBlockedBy: (String) -> Boolean = { false }
+
+    /**
+     * __CALL_LOG_AT_REST_2026_09_23__ Observer for the sealed call log's
+     * `🔄 STATE CHANGE: a → b` line (iOS `callState.didSet`). Called on the driving
+     * thread, after the transition; must not call back into the machine.
+     */
+    var onStateChange: ((from: CallState, to: CallState) -> Unit)? = null
+
     /** The peer of the current call, or null. */
     var peer: String? = null
         private set
@@ -450,6 +470,7 @@ class CallStateMachine(
         if (store != null && BlockPolicy.outgoingCall(store, peerAddress) == BlockPolicy.Outbound.REFUSE_BLOCKED) {
             return CallDecision(state, refusal = CallRefusal.BLOCKED)
         }
+        if (isBlockedBy(peerAddress)) return CallDecision(state, refusal = CallRefusal.UNAVAILABLE)
 
         peer = peerAddress
         callId = newCallId
@@ -884,8 +905,10 @@ class CallStateMachine(
     }
 
     private fun enter(next: CallState, nowMs: Long) {
+        val previous = state
         state = next
         stateSinceMs = nowMs
+        if (previous != next) onStateChange?.invoke(previous, next)
     }
 
     private fun resetCall() {

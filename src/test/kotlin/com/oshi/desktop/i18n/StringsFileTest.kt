@@ -186,7 +186,11 @@ class StringsFileTest {
         // 4012 → 4046 on 2026-09-23: __GROUP_E2E_V2_2026_09_23__ re-extraction for
         // `group.member_must_update` (GROUP_E2E_V2_SPEC §6), which also brought in the other keys
         // the iOS source gained since the last extraction.
-        assertEquals("en Localizable key count", 4046, en.localizable.size)
+        // 4046 → 4053 on 2026-09-24: re-extraction after the iOS map-app preference
+        // (`map_open_with_title`, rewritten `map_open_preference`) and the call-diagnostics /
+        // report strings landed in all 34 languages.
+        // 4053 → 4054 on 2026-09-24: `call.error.unavailable` (__BLOCKED_BY_PEER_2026_09_24__).
+        assertEquals("en Localizable key count", 4054, en.localizable.size)
         assertEquals("en InfoPlist key count", 16, en.infoPlist.size)
         assertEquals("Messages", en.localizable["tab.messages"])
         // Spot-check a value with an escape and one with a bare percent.
