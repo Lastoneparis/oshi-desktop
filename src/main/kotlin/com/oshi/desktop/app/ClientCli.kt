@@ -937,6 +937,7 @@ private fun callLog(client: OshiClient, out: (String) -> Unit) {
                 "frames accepted/refused=${media.framesAccepted}/${media.framesRefused}, " +
                 "failures=${media.mediaFailures}",
         )
+        out("   media debug: ${lane.mediaDebug()}")
     }
 
 private fun lora(client: OshiClient, rest: String, out: (String) -> Unit) {

@@ -233,6 +233,29 @@ class ChatShellModelTest {
         assertEquals(1, notifications.get())
     }
 
+    /** __BLOCKED_NOTIF_2026_09_23__ a blocked person never notifies — inside a group either. */
+    @Test
+    fun `a blocked sender in a group raises no notification, a friend in the same group does`() {
+        val alice = fx.client("alice")
+        val bob = fx.client("bob")
+        val carol = fx.client("carol")
+        val notifications = AtomicInteger()
+        val m = ChatShellModel(alice, direct, notifications::incrementAndGet)
+            .also { models += it; it.attach() }
+        alice.block(bob.address)
+        val group = "11111111-2222-4333-8444-555555555555"
+
+        m.onInbound(inbound(alice.address, group, "g1", "from bob").copy(senderAddress = bob.address))
+        assertEquals(0, notifications.get())
+
+        m.onInbound(inbound(alice.address, group, "g2", "from carol").copy(senderAddress = carol.address))
+        assertEquals(1, notifications.get())
+
+        alice.unblock(bob.address)
+        m.onInbound(inbound(alice.address, group, "g3", "bob again").copy(senderAddress = bob.address))
+        assertEquals(2, notifications.get())
+    }
+
     /**
      * PARITY.md row 0.21: a blocked peer is WITHHELD from the conversation list, never
      * deleted. `OshiClient` exposes both readers and only one of them applies the block;

@@ -469,9 +469,14 @@ class CallMediaLaneTest {
         assertTrue(b.lane.media!!.socket.remoteCandidates().none { it.ip == "198.51.100.7" })
     }
 
-    /** Candidates that arrive with no media leg open are dropped, not buffered. */
+    /**
+     * Candidates that arrive before the media leg exists are KEPT for this call and applied
+     * when it opens. They used to be dropped, and a real iPhone (2026-09-24) sends its set
+     * once, before the desktop's leg is open: "candidates received/ignored=0/5", no direct
+     * path, CONNECTION_LOST.
+     */
     @Test
-    fun candidatesWithNoLiveLegAreDroppedAndCounted() {
+    fun candidatesBeforeTheLegOpensAreBufferedAndAppliedOnAnswer() {
         val a = Endpoint()
         val b = Endpoint()
 
@@ -499,9 +504,15 @@ class CallMediaLaneTest {
         )
 
         b.lane.pollOnce(t0 + 20)
-        assertEquals(1, b.lane.candidatesIgnored)
+        assertEquals("kept, not dropped", 0, b.lane.candidatesIgnored)
         assertEquals(0, b.lane.candidatesReceived)
         assertNull(b.lane.media)
+
+        assertEquals(CallRefusal.NONE, b.lane.answer(t0 + 30))
+        assertNotNull(b.lane.media)
+        assertEquals("the buffered candidate reached the leg", 1, b.lane.candidatesReceived)
+        assertEquals(0, b.lane.candidatesIgnored)
+        b.lane.hangUp(nowMs = t0 + 40)
     }
 
     // ============================================================== teardown

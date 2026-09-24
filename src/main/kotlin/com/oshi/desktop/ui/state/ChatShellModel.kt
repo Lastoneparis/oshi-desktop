@@ -1202,7 +1202,10 @@ class ChatShellModel(
             if (unseen && mentionsMe) mentionedYou.add(m.conversationId)
             // __GROUP_PARITY_2026_09_23__ a muted group still counts unread, it just stays quiet.
             shouldNotify = unseen && (mentionsMe || !client.isGroupMuted(m.conversationId)) &&
-                !client.isGroupBlocked(m.conversationId)
+                !client.isGroupBlocked(m.conversationId) &&
+                // __BLOCKED_NOTIF_2026_09_23__ a blocked person stays silent inside a group
+                // too. `senderAddress` is the authenticated envelope sender, never a name.
+                !com.oshi.desktop.block.BlockPolicy.isBlocked(client.contacts, m.senderAddress)
         }
         publish()
         // Deliberately after durable storage (which OshiClient completed before this

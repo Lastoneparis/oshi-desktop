@@ -523,12 +523,19 @@ dependencies {
 
     // PARITY.md row 2.1. OPT-IN — see the WEBRTC block above for the whole justification
     // and for why the SHIPPING media path needs none of this.
+    //
+    // __CALL_APM_2026_09_23__ ALWAYS ON, for ONE class: `dev.onvoid.webrtc.media.audio.
+    // AudioProcessing` — WebRTC's audio-processing module (AEC3 echo canceller, noise
+    // suppression, AGC2), used by `call/media/EchoControl.kt` on the shipping PCM path. No
+    // WebRTC transport, SDP or codec is used: the `call/webrtc/**` sources stay excluded
+    // unless -PwithWebRtc=true. Why: the desktop had NO echo control, and a real iPhone
+    // call (2026-09-23) heard its own voice back plus the Mac's mic hiss; the iPhone uses
+    // Apple's voice processing (`VoiceCallManager.swift:9645`). Where no native exists
+    // (windows-aarch64), EchoControl logs it and the call keeps the raw path.
     val nativeClassifier = webrtcNativeClassifier
-    if (withWebRtc) {
-        implementation("dev.onvoid.webrtc:webrtc-java:$webrtcVersion")
-        if (nativeClassifier != null) {
-            implementation("dev.onvoid.webrtc:webrtc-java:$webrtcVersion:$nativeClassifier")
-        }
+    implementation("dev.onvoid.webrtc:webrtc-java:$webrtcVersion")
+    if (nativeClassifier != null) {
+        implementation("dev.onvoid.webrtc:webrtc-java:$webrtcVersion:$nativeClassifier")
     }
     if (withWebRtc && nativeClassifier == null) {
         logger.warn(

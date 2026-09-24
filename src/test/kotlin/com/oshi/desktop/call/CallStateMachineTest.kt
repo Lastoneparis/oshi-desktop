@@ -401,6 +401,30 @@ class CallStateMachineTest {
         assertEquals(CallState.RINGING, early.state)
     }
 
+    /**
+     * iOS's CallKit Decline (lock screen / banner) sends `callEnd`, not `callDecline`
+     * (`VoiceCallManager.swift:4982-5002`). A `callEnd` from the callee while our outgoing
+     * call still RINGS is therefore a decline — measured with a real iPhone, 2026-09-23.
+     */
+    @Test
+    fun `a callEnd from the callee while ringing outbound is recorded as declined`() {
+        val m = machine()
+        m.startCall(peer, t0, newCallId = callId)
+        val d = m.onPacket(peer, packet(CallPacket.Type.CALL_END, t0 + 8_000), t0 + 8_000, callId)
+        assertEquals(CallState.ENDED, d.state)
+        assertEquals(CallEndReason.DECLINED, d.actions.filterIsInstance<CallAction.Log>().single().reason)
+    }
+
+    /** ...but a callEnd after the call connected stays a hang-up. */
+    @Test
+    fun `a callEnd after connecting is still a hang-up, not a decline`() {
+        val m = machine()
+        m.startCall(peer, t0, newCallId = callId)
+        m.onPacket(peer, packet(CallPacket.Type.CALL_ACCEPT, t0 + 6_000), t0 + 6_000, callId)
+        val d = m.onPacket(peer, packet(CallPacket.Type.CALL_END, t0 + 30_000), t0 + 30_000, callId)
+        assertEquals(CallEndReason.HUNG_UP, d.actions.filterIsInstance<CallAction.Log>().single().reason)
+    }
+
     /** A terminal packet naming another call must never end this one. */
     @Test
     fun `a decline naming a different callId is refused as foreign`() {
@@ -456,6 +480,43 @@ class CallStateMachineTest {
         val s = sends(d).single()
         assertEquals(CallPacket.Type.CALL_DECLINE, s.type)
         assertEquals(other, s.peer)
+    }
+
+    /**
+     * Real iPhone, 2026-09-24: the iOS app died mid-call and the user redialled. The
+     * desktop, still IN_CALL on the dead call, declined the redial as BUSY and the user
+     * saw "rejected". A new call from the SAME peer replaces the stale one: no decline,
+     * the old call is logged once as CONNECTION_LOST, and the new one rings.
+     */
+    @Test
+    fun `a new call from the same peer replaces the stale call instead of being declined busy`() {
+        val m = machine()
+        m.onPacket(peer, offerPacket(), t0)
+        m.accept(t0 + 1_000)
+        assertEquals(CallState.IN_CALL, m.state)
+
+        val d = m.onPacket(peer, offerPacket(id = "REDIAL-CALL-ID", atMs = t0 + 20_000), t0 + 20_000)
+        assertEquals(CallRefusal.NONE, d.refusal)
+        assertTrue("no decline goes to the redialling peer", sends(d).none { it.type == CallPacket.Type.CALL_DECLINE })
+        assertTrue("the stale leg is torn down", d.actions.contains(CallAction.StopMedia))
+        assertEquals(CallEndReason.CONNECTION_LOST, d.actions.filterIsInstance<CallAction.Log>().single().reason)
+        assertEquals(CallState.RINGING, d.state)
+        assertEquals("REDIAL-CALL-ID", m.callId)
+    }
+
+    @Test
+    fun `a same-peer redial after the call ended rings without logging the old call twice`() {
+        val m = machine()
+        m.onPacket(peer, offerPacket(), t0)
+        m.accept(t0 + 1_000)
+        m.hangUp(CallEndReason.CONNECTION_LOST, t0 + 21_000)
+        assertEquals(CallState.ENDED, m.state)
+
+        val d = m.onPacket(peer, offerPacket(id = "REDIAL-CALL-ID", atMs = t0 + 22_000), t0 + 22_000)
+        assertEquals(CallRefusal.NONE, d.refusal)
+        assertTrue(sends(d).none { it.type == CallPacket.Type.CALL_DECLINE })
+        assertTrue("the ended call was already logged", d.actions.filterIsInstance<CallAction.Log>().isEmpty())
+        assertEquals(CallState.RINGING, d.state)
     }
 
     @Test

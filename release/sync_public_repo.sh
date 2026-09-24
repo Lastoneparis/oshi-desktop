@@ -58,7 +58,7 @@ cp "$J"/service/{LlamaCpp,CallRatingPolicy}.kt "$M/service/"
 cp "$SRC"/OSHI-Android/app/src/test/resources/*.json "$A/test/resources/"
 # GIF & sticker pack (byte-identical to iOS) — bundled into the installer on purpose.
 rsync -a --delete "$SRC/OSHI-Android/app/src/main/assets/GifPack" "$SRC/OSHI-Android/app/src/main/assets/StickerPack" "$A/main/assets/"
-if grep -l '^import android\.' "$M"/network/v2/*.kt "$M"/network/v2/devsync/*.kt \
+if grep -l '^import android\.' "$M"/network/v2/{OSHICryptoV2,OSHICryptoV2Streaming,OSHIRatchetV2,V2Session,V2FileKeyMessage,V2RetryBudget}.kt "$M"/network/v2/devsync/*.kt \
      "$M"/network/encryption/{PostQuantumKEM,RatchetSecurityMode}.kt "$M"/service/{LlamaCpp,CallRatingPolicy}.kt; then
   echo "ABORT: android.* import in a shared source the desktop compiles" >&2; exit 1; fi
 

@@ -184,8 +184,12 @@ fun runDesktopUi(client: OshiClient, startHidden: Boolean = false) {
         },
         // __CALL_PARITY_2026_09_23__ missed-call notification when no OSHI window is active,
         // and the machine held awake for exactly as long as a call is connected.
-        onMissedCall = { _, _ ->
-            if (java.awt.KeyboardFocusManager.getCurrentKeyboardFocusManager().activeWindow == null) {
+        onMissedCall = { peer, _ ->
+            // __BLOCKED_NOTIF_2026_09_23__ never a notification for a blocked person,
+            // whatever path produced the missed call (the state machine drops a blocked
+            // ring, this is the belt to that).
+            if (!com.oshi.desktop.block.BlockPolicy.isBlocked(client.contacts, peer) &&
+                java.awt.KeyboardFocusManager.getCurrentKeyboardFocusManager().activeWindow == null) {
                 notifier.notifyMissedCall(dt("desktop.call.missed.notification"))
             }
         },

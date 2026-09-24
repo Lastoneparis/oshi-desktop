@@ -295,6 +295,16 @@ class CallLane(
         )
     }
 
+    /** Transport-level counters for a live call, for the CLI's /calls (diagnostics only). */
+    fun mediaDebug(): String {
+        val l = leg ?: return "no media leg"
+        val s = l.socket
+        return "socket rx=${s.packetsReceived.get()} dropped=${s.packetsDropped.get()} " +
+            "rxErr=${s.receiveErrors.get()} tx=${s.framesSent.get()} pings=${s.pingsSent.get()}/" +
+            "${s.pingsAnswered.get()}/${s.pongsCorrelated.get()} · selected=${l.selected} · " +
+            "turn=${l.turnTransport} · ${l.carrierStats()}"
+    }
+
     /** Sealed signals that did not open. See WHO SENT IT — never zero silently. */
     @Volatile var unopenable: Int = 0
         private set
@@ -332,6 +342,10 @@ class CallLane(
      * that failure shipping on both phones ("rings back, no audio").
      */
     @Volatile var candidatesIgnored: Int = 0
+
+    /** Remote candidates that arrived before the media leg finished opening. */
+    private val pendingCandidates = mutableListOf<IceCandidate>()
+    private var pendingCandidatesCallId: String? = null
         private set
 
     /**
@@ -657,6 +671,32 @@ class CallLane(
     private fun onIceCandidates(from: String, packet: CallPacket.Decoded, envelopeCallId: String?) {
         val live = leg
         if (live == null || live.isClosed) {
+            // __CANDIDATE_BUFFER_2026_09_24__ The leg is not open YET. Opening it now loads
+            // the echo canceller's native library and fetches TURN credentials and a relay
+            // token before `leg` is assigned, and a phone sends its candidates exactly
+            // once, right after the offer/accept — so they landed in that window and were
+            // dropped. Real iPhone, 2026-09-24: "candidates received/ignored=0/5", no
+            // direct path, call ended CONNECTION_LOST. Keep them for THIS call (same peer,
+            // same callId when one is given) and apply them the moment the leg opens.
+            val current = machine.peer
+            val id = machine.callId
+            if (current != null && id != null &&
+                BlockPolicy.normalizeKey(current) == BlockPolicy.normalizeKey(from) &&
+                (envelopeCallId == null || envelopeCallId == id)
+            ) {
+                val candidates = IceCandidateCodec.decode(packet.payload)
+                if (candidates.isNotEmpty()) {
+                    synchronized(mediaLock) {
+                        if (pendingCandidatesCallId != id) {
+                            pendingCandidates.clear()
+                            pendingCandidatesCallId = id
+                        }
+                        if (pendingCandidates.size < MAX_PENDING_CANDIDATES) pendingCandidates.addAll(candidates)
+                    }
+                    log("call: $id buffered ${candidates.size} remote candidates until the media leg opens")
+                    return
+                }
+            }
             candidatesIgnored++
             return
         }
@@ -857,9 +897,18 @@ class CallLane(
         }
 
         opened.audio?.muted = muted
-        synchronized(mediaLock) {
+        val buffered = synchronized(mediaLock) {
             leg = opened
             if (mediaProbeIntervalMs > 0) mediaTimer = startProbeTimer()
+            val b = if (pendingCandidatesCallId == action.callId) pendingCandidates.toList() else emptyList()
+            pendingCandidates.clear()
+            pendingCandidatesCallId = null
+            b
+        }
+        if (buffered.isNotEmpty()) {
+            val added = opened.addRemoteCandidates(buffered)
+            candidatesReceived += added
+            log("call: ${action.callId} applied $added of ${buffered.size} buffered remote candidates")
         }
         log(
             "call: connected to ${action.peer.take(12)}… with a media leg on UDP port " +
@@ -1079,6 +1128,9 @@ class CallLane(
          * touched; this watchdog is what makes the outcome survivable anyway.
          */
         const val MEDIA_PATH_TIMEOUT_MS = 20_000L
+
+        /** Upper bound on candidates held for a leg that is still opening. */
+        const val MAX_PENDING_CANDIDATES = 32
 
         /**
          * How long a processed signal stays remembered.

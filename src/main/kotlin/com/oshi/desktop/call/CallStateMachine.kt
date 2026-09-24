@@ -623,6 +623,26 @@ class CallStateMachine(
                 }
             }
 
+            // SAME PEER, NEW CALL: the peer cannot be in two calls with us, so a fresh
+            // offer from the person we are (still) connected to or ringing with means
+            // they abandoned the old one — their app restarted, crashed, or lost the
+            // call. Found with a real iPhone (2026-09-24): the iOS app died mid-call,
+            // the user redialled, and the desktop — still IN_CALL on the dead call —
+            // answered the redial with a BUSY decline, so the user saw "rejected".
+            // End the stale call locally (no callEnd: the peer has already dropped it)
+            // and ring the new one. Android's IncomingCallAdmission replaces a redial
+            // from the same caller the same way.
+            if (samePeer && !dialing) {
+                seenOffers[offer.callId] = nowMs
+                val actions = mutableListOf<CallAction>(CallAction.StopRinging)
+                if (state != CallState.ENDED) {
+                    finish(CallEndReason.CONNECTION_LOST, nowMs, actions, connected = state == CallState.IN_CALL)
+                }
+                resetCall()
+                ring(from, offer, packet.type.isVideo, nowMs, actions)
+                return CallDecision(state, actions, refusal = CallRefusal.NONE)
+            }
+
             // BUSY. iOS declines, Android sends nothing. We decline — see RACE 4.
             return CallDecision(
                 state,
@@ -750,8 +770,16 @@ class CallStateMachine(
         // It is recorded and never branched on, because Android discards it entirely
         // (`EnhancedCallManager.kt:2797-2800`) and a state machine that behaved
         // differently per reason would diverge from a peer that never sends one.
-        val reason = CallEndReason.fromWire(String(packet.payload, Charsets.UTF_8))
+        val wire = CallEndReason.fromWire(String(packet.payload, Charsets.UTF_8))
             ?: CallEndReason.HUNG_UP
+        // A `callEnd` from the CALLEE while our outgoing call is still RINGING is a refusal.
+        // iOS sends `callDecline` only from its in-app overlay; Decline on the CallKit
+        // screen (lock screen / banner) runs `endCall(reason: .hungUp)` and sends
+        // `callEnd` (`VoiceCallManager.swift:4982-5002`). Measured with a real iPhone on
+        // 2026-09-23: the history read "hung_up, not connected" for a decline.
+        val reason = if (isOutgoing && state == CallState.RINGING && wire == CallEndReason.HUNG_UP) {
+            CallEndReason.DECLINED
+        } else wire
         val wasConnected = state == CallState.IN_CALL
         val actions = mutableListOf<CallAction>(CallAction.StopRinging)
         finish(reason, nowMs, actions, connected = wasConnected)
