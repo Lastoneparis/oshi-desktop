@@ -27,6 +27,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.oshi.desktop.i18n.t
 import com.oshi.desktop.i18n.dt
+import com.oshi.desktop.pairing.ContactQr
 import com.oshi.desktop.ui.OshiTheme
 import com.oshi.desktop.ui.state.ContactRow
 import com.oshi.desktop.ui.state.Pane
@@ -79,6 +80,8 @@ fun MorePane(
     onPullNickname: () -> Unit = {},
     /** [ChatShellModel.pushNicknameToPhone]. */
     onPushNickname: () -> Unit = {},
+    /** __CALL_LOG_AT_REST_2026_09_23__ Pick a target, then [ChatShellModel.exportCallDiagnostics]. */
+    onExportCallDiagnostics: () -> Unit = {},
 ) {
     val known = state.contacts.filterNot { it.blocked }
     val blocked = state.contacts.filter { it.blocked }
@@ -125,6 +128,12 @@ fun MorePane(
                 Hairline()
                 // __DEVSYNC_DIRECT_2026_09_22__ Direct own-device sync.
                 SettingsRow("Linked devices", "Sync your history directly with your phone and other devices") { onShow(Pane.DEVICES) }
+                Hairline()
+                // __CALL_LOG_AT_REST_2026_09_23__ Same label and promise as the phones: a
+                // REDACTED copy of the sealed call log, saved where the person chooses.
+                SettingsRow(t("settings.calls.diaglog.title"), t("settings.calls.diaglog.subtitle")) {
+                    if (!state.busy) onExportCallDiagnostics()
+                }
             }
 
             Spacer(Modifier.height(OshiTheme.lg))
@@ -133,6 +142,7 @@ fun MorePane(
             // __DESKTOP_BACKGROUND_2026_09_23__ PARITY.md row 2.3: no push, so the process
             // has to be running — this is where the person decides it starts with the session.
             BackgroundCard()
+            NotificationPreviewCard()
 
             Spacer(Modifier.height(OshiTheme.lg))
 
@@ -249,6 +259,12 @@ private fun PersonRow(
     var verifying by remember(c.address) { mutableStateOf(false) }
     var safetyPayload by remember(c.address) { mutableStateOf("") }
     var safetyResult by remember(c.address) { mutableStateOf<Boolean?>(null) }
+    // __TAP_THE_FACE_2026_10_27__ Desktop parity for the reporter's N9. The phones
+    // now open a contact card carrying that person's QR; this window had the code
+    // only for OUR OWN address, on the pairing pane. Keyed by address like the rest
+    // of this row, so scrolling the list cannot leave one person's code open under
+    // another person's name.
+    var showCode by remember(c.address) { mutableStateOf(false) }
     Row(
         Modifier
             .fillMaxWidth()
@@ -332,9 +348,29 @@ private fun PersonRow(
                     TextAction(dt("desktop.safety.verify.action")) { verifying = true }
                 }
             }
+            // __TAP_THE_FACE_2026_10_27__ The same payload the phones encode
+            // (`ContactQr.deepLinkFor`), through the same encoder the pairing pane
+            // uses, so a code read here and a code read there add the identical
+            // contact. Drawn in this column rather than beside the actions: a QR
+            // competing for width with text is how the Peers header was starved to
+            // three characters the same day (__STATUS_TEXT_WAS_A_RIBBON_2026_10_27__).
+            if (showCode) {
+                Spacer(Modifier.height(OshiTheme.sm))
+                QrCode(ContactQr.deepLinkFor(c.address), 180.dp)
+                Spacer(Modifier.height(OshiTheme.xxs))
+                Text(
+                    dt("desktop.contact.code_hint"),
+                    style = OshiTheme.typography.bodySmall,
+                    color = Ink.soft,
+                )
+            }
         }
         Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(OshiTheme.xxs)) {
             TextAction(t("common.copy")) { onCopy(c.safetyNumber) }
+            // __TAP_THE_FACE_2026_10_27__
+            TextAction(if (showCode) dt("desktop.contact.hide_code") else dt("desktop.contact.show_code")) {
+                showCode = !showCode
+            }
             TextAction(if (c.blocked) t("contact.unblock_contact") else t("contact.block_contact"), onToggleBlock)
         }
     }
@@ -457,6 +493,16 @@ fun pickMessageExportTarget(): java.io.File? {
     return com.oshi.desktop.store.EncryptedMessageExport.withExtension(java.io.File(dir, name))
 }
 
+/** Save target for the redacted call diagnostics (`.txt`). Cancel returns null. */
+fun pickCallDiagnosticsTarget(): java.io.File? {
+    val dialog = java.awt.FileDialog(null as java.awt.Frame?, t("export.select_location"), java.awt.FileDialog.SAVE)
+    dialog.file = com.oshi.messenger.service.diag.CallFileLogger.EXPORT_FILE_NAME
+    dialog.isVisible = true
+    val name = dialog.file ?: return null
+    val dir = dialog.directory ?: return null
+    return java.io.File(dir, name)
+}
+
 fun pickMessageExportSource(): java.io.File? {
     val dialog = java.awt.FileDialog(null as java.awt.Frame?, t("import.select_file"), java.awt.FileDialog.LOAD)
     dialog.isMultipleMode = false
@@ -480,6 +526,48 @@ fun EmptyPaneNote(title: String, body: String) {
                 style = OshiTheme.typography.bodySmall,
                 color = Ink.soft,
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            )
+        }
+    }
+}
+
+/**
+ * __DESKTOP_PREVIEW_PARITY_2026_10_27__ The switch both phones already have, brought
+ * to Windows and Linux. OFF by default: with it off the notifier behaves exactly as
+ * before, saying only that an encrypted message arrived.
+ *
+ * The body text says plainly where the text ends up, because "show preview" does not
+ * convey that a desktop writes notifications to a history other software can read.
+ */
+@Composable
+private fun NotificationPreviewCard() {
+    val prefs = androidx.compose.runtime.remember {
+        com.oshi.desktop.store.NotificationPreferences(
+            java.io.File(com.oshi.desktop.store.DesktopPaths.dataDir,
+                         com.oshi.desktop.store.NotificationPreferences.FILE_NAME)
+        )
+    }
+    var preview by androidx.compose.runtime.remember {
+        androidx.compose.runtime.mutableStateOf(prefs.load().preview)
+    }
+    PaneCard {
+        Text(dt("desktop.notifications.title"), style = OshiTheme.typography.titleMedium, color = Ink.strong)
+        Spacer(Modifier.height(OshiTheme.xs))
+        Text(dt("desktop.notifications.body"), style = OshiTheme.typography.bodySmall, color = Ink.soft)
+        Spacer(Modifier.height(OshiTheme.md))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                dt("desktop.notifications.preview"),
+                style = OshiTheme.typography.bodyMedium,
+                color = Ink.strong,
+                modifier = Modifier.weight(1f),
+            )
+            androidx.compose.material3.Switch(
+                checked = preview,
+                onCheckedChange = { want ->
+                    prefs.save(com.oshi.desktop.store.NotificationPreferences.Values(preview = want))
+                    preview = prefs.load().preview
+                },
             )
         }
     }

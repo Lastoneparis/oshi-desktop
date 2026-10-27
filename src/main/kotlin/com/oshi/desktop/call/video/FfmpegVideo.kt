@@ -351,6 +351,12 @@ class CameraCapture(
     override val outW: Int = DEFAULT_WIDTH,
     override val outH: Int = DEFAULT_HEIGHT,
     val fps: Int = 30,
+    /**
+     * __VIDEO_NOTE_2026_09_24__ Centre-crop every camera frame to a square BEFORE scaling, so a
+     * round video note (outW == outH) is not squashed from the camera's 16:9 / 4:3. Default
+     * off: a call keeps exactly the pipeline it had.
+     */
+    private val cropSquare: Boolean = false,
 ) : VideoSource {
     private val fmtCtx: AVFormatContext
     private val decCtx: AVCodecContext
@@ -448,6 +454,13 @@ class CameraCapture(
                 if (avcodec.avcodec_receive_frame(decCtx, raw) < 0) return null
             } finally {
                 avcodec.av_packet_unref(pkt)
+            }
+            if (cropSquare && raw.width() != raw.height()) {
+                val rw = raw.width(); val rh = raw.height()
+                val d = kotlin.math.abs(rw - rh) / 2
+                if (rw > rh) { raw.crop_left(d.toLong()); raw.crop_right((rw - rh - d).toLong()) }
+                else { raw.crop_top(d.toLong()); raw.crop_bottom((rh - rw - d).toLong()) }
+                avutil.av_frame_apply_cropping(raw, avutil.AV_FRAME_CROP_UNALIGNED)
             }
             val w = raw.width(); val h = raw.height(); val f = raw.format()
             val y = yuv?.takeIf { it.matches(w, h, f) } ?: run {

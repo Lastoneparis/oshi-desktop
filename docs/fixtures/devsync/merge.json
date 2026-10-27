@@ -1,5 +1,5 @@
 {
-  "description": "Design §8. Merges are commutative and idempotent. Message: status = highest of pending<sent<delivered<read, failed only if neither side has better; read = OR; edited = later 'at' wins (an edit with 'at' beats one without, ties by UTF-8 bytes of canonical JSON); deleted = sticky true and clears text/edited/reactions; reactions = union. Contacts: per field (alias/blocked/verified) the later *At wins; if either side lacks a timestamp, gap-fill only. Profile: later updatedAt wins. Read state: max. Groups (design §8.4): members/admins = the higher epoch as a whole, the union at equal epoch (absent epoch = 0), epochAt follows; name (+ descriptive extras description/type/creator/avatarEmoji/pinned*) = later nameAt; avatar = later avatarAt (a timestamped value beats an untimestamped one, ties by canonical-JSON bytes); keys = union by (kind, version), never dropped, sorted by (kind, version); joinedAt = max; left: a leave counts only if not older than joinedAt (timestamped leftAt >= joinedAt; an untimestamped legacy leave only while no join is known), left = any leave that counts, leftAt = the latest such leave (associative); updatedAt = max. Member/admin lists are sorted unique (UTF-8 order). 'canonical' is the canonical JSON of the merged group (every field present, lists sorted).",
+  "description": "Design §8. Merges are commutative and idempotent. Message: status = highest of pending<sent<delivered<read, failed only if neither side has better; read = OR; edited = later 'at' wins (an edit with 'at' beats one without, ties by UTF-8 bytes of canonical JSON); deleted = sticky true and clears text/edited/reactions; reactions = union. Contacts: per field (alias/blocked/verified) the later *At wins; if either side lacks a timestamp, gap-fill only (a local side with neither value nor timestamp adopts the remote value AND its timestamp, even blocked:false: an unblock is a timestamped fact). Profile: later updatedAt wins. Read state: max. Groups (design §8.4): members/admins = the higher epoch as a whole, the union at equal epoch (absent epoch = 0), epochAt follows; name (+ descriptive extras description/type/creator/avatarEmoji/pinned*) = later nameAt; avatar = later avatarAt (a timestamped value beats an untimestamped one, ties by canonical-JSON bytes); keys = union by (kind, version), never dropped, sorted by (kind, version); joinedAt = max; left: a leave counts only if not older than joinedAt (timestamped leftAt >= joinedAt; an untimestamped legacy leave only while no join is known), left = any leave that counts, leftAt = the latest such leave (associative); muted (optional) = later mutedAt, a timestamped value beats an untimestamped one, ties by canonical-JSON bytes; updatedAt = max. Member/admin lists are sorted unique (UTF-8 order). 'canonical' is the canonical JSON of the merged group (every field present, lists sorted).",
   "messages": [
     {
       "name": "status_highest_wins",
@@ -541,6 +541,76 @@
       "merged": {
         "publicKey": "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
         "blocked": true
+      }
+    },
+    {
+      "name": "stale_block_does_not_undo_newer_unblock",
+      "local": {
+        "publicKey": "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "blocked": false,
+        "blockedAt": "2026-09-05T00:00:00.000Z"
+      },
+      "remote": {
+        "publicKey": "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "blocked": true,
+        "blockedAt": "2026-09-01T00:00:00.000Z"
+      },
+      "merged": {
+        "publicKey": "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "blocked": false,
+        "blockedAt": "2026-09-05T00:00:00.000Z"
+      }
+    },
+    {
+      "name": "stale_unblock_does_not_undo_newer_block",
+      "local": {
+        "publicKey": "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "blocked": true,
+        "blockedAt": "2026-09-05T00:00:00.000Z"
+      },
+      "remote": {
+        "publicKey": "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "blocked": false,
+        "blockedAt": "2026-09-01T00:00:00.000Z"
+      },
+      "merged": {
+        "publicKey": "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "blocked": true,
+        "blockedAt": "2026-09-05T00:00:00.000Z"
+      }
+    },
+    {
+      "name": "unblock_timestamp_reaches_a_device_that_never_blocked",
+      "local": {
+        "publicKey": "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE="
+      },
+      "remote": {
+        "publicKey": "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "blocked": false,
+        "blockedAt": "2026-09-05T00:00:00.000Z"
+      },
+      "merged": {
+        "publicKey": "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "blocked": false,
+        "blockedAt": "2026-09-05T00:00:00.000Z"
+      }
+    },
+    {
+      "name": "adopted_unblock_then_stale_block_stays_unblocked",
+      "local": {
+        "publicKey": "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "blocked": false,
+        "blockedAt": "2026-09-05T00:00:00.000Z"
+      },
+      "remote": {
+        "publicKey": "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "blocked": true,
+        "blockedAt": "2026-09-01T00:00:00.000Z"
+      },
+      "merged": {
+        "publicKey": "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "blocked": false,
+        "blockedAt": "2026-09-05T00:00:00.000Z"
       }
     }
   ],
@@ -1725,6 +1795,529 @@
         "joinedAt": "2026-09-20T00:00:00.000Z"
       },
       "canonical": "{\"admins\":[\"BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=\"],\"avatar\":null,\"creator\":\"BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=\",\"epoch\":3,\"epochAt\":\"2026-09-10T00:00:00.000Z\",\"groupId\":\"5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D\",\"joinedAt\":\"2026-09-20T00:00:00.000Z\",\"keys\":[{\"key\":\"a2V5LW9uZS0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0=\",\"kind\":\"legacy-aes\",\"version\":0},{\"key\":\"a2V5LXR3by0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0=\",\"kind\":\"v2-epoch\",\"version\":3}],\"left\":false,\"members\":[\"3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=\",\"BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=\"],\"name\":\"Team\",\"nameAt\":\"2026-09-10T00:00:00.000Z\",\"type\":\"collaborative\",\"updatedAt\":\"2026-09-20T00:00:00.000Z\"}"
+    },
+    {
+      "name": "mute_later_wins",
+      "local": {
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "name": "Team",
+        "nameAt": "2026-09-10T00:00:00.000Z",
+        "avatar": null,
+        "members": [
+          "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+          "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE="
+        ],
+        "admins": [
+          "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug="
+        ],
+        "epoch": 3,
+        "epochAt": "2026-09-10T00:00:00.000Z",
+        "left": false,
+        "keys": [
+          {
+            "kind": "legacy-aes",
+            "version": 0,
+            "key": "a2V5LW9uZS0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+          },
+          {
+            "kind": "v2-epoch",
+            "version": 3,
+            "key": "a2V5LXR3by0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+          }
+        ],
+        "updatedAt": "2026-09-10T00:00:00.000Z",
+        "type": "collaborative",
+        "creator": "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+        "muted": false,
+        "mutedAt": "2026-09-11T00:00:00.000Z"
+      },
+      "remote": {
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "name": "Team",
+        "nameAt": "2026-09-10T00:00:00.000Z",
+        "avatar": null,
+        "members": [
+          "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+          "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE="
+        ],
+        "admins": [
+          "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug="
+        ],
+        "epoch": 3,
+        "epochAt": "2026-09-10T00:00:00.000Z",
+        "left": false,
+        "keys": [
+          {
+            "kind": "legacy-aes",
+            "version": 0,
+            "key": "a2V5LW9uZS0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+          },
+          {
+            "kind": "v2-epoch",
+            "version": 3,
+            "key": "a2V5LXR3by0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+          }
+        ],
+        "updatedAt": "2026-09-10T00:00:00.000Z",
+        "type": "collaborative",
+        "creator": "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+        "muted": true,
+        "mutedAt": "2026-09-12T00:00:00.000Z"
+      },
+      "merged": {
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "members": [
+          "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+          "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug="
+        ],
+        "admins": [
+          "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug="
+        ],
+        "epoch": 3,
+        "epochAt": "2026-09-10T00:00:00.000Z",
+        "name": "Team",
+        "type": "collaborative",
+        "creator": "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+        "nameAt": "2026-09-10T00:00:00.000Z",
+        "avatar": null,
+        "keys": [
+          {
+            "kind": "legacy-aes",
+            "version": 0,
+            "key": "a2V5LW9uZS0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+          },
+          {
+            "kind": "v2-epoch",
+            "version": 3,
+            "key": "a2V5LXR3by0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+          }
+        ],
+        "left": false,
+        "muted": true,
+        "mutedAt": "2026-09-12T00:00:00.000Z",
+        "updatedAt": "2026-09-10T00:00:00.000Z"
+      },
+      "canonical": "{\"admins\":[\"BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=\"],\"avatar\":null,\"creator\":\"BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=\",\"epoch\":3,\"epochAt\":\"2026-09-10T00:00:00.000Z\",\"groupId\":\"5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D\",\"keys\":[{\"key\":\"a2V5LW9uZS0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0=\",\"kind\":\"legacy-aes\",\"version\":0},{\"key\":\"a2V5LXR3by0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0=\",\"kind\":\"v2-epoch\",\"version\":3}],\"left\":false,\"members\":[\"3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=\",\"BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=\"],\"muted\":true,\"mutedAt\":\"2026-09-12T00:00:00.000Z\",\"name\":\"Team\",\"nameAt\":\"2026-09-10T00:00:00.000Z\",\"type\":\"collaborative\",\"updatedAt\":\"2026-09-10T00:00:00.000Z\"}"
+    },
+    {
+      "name": "unmute_later_wins",
+      "local": {
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "name": "Team",
+        "nameAt": "2026-09-10T00:00:00.000Z",
+        "avatar": null,
+        "members": [
+          "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+          "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE="
+        ],
+        "admins": [
+          "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug="
+        ],
+        "epoch": 3,
+        "epochAt": "2026-09-10T00:00:00.000Z",
+        "left": false,
+        "keys": [
+          {
+            "kind": "legacy-aes",
+            "version": 0,
+            "key": "a2V5LW9uZS0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+          },
+          {
+            "kind": "v2-epoch",
+            "version": 3,
+            "key": "a2V5LXR3by0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+          }
+        ],
+        "updatedAt": "2026-09-10T00:00:00.000Z",
+        "type": "collaborative",
+        "creator": "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+        "muted": true,
+        "mutedAt": "2026-09-12T00:00:00.000Z"
+      },
+      "remote": {
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "name": "Team",
+        "nameAt": "2026-09-10T00:00:00.000Z",
+        "avatar": null,
+        "members": [
+          "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+          "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE="
+        ],
+        "admins": [
+          "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug="
+        ],
+        "epoch": 3,
+        "epochAt": "2026-09-10T00:00:00.000Z",
+        "left": false,
+        "keys": [
+          {
+            "kind": "legacy-aes",
+            "version": 0,
+            "key": "a2V5LW9uZS0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+          },
+          {
+            "kind": "v2-epoch",
+            "version": 3,
+            "key": "a2V5LXR3by0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+          }
+        ],
+        "updatedAt": "2026-09-10T00:00:00.000Z",
+        "type": "collaborative",
+        "creator": "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+        "muted": false,
+        "mutedAt": "2026-09-14T00:00:00.000Z"
+      },
+      "merged": {
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "members": [
+          "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+          "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug="
+        ],
+        "admins": [
+          "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug="
+        ],
+        "epoch": 3,
+        "epochAt": "2026-09-10T00:00:00.000Z",
+        "name": "Team",
+        "type": "collaborative",
+        "creator": "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+        "nameAt": "2026-09-10T00:00:00.000Z",
+        "avatar": null,
+        "keys": [
+          {
+            "kind": "legacy-aes",
+            "version": 0,
+            "key": "a2V5LW9uZS0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+          },
+          {
+            "kind": "v2-epoch",
+            "version": 3,
+            "key": "a2V5LXR3by0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+          }
+        ],
+        "left": false,
+        "muted": false,
+        "mutedAt": "2026-09-14T00:00:00.000Z",
+        "updatedAt": "2026-09-10T00:00:00.000Z"
+      },
+      "canonical": "{\"admins\":[\"BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=\"],\"avatar\":null,\"creator\":\"BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=\",\"epoch\":3,\"epochAt\":\"2026-09-10T00:00:00.000Z\",\"groupId\":\"5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D\",\"keys\":[{\"key\":\"a2V5LW9uZS0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0=\",\"kind\":\"legacy-aes\",\"version\":0},{\"key\":\"a2V5LXR3by0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0=\",\"kind\":\"v2-epoch\",\"version\":3}],\"left\":false,\"members\":[\"3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=\",\"BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=\"],\"muted\":false,\"mutedAt\":\"2026-09-14T00:00:00.000Z\",\"name\":\"Team\",\"nameAt\":\"2026-09-10T00:00:00.000Z\",\"type\":\"collaborative\",\"updatedAt\":\"2026-09-10T00:00:00.000Z\"}"
+    },
+    {
+      "name": "peer_without_mute_fields_keeps_the_mute",
+      "local": {
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "name": "Team",
+        "nameAt": "2026-09-10T00:00:00.000Z",
+        "avatar": null,
+        "members": [
+          "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+          "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE="
+        ],
+        "admins": [
+          "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug="
+        ],
+        "epoch": 3,
+        "epochAt": "2026-09-10T00:00:00.000Z",
+        "left": false,
+        "keys": [
+          {
+            "kind": "legacy-aes",
+            "version": 0,
+            "key": "a2V5LW9uZS0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+          },
+          {
+            "kind": "v2-epoch",
+            "version": 3,
+            "key": "a2V5LXR3by0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+          }
+        ],
+        "updatedAt": "2026-09-10T00:00:00.000Z",
+        "type": "collaborative",
+        "creator": "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+        "muted": true,
+        "mutedAt": "2026-09-12T00:00:00.000Z"
+      },
+      "remote": {
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "name": "Team (renamed)",
+        "nameAt": "2026-09-12T00:00:00.000Z",
+        "avatar": {
+          "sha256": "b20d8784037e4f8c458120e877b86aa04d2907ce0674a5d1013e04257e975241",
+          "size": 13,
+          "mime": "image/jpeg"
+        },
+        "avatarAt": "2026-09-11T00:00:00.000Z",
+        "members": [
+          "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+          "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+          "Ct5N3O9W1HIHoI5cGJ2S+Qm6q6YG6qu0JnL8R9cN4Qk="
+        ],
+        "admins": [
+          "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+          "Ct5N3O9W1HIHoI5cGJ2S+Qm6q6YG6qu0JnL8R9cN4Qk="
+        ],
+        "epoch": 4,
+        "epochAt": "2026-09-12T00:00:00.000Z",
+        "left": false,
+        "keys": [
+          {
+            "kind": "v2-epoch",
+            "version": 3,
+            "key": "a2V5LXR3by0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+          },
+          {
+            "kind": "v2-epoch",
+            "version": 4,
+            "key": "a2V5LXRocmVlLTMyLWJ5dGVzLS0tLS0tLS0tLS0tLS0="
+          }
+        ],
+        "updatedAt": "2026-09-12T00:00:00.000Z"
+      },
+      "merged": {
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "members": [
+          "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+          "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+          "Ct5N3O9W1HIHoI5cGJ2S+Qm6q6YG6qu0JnL8R9cN4Qk="
+        ],
+        "admins": [
+          "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+          "Ct5N3O9W1HIHoI5cGJ2S+Qm6q6YG6qu0JnL8R9cN4Qk="
+        ],
+        "epoch": 4,
+        "epochAt": "2026-09-12T00:00:00.000Z",
+        "name": "Team (renamed)",
+        "nameAt": "2026-09-12T00:00:00.000Z",
+        "avatar": {
+          "sha256": "b20d8784037e4f8c458120e877b86aa04d2907ce0674a5d1013e04257e975241",
+          "size": 13,
+          "mime": "image/jpeg"
+        },
+        "avatarAt": "2026-09-11T00:00:00.000Z",
+        "keys": [
+          {
+            "kind": "legacy-aes",
+            "version": 0,
+            "key": "a2V5LW9uZS0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+          },
+          {
+            "kind": "v2-epoch",
+            "version": 3,
+            "key": "a2V5LXR3by0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+          },
+          {
+            "kind": "v2-epoch",
+            "version": 4,
+            "key": "a2V5LXRocmVlLTMyLWJ5dGVzLS0tLS0tLS0tLS0tLS0="
+          }
+        ],
+        "left": false,
+        "muted": true,
+        "mutedAt": "2026-09-12T00:00:00.000Z",
+        "updatedAt": "2026-09-12T00:00:00.000Z"
+      },
+      "canonical": "{\"admins\":[\"BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=\",\"Ct5N3O9W1HIHoI5cGJ2S+Qm6q6YG6qu0JnL8R9cN4Qk=\"],\"avatar\":{\"mime\":\"image/jpeg\",\"sha256\":\"b20d8784037e4f8c458120e877b86aa04d2907ce0674a5d1013e04257e975241\",\"size\":13},\"avatarAt\":\"2026-09-11T00:00:00.000Z\",\"epoch\":4,\"epochAt\":\"2026-09-12T00:00:00.000Z\",\"groupId\":\"5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D\",\"keys\":[{\"key\":\"a2V5LW9uZS0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0=\",\"kind\":\"legacy-aes\",\"version\":0},{\"key\":\"a2V5LXR3by0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0=\",\"kind\":\"v2-epoch\",\"version\":3},{\"key\":\"a2V5LXRocmVlLTMyLWJ5dGVzLS0tLS0tLS0tLS0tLS0=\",\"kind\":\"v2-epoch\",\"version\":4}],\"left\":false,\"members\":[\"3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=\",\"BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=\",\"Ct5N3O9W1HIHoI5cGJ2S+Qm6q6YG6qu0JnL8R9cN4Qk=\"],\"muted\":true,\"mutedAt\":\"2026-09-12T00:00:00.000Z\",\"name\":\"Team (renamed)\",\"nameAt\":\"2026-09-12T00:00:00.000Z\",\"updatedAt\":\"2026-09-12T00:00:00.000Z\"}"
+    },
+    {
+      "name": "timestamped_unmute_beats_untimestamped_mute",
+      "local": {
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "name": "Team",
+        "nameAt": "2026-09-10T00:00:00.000Z",
+        "avatar": null,
+        "members": [
+          "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+          "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE="
+        ],
+        "admins": [
+          "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug="
+        ],
+        "epoch": 3,
+        "epochAt": "2026-09-10T00:00:00.000Z",
+        "left": false,
+        "keys": [
+          {
+            "kind": "legacy-aes",
+            "version": 0,
+            "key": "a2V5LW9uZS0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+          },
+          {
+            "kind": "v2-epoch",
+            "version": 3,
+            "key": "a2V5LXR3by0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+          }
+        ],
+        "updatedAt": "2026-09-10T00:00:00.000Z",
+        "type": "collaborative",
+        "creator": "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+        "muted": true
+      },
+      "remote": {
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "name": "Team",
+        "nameAt": "2026-09-10T00:00:00.000Z",
+        "avatar": null,
+        "members": [
+          "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+          "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE="
+        ],
+        "admins": [
+          "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug="
+        ],
+        "epoch": 3,
+        "epochAt": "2026-09-10T00:00:00.000Z",
+        "left": false,
+        "keys": [
+          {
+            "kind": "legacy-aes",
+            "version": 0,
+            "key": "a2V5LW9uZS0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+          },
+          {
+            "kind": "v2-epoch",
+            "version": 3,
+            "key": "a2V5LXR3by0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+          }
+        ],
+        "updatedAt": "2026-09-10T00:00:00.000Z",
+        "type": "collaborative",
+        "creator": "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+        "muted": false,
+        "mutedAt": "2026-09-11T00:00:00.000Z"
+      },
+      "merged": {
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "members": [
+          "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+          "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug="
+        ],
+        "admins": [
+          "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug="
+        ],
+        "epoch": 3,
+        "epochAt": "2026-09-10T00:00:00.000Z",
+        "name": "Team",
+        "type": "collaborative",
+        "creator": "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+        "nameAt": "2026-09-10T00:00:00.000Z",
+        "avatar": null,
+        "keys": [
+          {
+            "kind": "legacy-aes",
+            "version": 0,
+            "key": "a2V5LW9uZS0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+          },
+          {
+            "kind": "v2-epoch",
+            "version": 3,
+            "key": "a2V5LXR3by0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+          }
+        ],
+        "left": false,
+        "muted": false,
+        "mutedAt": "2026-09-11T00:00:00.000Z",
+        "updatedAt": "2026-09-10T00:00:00.000Z"
+      },
+      "canonical": "{\"admins\":[\"BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=\"],\"avatar\":null,\"creator\":\"BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=\",\"epoch\":3,\"epochAt\":\"2026-09-10T00:00:00.000Z\",\"groupId\":\"5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D\",\"keys\":[{\"key\":\"a2V5LW9uZS0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0=\",\"kind\":\"legacy-aes\",\"version\":0},{\"key\":\"a2V5LXR3by0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0=\",\"kind\":\"v2-epoch\",\"version\":3}],\"left\":false,\"members\":[\"3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=\",\"BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=\"],\"muted\":false,\"mutedAt\":\"2026-09-11T00:00:00.000Z\",\"name\":\"Team\",\"nameAt\":\"2026-09-10T00:00:00.000Z\",\"type\":\"collaborative\",\"updatedAt\":\"2026-09-10T00:00:00.000Z\"}"
+    },
+    {
+      "name": "untimestamped_mute_gap_fills",
+      "local": {
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "name": "Team",
+        "nameAt": "2026-09-10T00:00:00.000Z",
+        "avatar": null,
+        "members": [
+          "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+          "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE="
+        ],
+        "admins": [
+          "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug="
+        ],
+        "epoch": 3,
+        "epochAt": "2026-09-10T00:00:00.000Z",
+        "left": false,
+        "keys": [
+          {
+            "kind": "legacy-aes",
+            "version": 0,
+            "key": "a2V5LW9uZS0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+          },
+          {
+            "kind": "v2-epoch",
+            "version": 3,
+            "key": "a2V5LXR3by0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+          }
+        ],
+        "updatedAt": "2026-09-10T00:00:00.000Z",
+        "type": "collaborative",
+        "creator": "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug="
+      },
+      "remote": {
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "name": "Team",
+        "nameAt": "2026-09-10T00:00:00.000Z",
+        "avatar": null,
+        "members": [
+          "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+          "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE="
+        ],
+        "admins": [
+          "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug="
+        ],
+        "epoch": 3,
+        "epochAt": "2026-09-10T00:00:00.000Z",
+        "left": false,
+        "keys": [
+          {
+            "kind": "legacy-aes",
+            "version": 0,
+            "key": "a2V5LW9uZS0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+          },
+          {
+            "kind": "v2-epoch",
+            "version": 3,
+            "key": "a2V5LXR3by0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+          }
+        ],
+        "updatedAt": "2026-09-10T00:00:00.000Z",
+        "type": "collaborative",
+        "creator": "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+        "muted": true
+      },
+      "merged": {
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "members": [
+          "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+          "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug="
+        ],
+        "admins": [
+          "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug="
+        ],
+        "epoch": 3,
+        "epochAt": "2026-09-10T00:00:00.000Z",
+        "name": "Team",
+        "type": "collaborative",
+        "creator": "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+        "nameAt": "2026-09-10T00:00:00.000Z",
+        "avatar": null,
+        "keys": [
+          {
+            "kind": "legacy-aes",
+            "version": 0,
+            "key": "a2V5LW9uZS0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+          },
+          {
+            "kind": "v2-epoch",
+            "version": 3,
+            "key": "a2V5LXR3by0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+          }
+        ],
+        "left": false,
+        "muted": true,
+        "updatedAt": "2026-09-10T00:00:00.000Z"
+      },
+      "canonical": "{\"admins\":[\"BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=\"],\"avatar\":null,\"creator\":\"BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=\",\"epoch\":3,\"epochAt\":\"2026-09-10T00:00:00.000Z\",\"groupId\":\"5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D\",\"keys\":[{\"key\":\"a2V5LW9uZS0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0=\",\"kind\":\"legacy-aes\",\"version\":0},{\"key\":\"a2V5LXR3by0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0=\",\"kind\":\"v2-epoch\",\"version\":3}],\"left\":false,\"members\":[\"3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=\",\"BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=\"],\"muted\":true,\"name\":\"Team\",\"nameAt\":\"2026-09-10T00:00:00.000Z\",\"type\":\"collaborative\",\"updatedAt\":\"2026-09-10T00:00:00.000Z\"}"
     }
   ],
   "devices": {
@@ -1811,6 +2404,218 @@
           ]
         },
         "note": "a revoked device never comes back through DEVICES (only a fresh local approval clears it)"
+      }
+    ]
+  },
+  "records": {
+    "contacts": [
+      {
+        "name": "unblock_is_kept_with_its_timestamp",
+        "wire": {
+          "publicKey": "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+          "blocked": false,
+          "blockedAt": "2026-09-24T10:00:00.000Z"
+        },
+        "json": {
+          "publicKey": "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+          "blocked": false,
+          "blockedAt": "2026-09-24T10:00:00.000Z"
+        }
+      },
+      {
+        "name": "block_with_timestamp",
+        "wire": {
+          "publicKey": "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+          "alias": "Bob",
+          "aliasAt": "2026-09-01T00:00:00.000Z",
+          "blocked": true,
+          "blockedAt": "2026-09-24T09:00:00.000Z"
+        },
+        "json": {
+          "publicKey": "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+          "alias": "Bob",
+          "aliasAt": "2026-09-01T00:00:00.000Z",
+          "blocked": true,
+          "blockedAt": "2026-09-24T09:00:00.000Z"
+        }
+      },
+      {
+        "name": "urlsafe_unpadded_key_is_canonicalised",
+        "wire": {
+          "publicKey": "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE",
+          "blocked": true,
+          "blockedAt": "2026-09-24T09:00:00.000Z"
+        },
+        "json": {
+          "publicKey": "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+          "blocked": true,
+          "blockedAt": "2026-09-24T09:00:00.000Z"
+        }
+      },
+      {
+        "name": "unknown_fields_are_ignored",
+        "wire": {
+          "publicKey": "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+          "blocked": false,
+          "blockedAt": "2026-09-24T10:00:00.000Z",
+          "blockedBy": "future",
+          "reason": "spam"
+        },
+        "json": {
+          "publicKey": "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+          "blocked": false,
+          "blockedAt": "2026-09-24T10:00:00.000Z"
+        }
+      }
+    ],
+    "groups": [
+      {
+        "name": "mute_fields_round_trip",
+        "wire": {
+          "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+          "name": "Team",
+          "nameAt": "2026-09-10T00:00:00.000Z",
+          "avatar": null,
+          "members": [
+            "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+            "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE="
+          ],
+          "admins": [
+            "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug="
+          ],
+          "epoch": 3,
+          "epochAt": "2026-09-10T00:00:00.000Z",
+          "left": false,
+          "keys": [
+            {
+              "kind": "legacy-aes",
+              "version": 0,
+              "key": "a2V5LW9uZS0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+            },
+            {
+              "kind": "v2-epoch",
+              "version": 3,
+              "key": "a2V5LXR3by0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+            }
+          ],
+          "updatedAt": "2026-09-10T00:00:00.000Z",
+          "type": "collaborative",
+          "creator": "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+          "muted": true,
+          "mutedAt": "2026-09-24T08:00:00.000Z"
+        },
+        "canonical": "{\"admins\":[\"BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=\"],\"avatar\":null,\"creator\":\"BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=\",\"epoch\":3,\"epochAt\":\"2026-09-10T00:00:00.000Z\",\"groupId\":\"5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D\",\"keys\":[{\"key\":\"a2V5LW9uZS0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0=\",\"kind\":\"legacy-aes\",\"version\":0},{\"key\":\"a2V5LXR3by0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0=\",\"kind\":\"v2-epoch\",\"version\":3}],\"left\":false,\"members\":[\"3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=\",\"BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=\"],\"muted\":true,\"mutedAt\":\"2026-09-24T08:00:00.000Z\",\"name\":\"Team\",\"nameAt\":\"2026-09-10T00:00:00.000Z\",\"type\":\"collaborative\",\"updatedAt\":\"2026-09-10T00:00:00.000Z\"}"
+      },
+      {
+        "name": "unmute_is_kept_with_its_timestamp",
+        "wire": {
+          "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+          "name": "Team",
+          "nameAt": "2026-09-10T00:00:00.000Z",
+          "avatar": null,
+          "members": [
+            "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+            "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE="
+          ],
+          "admins": [
+            "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug="
+          ],
+          "epoch": 3,
+          "epochAt": "2026-09-10T00:00:00.000Z",
+          "left": false,
+          "keys": [
+            {
+              "kind": "legacy-aes",
+              "version": 0,
+              "key": "a2V5LW9uZS0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+            },
+            {
+              "kind": "v2-epoch",
+              "version": 3,
+              "key": "a2V5LXR3by0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+            }
+          ],
+          "updatedAt": "2026-09-10T00:00:00.000Z",
+          "type": "collaborative",
+          "creator": "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+          "muted": false,
+          "mutedAt": "2026-09-24T09:00:00.000Z"
+        },
+        "canonical": "{\"admins\":[\"BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=\"],\"avatar\":null,\"creator\":\"BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=\",\"epoch\":3,\"epochAt\":\"2026-09-10T00:00:00.000Z\",\"groupId\":\"5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D\",\"keys\":[{\"key\":\"a2V5LW9uZS0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0=\",\"kind\":\"legacy-aes\",\"version\":0},{\"key\":\"a2V5LXR3by0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0=\",\"kind\":\"v2-epoch\",\"version\":3}],\"left\":false,\"members\":[\"3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=\",\"BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=\"],\"muted\":false,\"mutedAt\":\"2026-09-24T09:00:00.000Z\",\"name\":\"Team\",\"nameAt\":\"2026-09-10T00:00:00.000Z\",\"type\":\"collaborative\",\"updatedAt\":\"2026-09-10T00:00:00.000Z\"}"
+      },
+      {
+        "name": "old_peer_without_mute_fields",
+        "wire": {
+          "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+          "name": "Team",
+          "nameAt": "2026-09-10T00:00:00.000Z",
+          "avatar": null,
+          "members": [
+            "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+            "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE="
+          ],
+          "admins": [
+            "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug="
+          ],
+          "epoch": 3,
+          "epochAt": "2026-09-10T00:00:00.000Z",
+          "left": false,
+          "keys": [
+            {
+              "kind": "legacy-aes",
+              "version": 0,
+              "key": "a2V5LW9uZS0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+            },
+            {
+              "kind": "v2-epoch",
+              "version": 3,
+              "key": "a2V5LXR3by0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+            }
+          ],
+          "updatedAt": "2026-09-10T00:00:00.000Z",
+          "type": "collaborative",
+          "creator": "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug="
+        },
+        "canonical": "{\"admins\":[\"BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=\"],\"avatar\":null,\"creator\":\"BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=\",\"epoch\":3,\"epochAt\":\"2026-09-10T00:00:00.000Z\",\"groupId\":\"5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D\",\"keys\":[{\"key\":\"a2V5LW9uZS0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0=\",\"kind\":\"legacy-aes\",\"version\":0},{\"key\":\"a2V5LXR3by0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0=\",\"kind\":\"v2-epoch\",\"version\":3}],\"left\":false,\"members\":[\"3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=\",\"BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=\"],\"name\":\"Team\",\"nameAt\":\"2026-09-10T00:00:00.000Z\",\"type\":\"collaborative\",\"updatedAt\":\"2026-09-10T00:00:00.000Z\"}"
+      },
+      {
+        "name": "unknown_fields_are_ignored",
+        "wire": {
+          "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+          "name": "Team",
+          "nameAt": "2026-09-10T00:00:00.000Z",
+          "avatar": null,
+          "members": [
+            "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+            "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE="
+          ],
+          "admins": [
+            "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug="
+          ],
+          "epoch": 3,
+          "epochAt": "2026-09-10T00:00:00.000Z",
+          "left": false,
+          "keys": [
+            {
+              "kind": "legacy-aes",
+              "version": 0,
+              "key": "a2V5LW9uZS0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+            },
+            {
+              "kind": "v2-epoch",
+              "version": 3,
+              "key": "a2V5LXR3by0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0="
+            }
+          ],
+          "updatedAt": "2026-09-10T00:00:00.000Z",
+          "type": "collaborative",
+          "creator": "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+          "muted": true,
+          "mutedAt": "2026-09-24T08:00:00.000Z",
+          "mutedUntil": "2026-10-01T00:00:00.000Z",
+          "colour": "red"
+        },
+        "canonical": "{\"admins\":[\"BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=\"],\"avatar\":null,\"creator\":\"BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=\",\"epoch\":3,\"epochAt\":\"2026-09-10T00:00:00.000Z\",\"groupId\":\"5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D\",\"keys\":[{\"key\":\"a2V5LW9uZS0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0=\",\"kind\":\"legacy-aes\",\"version\":0},{\"key\":\"a2V5LXR3by0zMi1ieXRlcy0tLS0tLS0tLS0tLS0tLS0=\",\"kind\":\"v2-epoch\",\"version\":3}],\"left\":false,\"members\":[\"3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=\",\"BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=\"],\"muted\":true,\"mutedAt\":\"2026-09-24T08:00:00.000Z\",\"name\":\"Team\",\"nameAt\":\"2026-09-10T00:00:00.000Z\",\"type\":\"collaborative\",\"updatedAt\":\"2026-09-10T00:00:00.000Z\"}"
       }
     ]
   }

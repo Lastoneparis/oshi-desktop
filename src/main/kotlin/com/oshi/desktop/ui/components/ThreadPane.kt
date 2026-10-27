@@ -1,5 +1,6 @@
 package com.oshi.desktop.ui.components
 
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -134,8 +135,15 @@ fun ThreadPane(
     onCopy: (String) -> Unit = {},
     /** __MENTIONS_2026_09_23__ a member picked from the `@` picker (groups only). */
     onPickMention: (com.oshi.desktop.group.MentionWire.Mention) -> Unit = {},
+    /** __DESKTOP_REPORT_2026_09_23__ null = no report action (bot / radio threads). */
+    onReport: ((com.oshi.desktop.net.V2ReportClient.Reason, String, Boolean) -> Unit)? = null,
+    /** __VIDEO_NOTE_2026_09_24__ send a recorded round note (sealed MP4 + its metadata). Null = no button. */
+    onVideoNote: ((java.io.File, com.oshi.desktop.media.VideoNoteWire.Meta) -> Unit)? = null,
 ) {
     var pickerOpen by remember(thread.conversationId) { mutableStateOf(false) }
+    var reportOpen by remember(thread.conversationId) { mutableStateOf(false) }
+    val reportable = onReport != null &&
+        (thread.kind == ConversationKind.DIRECT || thread.kind == ConversationKind.GROUP)
 
     Box(modifier.fillMaxSize()) {
         WallpaperBackdrop(wallpaper)
@@ -159,8 +167,18 @@ fun ThreadPane(
                     // __DESKTOP_CALL_UI_2026_09_23__ 1:1 only — like iOS, which offers no call in a
                     // group, and never in a bot or radio thread: neither has a peer that can answer.
                     onCall = onCall?.takeIf { thread.kind == ConversationKind.DIRECT },
+                    onReport = if (reportable) ({ reportOpen = !reportOpen }) else null,
                 ) { pickerOpen = !pickerOpen }
                 Hairline()
+                if (reportOpen && onReport != null) {
+                    ReportPanel(
+                        isGroup = thread.kind == ConversationKind.GROUP,
+                        alreadyReported = false,
+                        onSubmit = { r, d, b -> onReport(r, d, b) },
+                        onClose = { reportOpen = false },
+                    )
+                    Hairline()
+                }
                 thread.groupPinned?.let { PinnedBar(it, canUnpin = thread.groupCanEditInfo) { onPin(null) } }
                 thread.botSealing?.let { BotSealLabel(it) }
 
@@ -192,7 +210,8 @@ fun ThreadPane(
                     mentionMembers = if (thread.kind == com.oshi.desktop.ui.state.ConversationKind.GROUP)
                         thread.groupMembers.filter { !it.self }.map { com.oshi.desktop.group.MentionWire.Mention(it.address, it.label.trim()) }
                     else emptyList(),
-                    onPickMention = onPickMention)
+                    onPickMention = onPickMention,
+                    onVideoNote = onVideoNote)
             }
         }
     }
@@ -218,6 +237,7 @@ private fun ThreadHeader(
     onSetGroupBlocked: (Boolean) -> Unit = {},
     onDeleteGroup: () -> Unit = {},
     onCopy: (String) -> Unit = {},
+    onReport: (() -> Unit)? = null,
     onWallpaper: () -> Unit,
 ) {
     var editingDescription by remember(thread.conversationId) { mutableStateOf(false) }
@@ -262,6 +282,10 @@ private fun ThreadHeader(
                     if (thread.groupAdmin) TextAction(dt("desktop.group.rename.action")) { editingName = true }
                 }
                 KindBadge(thread.kind)
+                // __DESKTOP_REPORT_2026_09_23__ "Signaler", like the phones' contact/group sheet.
+                onReport?.let { open ->
+                    TextAction(if (thread.kind == ConversationKind.GROUP) t("group.report_group") else t("report.contact_title")) { open() }
+                }
             }
             Spacer(Modifier.height(OshiTheme.xxs))
             Text(
@@ -652,6 +676,7 @@ private fun Composer(
     onGif: ((java.io.File) -> Unit)? = null,
     mentionMembers: List<com.oshi.desktop.group.MentionWire.Mention> = emptyList(),
     onPickMention: (com.oshi.desktop.group.MentionWire.Mention) -> Unit = {},
+    onVideoNote: ((java.io.File, com.oshi.desktop.media.VideoNoteWire.Meta) -> Unit)? = null,
 ) {
     if (!composer.enabled && !busy) {
         DisabledComposer(composer)
@@ -666,6 +691,13 @@ private fun Composer(
         onDispose { if (voice.isRecording) voice.cancelRecording() }
     }
     val canSend = draft.isNotBlank() && !busy
+    // __VIDEO_NOTE_2026_09_24__ typing widens the field and moves the capture buttons aside
+    // (ComposerChrome — the rule is plain Kotlin so a test holds it); clearing brings them back.
+    val chrome = com.oshi.desktop.ui.state.ComposerChrome.of(draft, voiceRecording = recording)
+    var videoOpen by remember(conversationId) { mutableStateOf(false) }
+    val videoUnavailable by androidx.compose.runtime.produceState<String?>(VideoNoteAvailability.cachedOrNull()) {
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { VideoNoteAvailability.reason() }
+    }
     var gifOpen by remember(conversationId) { mutableStateOf(false) }   // __GIF_PACK_2026_09_23__
     // __MENTIONS_2026_09_23__ the typed `@query` (cursor = end of draft) and the members picked.
     var picked by remember(conversationId) { mutableStateOf(listOf<com.oshi.desktop.group.MentionWire.Mention>()) }
@@ -710,6 +742,14 @@ private fun Composer(
             }
         }
 
+        if (videoOpen && onVideoNote != null) {
+            VideoNoteRecorderPanel(
+                onSend = { file, meta -> onVideoNote(file, meta) },
+                onClose = { videoOpen = false },
+            )
+            return@Column
+        }
+
         Row(
             Modifier.fillMaxWidth().padding(OshiTheme.md),
             verticalAlignment = Alignment.Bottom,
@@ -723,8 +763,20 @@ private fun Composer(
                 },
             )
 
+            androidx.compose.animation.AnimatedVisibility(
+                visible = chrome.captureButtonsVisible,
+                enter = androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(180)) +
+                    androidx.compose.animation.expandHorizontally(androidx.compose.animation.core.tween(220), expandFrom = Alignment.Start),
+                exit = androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(120)) +
+                    androidx.compose.animation.shrinkHorizontally(androidx.compose.animation.core.tween(220), shrinkTowards = Alignment.Start),
+            ) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm)) {
             if (onGif != null && composer.attachEnabled) {
                 TextAction(dt("desktop.gif.button")) { if (!busy) gifOpen = !gifOpen }
+            }
+
+            if (onVideoNote != null && composer.attachEnabled && !recording) {
+                VideoNoteButton(videoUnavailable) { if (!busy) { gifOpen = false; videoOpen = true } }
             }
 
             TextAction(if (recording) "Stop" else "Record") {
@@ -744,6 +796,8 @@ private fun Composer(
                     }
                 }
             }
+            }
+            }
 
             DraftField(
                 draft = draft,
@@ -752,6 +806,7 @@ private fun Composer(
                 // With the `@` picker open, Enter picks the first member instead of sending.
                 onEnter = { if (candidates.isNotEmpty()) pick(candidates.first()) else if (canSend) onSend() },
                 modifier = Modifier.weight(1f),
+                expanded = chrome.fieldExpanded,
                 highlight = if (picked.isEmpty()) null else MentionHighlight(picked, OshiTheme.brand),
             )
 
@@ -797,14 +852,21 @@ private fun DraftField(
     onEnter: () -> Unit,
     modifier: Modifier = Modifier,
     highlight: androidx.compose.ui.text.input.VisualTransformation? = null,
+    /** __VIDEO_NOTE_2026_09_24__ typing: the box grows (animated) into the width the capture buttons freed. */
+    expanded: Boolean = false,
 ) {
     val (source, hovered) = rememberRowInteraction()
+    val vPad by androidx.compose.animation.core.animateDpAsState(
+        if (expanded) OshiTheme.md else OshiTheme.sm, androidx.compose.animation.core.tween(220), label = "composer-pad",
+    )
     Box(
         modifier
+            .animateContentSize(androidx.compose.animation.core.tween(220))
             .clip(OshiTheme.radiusXl)
             .background(if (hovered.value) OshiTheme.separator.copy(alpha = 0.12f) else OshiTheme.surface)
+            .border(Metrics.hairline, if (expanded) OshiTheme.brand.copy(alpha = 0.35f) else Color.Transparent, OshiTheme.radiusXl)
             .focusRing(OshiTheme.radiusXl)
-            .padding(horizontal = OshiTheme.md, vertical = OshiTheme.sm),
+            .padding(horizontal = OshiTheme.md, vertical = vPad),
         contentAlignment = Alignment.CenterStart,
     ) {
         if (draft.isEmpty()) {

@@ -178,6 +178,10 @@ class RelayServer : AutoCloseable {
 
     private val botSeq = AtomicLong(0)
 
+    /** __DESKTOP_REPORT_2026_09_23__ bodies POSTed to `/v2/report`, and the status to answer. */
+    val reports = java.util.concurrent.CopyOnWriteArrayList<org.json.JSONObject>()
+    @Volatile var reportStatus = 201
+
     private fun route(
         method: String,
         path: String,
@@ -257,6 +261,16 @@ class RelayServer : AutoCloseable {
                         .put("erased", JSONObject().put("prekeys", hadBundle)
                             .put("relay", JSONObject().put("envelopes", envelopes)))
                         .toString()
+                }
+            }
+
+            // __DESKTOP_REPORT_2026_09_23__ the report intake: same "signed account route"
+            // shape as the real server (x-oshi-user required), records what left the device.
+            method == "POST" && path == "/v2/report" -> {
+                if (userHeader.isNullOrEmpty()) 401 to """{"error":"unauthorized"}"""
+                else {
+                    if (reportStatus in 200..299) reports += org.json.JSONObject(String(body, Charsets.UTF_8))
+                    reportStatus to """{"ok":${reportStatus in 200..299}}"""
                 }
             }
 

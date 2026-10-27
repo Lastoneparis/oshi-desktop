@@ -132,7 +132,16 @@ import org.jetbrains.skia.Image as SkiaImage
 fun runDesktopUi(client: OshiClient, startHidden: Boolean = false) {
     val notifier = DesktopNotifier()
     val sleepInhibitor = SleepInhibitor()
-    val model = ChatShellModel(client, onIncomingNotification = notifier::notifyIncomingMessage)
+    // __DESKTOP_PREVIEW_PARITY_2026_10_27__ Read from disk at every notification, so
+    // the switch takes effect on the next message rather than the next launch.
+    val notificationPrefs = com.oshi.desktop.store.NotificationPreferences(
+        java.io.File(com.oshi.desktop.store.DesktopPaths.dataDir, com.oshi.desktop.store.NotificationPreferences.FILE_NAME)
+    )
+    val model = ChatShellModel(
+        client,
+        onIncomingNotification = notifier::notifyIncomingMessage,
+        notificationPreviewEnabled = { notificationPrefs.load().preview },
+    )
     model.attach()
 
     // The two sibling models. They are constructed here rather than inside a composable so
@@ -184,12 +193,8 @@ fun runDesktopUi(client: OshiClient, startHidden: Boolean = false) {
         },
         // __CALL_PARITY_2026_09_23__ missed-call notification when no OSHI window is active,
         // and the machine held awake for exactly as long as a call is connected.
-        onMissedCall = { peer, _ ->
-            // __BLOCKED_NOTIF_2026_09_23__ never a notification for a blocked person,
-            // whatever path produced the missed call (the state machine drops a blocked
-            // ring, this is the belt to that).
-            if (!com.oshi.desktop.block.BlockPolicy.isBlocked(client.contacts, peer) &&
-                java.awt.KeyboardFocusManager.getCurrentKeyboardFocusManager().activeWindow == null) {
+        onMissedCall = { _, _ ->
+            if (java.awt.KeyboardFocusManager.getCurrentKeyboardFocusManager().activeWindow == null) {
                 notifier.notifyMissedCall(dt("desktop.call.missed.notification"))
             }
         },
@@ -458,6 +463,10 @@ private fun Shell(
                 onSetNickname = { model.setOwnNickname(it) },
                 onPullNickname = { model.pullNicknameFromPhone() },
                 onPushNickname = { model.pushNicknameToPhone() },
+                // __CALL_LOG_AT_REST_2026_09_23__ modal dialog on the AWT thread, work on the worker.
+                onExportCallDiagnostics = {
+                    com.oshi.desktop.ui.components.pickCallDiagnosticsTarget()?.let { model.exportCallDiagnostics(it) }
+                },
             )
             Destination.MESSAGES -> MessagesDestination(
                 state = state,
@@ -551,6 +560,7 @@ private fun MessagesDestination(
             today = today,
             badge = badge,
             incomingShares = incomingShares,
+            onReach = { model.meshReach() },
         )
         Box(Modifier.width(Metrics.hairline).fillMaxHeight().background(OshiTheme.separator))
         Box(Modifier.weight(1f).fillMaxHeight()) {
@@ -616,6 +626,8 @@ private fun MessagesDestination(
                             onAttach = { onPickFile()?.let { model.attach(it) } },
                             onVoiceNote = { model.attach(it.file, it.mediaType, discardAfterSend = true) },
                             onGif = { model.attach(it, com.oshi.desktop.store.MediaType.IMAGE) },   // __GIF_PACK_2026_09_23__
+                            // __VIDEO_NOTE_2026_09_24__ the sealed MP4 stays as our own bubble (not discarded).
+                            onVideoNote = { file, meta -> model.attach(file, com.oshi.desktop.store.MediaType.VIDEO, videoNote = meta) },
                             onRenameGroup = { model.renameGroup(thread.conversationId, it) },
                             onReact = model::react,
                             onEditMessage = model::editMessage,
@@ -643,6 +655,10 @@ private fun MessagesDestination(
                             onForward = model::forwardMessage,
                             onCopy = { copyToClipboard(it) },
                             onPickMention = model::pickMention,   // __MENTIONS_2026_09_23__
+                            // __DESKTOP_REPORT_2026_09_23__ contacts and groups only (not bots / radio).
+                            onReport = { reason, details, alsoBlock ->
+                                model.report(thread.conversationId, thread.kind == com.oshi.desktop.ui.state.ConversationKind.GROUP, reason, details, alsoBlock)
+                            },
                         )
                     }
                 }

@@ -75,18 +75,20 @@ class VideoControlTest {
 
     // ============================================================== the keyframe buckets
 
-    /** iOS's bucket verbatim: one token per 350 ms, burst 3 (`swift:10344-10373`). */
+    /**
+     * Media channel: one token per 500 ms, burst 2 — ≤ 2/s (__CALL_VIDEO_SIGNAL_2026_09_23__;
+     * was iOS's 350 ms / burst 3 ≈ 170/min). The signal-lane copy is ≤ 1/s on top.
+     */
     @Test
-    fun `outbound keyframe requests burst three then refill at one per 350 ms`() {
+    fun `outbound keyframe requests are at most two a second`() {
         val clock = Clock()
         val s = VideoControlSession(clock)
         assertEquals(1, s.requestKeyframe().size)
         assertEquals(1, s.requestKeyframe().size)
-        assertEquals(1, s.requestKeyframe().size)
-        assertEquals("the fourth in the same millisecond", 0, s.requestKeyframe().size)
+        assertEquals("the third in the same millisecond", 0, s.requestKeyframe().size)
         assertEquals(1L, s.outboundKeyframeSwallowed)
 
-        clock.now += 349
+        clock.now += 499
         assertEquals(0, s.requestKeyframe().size)
         clock.now += 1
         assertEquals(1, s.requestKeyframe().size)
@@ -103,13 +105,25 @@ class VideoControlTest {
         val clock = Clock()
         val s = VideoControlSession(clock)
         repeat(50) { s.onToggle(VideoControl.Toggle(VideoControl.KEYFRAME_REQUEST, 1)) }
-        assertEquals("burst 3, then nothing", 3L, s.inboundKeyframeRequests)
-        assertEquals(47L, s.inboundKeyframeFloodDrops)
+        assertEquals("one, then nothing in the same 500 ms", 1L, s.inboundKeyframeRequests)
+        assertEquals(49L, s.inboundKeyframeFloodDrops)
     }
 
-    /** There is no encoder on this platform, so an admitted request produces no packet. */
+    /** __VIDEO_ABR_2026_09_23__ ~2/s: a request every 500 ms is acted on, a faster one is not. */
     @Test
-    fun `an inbound keyframe request is answered with nothing, because there is no encoder`() {
+    fun `inbound keyframe requests are admitted at two a second`() {
+        val clock = Clock()
+        val s = VideoControlSession(clock)
+        repeat(10) {
+            s.onToggle(VideoControl.Toggle(VideoControl.KEYFRAME_REQUEST, 1))
+            clock.now += 250
+        }
+        assertEquals(5L, s.inboundKeyframeRequests)
+    }
+
+    /** An admitted request produces no PACKET: the answer is an IDR from the encoder (CallVideoSession). */
+    @Test
+    fun `an inbound keyframe request is answered with no packet`() {
         val s = VideoControlSession(Clock())
         assertTrue(s.onToggle(VideoControl.Toggle(VideoControl.KEYFRAME_REQUEST, 1)).isEmpty())
         assertEquals(1L, s.inboundKeyframeRequests)
@@ -260,7 +274,7 @@ class VideoControlTest {
             val r = session.onPacket(sender.pFrame())
             if (r.requestKeyframe) sent += control.requestKeyframe().size
         }
-        assertEquals("ten pre-IDR frames, three requests — the bucket, not the pipeline", 3, sent)
+        assertEquals("ten pre-IDR frames, two requests — the bucket, not the pipeline", 2, sent)
         assertEquals(10L, session.droppedBeforeIdr)
     }
 

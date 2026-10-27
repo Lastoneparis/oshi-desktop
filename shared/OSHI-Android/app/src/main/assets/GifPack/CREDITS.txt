@@ -1,0 +1,8 @@
+cc_noto_*.gif — Animated emoji from Noto Emoji Animation by Google
+(https://googlefonts.github.io/noto-emoji-animation/), licensed under
+Creative Commons Attribution 4.0 International (CC BY 4.0,
+https://creativecommons.org/licenses/by/4.0/). Resized to 128 px, 15 fps.
+
+fc_*.gif — Original OSHI artwork generated for this app (Fooocus / SDXL), captions by OSHI.
+
+gp_*.gif — GIFs from GIPHY (https://giphy.com); rights remain with their uploaders.

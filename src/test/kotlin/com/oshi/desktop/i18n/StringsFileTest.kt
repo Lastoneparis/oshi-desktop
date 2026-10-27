@@ -186,7 +186,23 @@ class StringsFileTest {
         // 4012 → 4046 on 2026-09-23: __GROUP_E2E_V2_2026_09_23__ re-extraction for
         // `group.member_must_update` (GROUP_E2E_V2_SPEC §6), which also brought in the other keys
         // the iOS source gained since the last extraction.
-        assertEquals("en Localizable key count", 4046, en.localizable.size)
+        // 4046 → 4053 on 2026-09-24: re-extraction after the iOS map-app preference
+        // (`map_open_with_title`, rewritten `map_open_preference`) and the call-diagnostics /
+        // report strings landed in all 34 languages.
+        // 4053 → 4054 on 2026-09-24: `call.error.unavailable` (__BLOCKED_BY_PEER_2026_09_24__).
+        // 4054 → 4074 on 2026-09-24: __VIDEO_NOTE_2026_09_24__ the 20 `videonote.*` keys of the
+        // round video messages (docs/VIDEO_NOTE_SPEC.md), added to the iOS source in all 34
+        // languages; catalogs regenerated with `./gradlew i18nExtract` in the same change.
+        // 4074 → 4228 on 2026-10-27, regenerated with `./gradlew i18nExtract` in this
+        // same change. Only TWO of those 154 are today's
+        // (__SUGGESTIONS_ARE_A_CHOICE_2026_10_27__: settings.messages.smartReplies and
+        // its .footer, added to the iOS source in all 34 languages). The other 152 had
+        // accumulated upstream WITHOUT a regeneration, so this tripwire — and
+        // CatalogFreshnessTest and ControlPayloadWireFormatTest beside it — were already
+        // red before today's work touched the tree. That is precisely the failure they
+        // exist to make loud: the checked-in desktop catalogs had been shipping 152 keys
+        // behind the phones, in all 34 languages.
+        assertEquals("en Localizable key count", 4228, en.localizable.size)
         assertEquals("en InfoPlist key count", 16, en.infoPlist.size)
         assertEquals("Messages", en.localizable["tab.messages"])
         // Spot-check a value with an escape and one with a bare percent.

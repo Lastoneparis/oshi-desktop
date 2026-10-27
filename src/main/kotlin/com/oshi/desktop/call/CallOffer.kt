@@ -78,6 +78,8 @@ data class CallOffer(
     val supportsVideo: Boolean = false,
     /** __WB_ADPCM_CODEC_2026_09_23__ slot 4: wideband IMA-ADPCM 0x18 (flag 0x10). */
     val supportsWbAdpcm: Boolean = false,
+    /** __OPUS_CODEC_2026_09_23__ slot 5: Opus 0x19 (flag 0x20). */
+    val supportsOpus: Boolean = false,
 ) {
     init {
         require(sessionKey.size == SESSION_KEY_SIZE) {
@@ -105,7 +107,8 @@ data class CallOffer(
         // __WB_ADPCM_CODEC_2026_09_23__ five slots now, as iOS/Android write them:
         // [oshi][16k][apple][video][wbAdpcm]. Slot 4 is the only way a phone learns we
         // decode 0x18, so the tail can no longer stop at two bytes.
-        val out = ByteArray(SESSION_KEY_SIZE + NONCE_SALT_SIZE + id.size + 5)
+        // __OPUS_CODEC_2026_09_23__ and a sixth: [opus].
+        val out = ByteArray(SESSION_KEY_SIZE + NONCE_SALT_SIZE + id.size + 6)
         sessionKey.copyInto(out, 0)
         nonceSalt.copyInto(out, SESSION_KEY_SIZE)
         id.copyInto(out, HEADER_SIZE)
@@ -114,6 +117,7 @@ data class CallOffer(
         out[HEADER_SIZE + id.size + 2] = if (supportsAppleCodec) CAP_APPLE_CODEC else 0x00
         out[HEADER_SIZE + id.size + 3] = if (supportsVideo) CAP_VIDEO else 0x00
         out[HEADER_SIZE + id.size + 4] = if (supportsWbAdpcm) CAP_WB_ADPCM else 0x00
+        out[HEADER_SIZE + id.size + 5] = if (supportsOpus) CAP_OPUS else 0x00
         return out
     }
 
@@ -127,7 +131,8 @@ data class CallOffer(
             supports16kPcm == other.supports16kPcm &&
             supportsAppleCodec == other.supportsAppleCodec &&
             supportsVideo == other.supportsVideo &&
-            supportsWbAdpcm == other.supportsWbAdpcm
+            supportsWbAdpcm == other.supportsWbAdpcm &&
+            supportsOpus == other.supportsOpus
     }
 
     override fun hashCode(): Int {
@@ -158,6 +163,9 @@ data class CallOffer(
 
         /** __WB_ADPCM_CODEC_2026_09_23__ slot 4 — [com.oshi.desktop.call.media.WbAdpcmCodec]. */
         const val CAP_WB_ADPCM: Byte = 0x10
+
+        /** __OPUS_CODEC_2026_09_23__ slot 5 — [com.oshi.desktop.call.media.OpusCallEncoder]. */
+        const val CAP_OPUS: Byte = 0x20
 
         /**
          * The peel floor: `'-'`, the lowest byte a UUID string can contain.
@@ -228,6 +236,7 @@ data class CallOffer(
                 supportsAppleCodec = cap(2, CAP_APPLE_CODEC),
                 supportsVideo = cap(3, CAP_VIDEO),
                 supportsWbAdpcm = cap(4, CAP_WB_ADPCM),
+                supportsOpus = cap(5, CAP_OPUS),
             )
         }
 
@@ -280,6 +289,8 @@ data class CallAccept(
     val supportsVideo: Boolean = false,
     /** __WB_ADPCM_CODEC_2026_09_23__ index 4 of the accept body (13 of the packet). */
     val supportsWbAdpcm: Boolean = false,
+    /** __OPUS_CODEC_2026_09_23__ index 5 of the accept body (14 of the packet). */
+    val supportsOpus: Boolean = false,
 ) {
     /** Five bytes `[oshi][16k][apple][video][wbAdpcm]`, as iOS/Android now write them. */
     fun encode(): ByteArray = byteArrayOf(
@@ -288,6 +299,7 @@ data class CallAccept(
         if (supportsAppleCodec) CallOffer.CAP_APPLE_CODEC else 0x00,
         if (supportsVideo) CallOffer.CAP_VIDEO else 0x00,
         if (supportsWbAdpcm) CallOffer.CAP_WB_ADPCM else 0x00,
+        if (supportsOpus) CallOffer.CAP_OPUS else 0x00,
     )
 
     companion object {
@@ -313,6 +325,7 @@ data class CallAccept(
                 supportsAppleCodec = at(2, CallOffer.CAP_APPLE_CODEC),
                 supportsVideo = at(3, CallOffer.CAP_VIDEO),
                 supportsWbAdpcm = i4(payload),
+                supportsOpus = payload.size > 5 && payload[5] == CallOffer.CAP_OPUS,
             )
         }
     }

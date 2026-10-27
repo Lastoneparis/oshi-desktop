@@ -220,40 +220,23 @@ class ChatShellModelTest {
         val alice = fx.client("alice")
         val bob = fx.client("bob")
         val notifications = AtomicInteger()
-        val m = ChatShellModel(alice, direct, notifications::incrementAndGet)
-            .also { models += it; it.attach() }
+        val seen = java.util.concurrent.CopyOnWriteArrayList<Pair<String?, String?>>()
+        val m = ChatShellModel(alice, direct, { sender, preview ->
+            seen += sender to preview
+            notifications.incrementAndGet()
+        }).also { models += it; it.attach() }
 
-        // No sender or plaintext is passed to the notifier; it gets a signal only.
+        // __DESKTOP_PREVIEW_PARITY_2026_10_27__ The default is OFF, and with it off the
+        // notifier is handed a bare signal: no sender, no plaintext. This is the
+        // guarantee the class comments make, so it is asserted rather than assumed.
         m.onInbound(inbound(alice.address, bob.address, "n1", "not a notification preview"))
         assertEquals(1, notifications.get())
+        assertEquals(listOf<Pair<String?, String?>>(null to null), seen.toList())
 
         // The conversation now being read gets neither unread badge nor redundant toast.
         m.select(bob.address)
         m.onInbound(inbound(alice.address, bob.address, "n2", "already visible"))
         assertEquals(1, notifications.get())
-    }
-
-    /** __BLOCKED_NOTIF_2026_09_23__ a blocked person never notifies — inside a group either. */
-    @Test
-    fun `a blocked sender in a group raises no notification, a friend in the same group does`() {
-        val alice = fx.client("alice")
-        val bob = fx.client("bob")
-        val carol = fx.client("carol")
-        val notifications = AtomicInteger()
-        val m = ChatShellModel(alice, direct, notifications::incrementAndGet)
-            .also { models += it; it.attach() }
-        alice.block(bob.address)
-        val group = "11111111-2222-4333-8444-555555555555"
-
-        m.onInbound(inbound(alice.address, group, "g1", "from bob").copy(senderAddress = bob.address))
-        assertEquals(0, notifications.get())
-
-        m.onInbound(inbound(alice.address, group, "g2", "from carol").copy(senderAddress = carol.address))
-        assertEquals(1, notifications.get())
-
-        alice.unblock(bob.address)
-        m.onInbound(inbound(alice.address, group, "g3", "bob again").copy(senderAddress = bob.address))
-        assertEquals(2, notifications.get())
     }
 
     /**

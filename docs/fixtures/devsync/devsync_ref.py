@@ -482,10 +482,12 @@ def absent(v):
 def merge_lww_field(lv, lat, rv, rat):
     """Contact field: the later timestamp wins (tie: local). If EITHER side lacks a timestamp
     (legacy data) it is gap-fill only: the remote value is taken only when the local side has
-    neither a value nor a timestamp."""
+    neither a value nor a timestamp. __BLOCK_SYNC_LWW_2026_09_24__ that includes a timestamped
+    "absent" value (an unblock = blocked:false + blockedAt): adopting its timestamp is what stops an
+    OLDER block from a third device re-blocking later through the gap-fill."""
     if lat is not None and rat is not None:
         return (rv, rat) if rat > lat else (lv, lat)
-    if lat is None and absent(lv) and not absent(rv):
+    if lat is None and absent(lv) and (not absent(rv) or rat is not None):
         return rv, rat
     return lv, lat
 
@@ -534,7 +536,7 @@ def merge_group(local, remote):
     if it is not older than joinedAt (a timestamped leave at or after the last join; an untimestamped
     legacy leave only while no join is known); left = any leave that counts, leftAt = the LATEST such
     leave. Every part is a max, so the merge is also associative (see _left_state).
-    updatedAt: max."""
+    muted: later mutedAt (optional fields, __GROUP_MUTE_SYNC_2026_09_24__). updatedAt: max."""
     if local is None:
         return canonical_group(remote)
     a, b = canonical_group(local), canonical_group(remote)
@@ -577,6 +579,15 @@ def merge_group(local, remote):
     if joins:
         out["joinedAt"] = max(joins)
     out.update(_left_state((a, b), out.get("joinedAt")))
+    # __GROUP_MUTE_SYNC_2026_09_24__ per-group mute, a personal setting of the account: later
+    # mutedAt wins, a timestamped value beats an untimestamped one, exact ties by canonical-JSON
+    # bytes (true > null > false). Both fields are optional: a peer that predates them sends
+    # neither, and an absent value never beats a present one that carries a timestamp.
+    mu, mu_at = _lww(a.get("muted"), a.get("mutedAt"), b.get("muted"), b.get("mutedAt"))
+    if mu is not None:
+        out["muted"] = mu
+    if mu_at is not None:
+        out["mutedAt"] = mu_at
     out["updatedAt"] = max(a["updatedAt"], b["updatedAt"])
     return out
 
@@ -617,6 +628,31 @@ def canonical_group(g):
     g.setdefault("avatar", None)
     g["keys"] = sorted(g.get("keys", []), key=lambda k: (utf8_key(k["kind"]), k["version"], k["key"]))
     return g
+
+
+# __BLOCK_MUTE_RECORDS_2026_09_24__ record parity: what every implementation must keep when it PARSES a
+# CONTACTS / GROUPS entry and writes it back (unknown fields dropped, keys canonical, blocked:false and
+# muted:false kept with their timestamps: an unblock / unmute is a fact, not an absence).
+CONTACT_FIELDS = ("alias", "aliasAt", "blocked", "blockedAt", "verified", "verifiedAt")
+GROUP_FIELDS = ("groupId", "name", "nameAt", "avatar", "avatarAt", "members", "admins", "epoch", "epochAt", "left",
+                "leftAt", "joinedAt", "keys", "updatedAt", "muted", "mutedAt") + GROUP_DESCRIPTIVE
+
+
+def canonical_key(k):
+    k = k.strip().replace("-", "+").replace("_", "/").rstrip("=")
+    return k + "=" * (-len(k) % 4)
+
+
+def contact_record(o):
+    out = {"publicKey": canonical_key(o["publicKey"])}
+    for f in CONTACT_FIELDS:
+        if o.get(f) is not None:
+            out[f] = o[f]
+    return out
+
+
+def group_record(o):
+    return canonical_group({f: o[f] for f in GROUP_FIELDS if f in o and o[f] is not None or f == "avatar" and f in o})
 
 
 def merge_devices(local, remote_record, self_id):

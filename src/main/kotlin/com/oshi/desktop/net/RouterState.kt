@@ -37,7 +37,19 @@ class RouterState(private val file: File) {
      */
     private var deviceLastSeq: Long = 0
     private val seen = LinkedHashSet<String>()
-    private val retries = LinkedHashMap<String, Int>()
+    private val retries = LinkedHashMap<String, V2RetryBudget.Entry>()
+
+    /**
+     * __BUDGET_REFUND_DEADLOCK_2026_10_20__ Epoch millis since which the ack cursor
+     * has NOT advanced, or 0 when it has never been set.
+     *
+     * Kept apart from [retries] on purpose, and that separation IS the guarantee:
+     * the retry map is capped, so any ceiling written into it is refunded the
+     * moment an entry is evicted — which, with a backlog larger than the cap, is
+     * the normal case and not the rare one. A ceiling that can be evicted holds
+     * nothing. This one number never can be.
+     */
+    private var stallSince: Long = 0
     private var dirty = false
 
     init {
@@ -81,11 +93,20 @@ class RouterState(private val file: File) {
     @Synchronized
     fun hasSeen(msgId: String): Boolean = msgId in seen
 
-    /** The persistence seam [V2RetryBudget] injects. */
+    /** The per-envelope persistence seam [V2RetryBudget] injects. */
     fun retryStore(): V2RetryBudget.Store = object : V2RetryBudget.Store {
-        override fun read(): Map<String, Int> = synchronized(this@RouterState) { LinkedHashMap(retries) }
-        override fun write(counts: Map<String, Int>) = synchronized(this@RouterState) {
-            retries.clear(); retries.putAll(counts); dirty = true
+        override fun read(): Map<String, V2RetryBudget.Entry> =
+            synchronized(this@RouterState) { LinkedHashMap(retries) }
+        override fun write(entries: Map<String, V2RetryBudget.Entry>) = synchronized(this@RouterState) {
+            retries.clear(); retries.putAll(entries); dirty = true
+        }
+    }
+
+    /** The cursor-stall seam, deliberately NOT part of [retryStore]. */
+    fun retryStall(): V2RetryBudget.Stall = object : V2RetryBudget.Stall {
+        override fun since(): Long = synchronized(this@RouterState) { stallSince }
+        override fun set(millis: Long) = synchronized(this@RouterState) {
+            stallSince = millis; dirty = true
         }
     }
 
@@ -102,14 +123,22 @@ class RouterState(private val file: File) {
             .put("seen", JSONArray().apply {
                 seen.asSequence().drop((seen.size - SEEN_PERSIST_CAP).coerceAtLeast(0)).forEach { put(it) }
             })
-            .put("retries", JSONObject().apply { retries.forEach { (k, v) -> put(k, v) } })
+            // `a` attempts, `t` first-failure millis. The timestamp is what makes
+            // eviction deterministic; without it a restart refunds the budget of
+            // whatever the cap dropped.
+            .put("retries", JSONObject().apply {
+                retries.forEach { (k, v) ->
+                    put(k, JSONObject().put("a", v.attempts).put("t", v.firstFailedAt))
+                }
+            })
+            .apply { if (stallSince > 0) put("cursorStalledSince", stallSince) }
         AtomicFile.write(file, json.toString().toByteArray(Charsets.UTF_8))
         dirty = false
     }
 
     @Synchronized
     fun clear() {
-        lastSeq = 0; deviceLastSeq = 0; seen.clear(); retries.clear(); dirty = true
+        lastSeq = 0; deviceLastSeq = 0; seen.clear(); retries.clear(); stallSince = 0; dirty = true
         flush()
     }
 
@@ -122,7 +151,24 @@ class RouterState(private val file: File) {
             o.optJSONArray("seen")?.let { arr ->
                 for (i in 0 until arr.length()) arr.optString(i).takeIf { it.isNotEmpty() }?.let(seen::add)
             }
-            o.optJSONObject("retries")?.let { r -> for (k in r.keys()) retries[k] = r.optInt(k, 0) }
+            // Two shapes on disk. The object form is current. A bare int is a file
+            // written before the budget had a timestamp: the ATTEMPTS are what the
+            // bound is made of, so they are kept, and the missing first-failure is
+            // dated now — the alternative, zero, would make every migrated entry the
+            // first thing evicted and hand back exactly the budget this is here to
+            // spend.
+            o.optJSONObject("retries")?.let { r ->
+                val now = System.currentTimeMillis()
+                for (k in r.keys()) {
+                    val entry = r.optJSONObject(k)
+                    retries[k] = if (entry != null) {
+                        V2RetryBudget.Entry(entry.optInt("a", 0), entry.optLong("t", now))
+                    } else {
+                        V2RetryBudget.Entry(r.optInt(k, 0), now)
+                    }
+                }
+            }
+            stallSince = o.optLong("cursorStalledSince", 0)
         } catch (_: Exception) {
             // A corrupt cursor file degrades to "start from the beginning": the relay is
             // non-destructive until acked, so the worst case is re-pulling what is still

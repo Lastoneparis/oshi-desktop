@@ -121,6 +121,26 @@ object ControlPrefix {
     const val BLOCKED_NOTICE = "🚫BLOCKED🚫"
     const val MEDIA_MARKER = "MEDIA|||"
 
+    /**
+     * __DESKTOP_CATALOG_DRIFT_2026_10_27__ Three sentinels iOS has carried since
+     * 2026-10-23 and this catalog never gained. `ControlPayloadWireFormatTest` has
+     * been red over exactly these: 28 entries on the phones, 25 here.
+     *
+     * Not cosmetic. The catalog is what tells this client "this text is a control
+     * payload, not something to print", so a poll or an offline-only marker sent
+     * from a phone rendered as RAW JSON in the desktop conversation — the failure
+     * the test's own message names.
+     *
+     * Kinds copied from `OSHIControlPayload.swift:92,107,111`, not guessed:
+     * POLL_VOTE is silent (a ballot is not an event), POLL is rendered (the poll
+     * card itself), and OFFLINE_ONLY is rendered — iOS's comment is explicit that
+     * the CHANGE is meant to be visible, so making it silent here would hide a
+     * conversation switching to offline-only.
+     */
+    const val POLL = "📊POLL📊"
+    const val POLL_VOTE = "📊POLL_VOTE📊"
+    const val OFFLINE_ONLY = "🔒OFFLINE_ONLY🔒"
+
     const val REPLY = "💬REPLY💬"
     const val FORWARDED = "➡️FORWARDED➡️"
 
@@ -140,6 +160,7 @@ object ControlPrefix {
         Entry(PROFILE_REQUEST, Kind.SILENT),
         Entry(ACTION, Kind.SILENT),
         Entry(GROUP_UPDATE, Kind.SILENT),
+        Entry(POLL_VOTE, Kind.SILENT),
         Entry(SESSION_RESET, Kind.SILENT),
 
         Entry(CALL_SUMMARY, Kind.RENDERED),
@@ -154,6 +175,8 @@ object ControlPrefix {
         Entry(REACTION_LEGACY, Kind.RENDERED),
         Entry(KEY_ROTATION, Kind.RENDERED),
         Entry(BLOCKED_NOTICE, Kind.RENDERED),
+        Entry(POLL, Kind.RENDERED),
+        Entry(OFFLINE_ONLY, Kind.RENDERED),
         Entry(MEDIA_MARKER, Kind.RENDERED),
 
         Entry(REPLY, Kind.ENVELOPE),

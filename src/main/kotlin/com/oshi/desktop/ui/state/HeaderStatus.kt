@@ -23,6 +23,30 @@ data class NetworkBadge(
 }
 
 /**
+ * Who is reachable right now, as the list behind the reach badge shows it — the desktop's
+ * answer to the phones' Nearby peers screen (__DESKTOP_REACH_LIST_2026_10_27__).
+ *
+ * NOT part of [NetworkBadge], and not sampled on the badge's one-second tick: the badge is two
+ * integers that rarely change, while this is two lists whose last-heard stamps change every
+ * second. Reading it per frame would recompose the header continuously; it is read ONCE, when
+ * the badge is clicked.
+ */
+data class MeshReach(
+    /** LAN mesh peers by display name, as [NetworkBadge.meshPeers] counts them (ungraced). */
+    val lanPeers: List<String>,
+    /** LoRa nodes heard within the two-hour window: name (may be empty), id, last heard. */
+    val loraNodes: List<LoRaNode>,
+) {
+    data class LoRaNode(val name: String, val id: String, val lastHeardMs: Long)
+
+    val isEmpty: Boolean get() = lanPeers.isEmpty() && loraNodes.isEmpty()
+
+    companion object {
+        val NONE = MeshReach(emptyList(), emptyList())
+    }
+}
+
+/**
  * Holds a mesh peer DROP for a few seconds before showing it.
  *
  * mDNS peers come and go constantly; on iOS every flap redrew the bar, which is half of what

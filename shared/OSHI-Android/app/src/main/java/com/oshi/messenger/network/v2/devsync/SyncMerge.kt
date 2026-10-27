@@ -62,10 +62,15 @@ object SyncMerge {
 
     private fun absent(v: Any?): Boolean = v == null || v == "" || v == false
 
-    /** One contact field: later timestamp wins (tie: local); without timestamps, gap-fill only. */
+    /**
+     * One contact field: later timestamp wins (tie: local); without timestamps, gap-fill only.
+     * __BLOCK_SYNC_LWW_2026_09_24__ a local side with neither value nor timestamp also adopts a
+     * timestamped "absent" remote value (an unblock = `blocked:false` + `blockedAt`): keeping its
+     * timestamp is what stops an OLDER block from a third device re-blocking through the gap-fill.
+     */
     fun <T> lwwField(lv: T?, lat: Long?, rv: T?, rat: Long?): Pair<T?, Long?> {
         if (lat != null && rat != null) return if (rat > lat) rv to rat else lv to lat
-        if (lat == null && absent(lv) && !absent(rv)) return rv to rat
+        if (lat == null && absent(lv) && (!absent(rv) || rat != null)) return rv to rat
         return lv to lat
     }
 
@@ -137,7 +142,11 @@ object SyncMerge {
         val keys = byKind.values.sortedWith(compareBy<SyncGroupKey, String>(CanonicalJson.UTF8_ORDER) { it.kind }.thenBy { it.version })
         val joinedAt = listOfNotNull(a.joinedAtMs, b.joinedAtMs).maxOrNull()
         val (left, leftAt) = leftState(listOf(a, b), joinedAt)
-        return out.copy(keys = keys, left = left, leftAtMs = leftAt, joinedAtMs = joinedAt, updatedAtMs = maxOf(a.updatedAtMs, b.updatedAtMs))
+        // __GROUP_MUTE_SYNC_2026_09_24__ optional per-group mute: later mutedAt wins, timestamped
+        // beats untimestamped, ties by canonical-JSON bytes (true > null > false).
+        val (muted, mutedAt) = lww(a.muted, a.mutedAtMs, CanonicalJson.write(a.muted), b.muted, b.mutedAtMs, CanonicalJson.write(b.muted))
+        return out.copy(keys = keys, left = left, leftAtMs = leftAt, joinedAtMs = joinedAt, muted = muted, mutedAtMs = mutedAt,
+            updatedAtMs = maxOf(a.updatedAtMs, b.updatedAtMs))
     }
 
     /**

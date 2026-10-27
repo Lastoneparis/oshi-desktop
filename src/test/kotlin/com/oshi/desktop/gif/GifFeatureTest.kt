@@ -1,5 +1,6 @@
 package com.oshi.desktop.gif
 
+import java.io.File
 import com.oshi.desktop.store.MediaType
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -133,14 +134,18 @@ class GifFeatureTest {
     }
 
     @Test
-    fun `a picked GIF is written byte-for-byte with a gif name`() {
+    fun `a picked GIF is written sealed, byte-for-byte through the vault, with a gif name`() {
         val dir = kotlin.io.path.createTempDirectory("gif-outbox").toFile()
         try {
+            val vault = com.oshi.desktop.store.MediaVault(File(dir, "media"), File(dir, "media-tmp"), ByteArray(32) { 7 })
             val bytes = "GIF89a-body".toByteArray()
-            val f = com.oshi.desktop.ui.components.GifOutbox.write(bytes, "../../evil name", dir)
+            val f = com.oshi.desktop.ui.components.GifOutbox.write(bytes, "../../evil name", dir, vault)
             assertEquals(dir, f.parentFile)
             assertTrue(f.name.endsWith(".gif"))
-            assertTrue(f.readBytes().contentEquals(bytes))
+            // __PLAINTEXT_LEFTOVERS_2026_09_24__ never plaintext at rest.
+            assertTrue(com.oshi.desktop.store.MediaVault.isSealed(f))
+            assertTrue(!f.readBytes().contentEquals(bytes))
+            assertTrue(vault.openStream(f).use { it.readBytes() }.contentEquals(bytes))
         } finally {
             dir.deleteRecursively()
         }

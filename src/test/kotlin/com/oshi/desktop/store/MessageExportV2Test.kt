@@ -134,7 +134,8 @@ class MessageExportV2Test {
         val contacts = ContactStore(File(dir, "contacts.json"))
         val groups = com.oshi.desktop.app.GroupStore(File(dir, "groups.json"))
         val media = File(dir, "media")
-        val backup = MessageBackup(kat(), store, contacts, groups, media)
+        val vault = MediaVault(media, File(dir, "media-tmp"), ByteArray(32) { 5 })
+        val backup = MessageBackup(kat(), store, contacts, groups, media, vault)
 
         val r = backup.import(source)
         assertEquals("m2..m6 (group not held)", 5, r.imported)
@@ -144,7 +145,10 @@ class MessageExportV2Test {
         assertEquals(1, r.skippedUnknown)
         assertEquals("local copy", store.messages(bob).first().content)
         val m3 = store.message(bob, "6F1C2A3B-0000-4000-8000-000000000003")!!
-        assertArrayEquals(png, File(m3.mediaRef!!).readBytes())
+        // __PLAINTEXT_LEFTOVERS_2026_09_24__ sealed on import, no plaintext window.
+        assertTrue(MediaVault.isSealed(File(m3.mediaRef!!)))
+        assertArrayEquals(png, vault.readBytes(File(m3.mediaRef!!), Long.MAX_VALUE))
+        assertTrue(media.listFiles()!!.all { MediaVault.isSealed(it) })
         assertEquals("Bob", contacts.get(bob)!!.displayName)
 
         // Idempotent.

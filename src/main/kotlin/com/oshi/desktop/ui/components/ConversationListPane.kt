@@ -87,6 +87,8 @@ fun ConversationListPane(
     today: LocalDate,
     badge: NetworkBadge = NetworkBadge.OFFLINE,
     incomingShares: List<IncomingShare> = emptyList(),
+    /** Read when the reach badge is clicked. Null leaves the badge a plain indicator. */
+    onReach: (() -> com.oshi.desktop.ui.state.MeshReach)? = null,
     modifier: Modifier = Modifier,
 ) {
     // The two filters compose in ONE order and it matters: the kind split first, the typed
@@ -154,7 +156,7 @@ fun ConversationListPane(
             // HeaderIndicators.kt. The reach badge is always here; only the share counter
             // comes and goes, and only when a share starts or ends.
             IncomingSharesChip(incomingShares, onSelect)
-            NetworkBadgeChip(badge)
+            NetworkBadgeChip(badge, reach = onReach)
         }
 
         FilterField(query, onQuery, Modifier.padding(horizontal = OshiTheme.lg))

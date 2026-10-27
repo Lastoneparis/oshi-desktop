@@ -109,7 +109,7 @@ class V2Router(
     private val ratchetLock = ReentrantLock()
     private val pollLock = ReentrantLock()
     private val bundleCache = ConcurrentHashMap<String, com.oshi.messenger.network.v2.FetchedBundle>()
-    private val retryBudget = V2RetryBudget(state.retryStore())
+    private val retryBudget = V2RetryBudget(state.retryStore(), state.retryStall())
 
     private val myUserKey: String get() = identity.userKey
     private val myPair: OSHICryptoV2.X25519Pair get() = identity.identity
@@ -282,7 +282,15 @@ class V2Router(
         activeDevices()?.let { return pollDevice(it) }
         val pull = messages.pull(myUserKey, state.lastSeq()) ?: return 0
         val (delivered, ackSeq) = processPull(pull, deviceView = null)
-        if (ackSeq > state.lastSeq() && messages.ack(myUserKey, ackSeq)) state.setLastSeq(ackSeq)
+        if (ackSeq > state.lastSeq() && messages.ack(myUserKey, ackSeq)) {
+            state.setLastSeq(ackSeq)
+            // __BUDGET_REFUND_DEADLOCK_2026_10_20__ The cursor ADVANCED, so the
+            // mailbox is draining and the stall clock restarts. Without this call
+            // the clock would only ever run forward and, twenty minutes after the
+            // first poll, the budget would stop holding ANY envelope back — the
+            // opposite failure to the wedge, and just as silent.
+            retryBudget.noteCursorMoved()
+        }
         state.flush()
         delivered
     }
@@ -479,7 +487,12 @@ class V2Router(
         if (ackSeq > state.deviceLastSeq()) {
             val ack = messages.ackDevice(myUserKey, ackSeq)
             when {
-                ack.code in 200..299 -> state.setDeviceLastSeq(ackSeq)
+                ack.code in 200..299 -> {
+                    state.setDeviceLastSeq(ackSeq)
+                    // The device view acks different items but shares the one stall
+                    // clock: either cursor moving means the mailbox is draining.
+                    retryBudget.noteCursorMoved()
+                }
                 ack.code == 410 -> dm.onDeviceUnknown()
                 ack.code == 409 -> dm.onMailboxDisabled()
             }

@@ -1,6 +1,7 @@
 package com.oshi.desktop.net
 
 import com.oshi.desktop.DesktopV2Signer
+import com.oshi.desktop.i18n.catalogKey
 import org.json.JSONObject
 import java.net.URI
 import java.net.http.HttpClient
@@ -78,8 +79,8 @@ class MessagePushClient(
                 .put("senderKey", senderAddress)
                 .put("messageId", messageId)
                 .put("v2", "1")
-                .put("bodyLocKey", "notification.push.body.encrypted")
-                .put("titleLocKey", "notification.push.title.message")
+                .put("bodyLocKey", catalogKey("notification.push.body.encrypted"))
+                .put("titleLocKey", catalogKey("notification.push.title.message"))
         )
         .toString().toByteArray(Charsets.UTF_8)
 
@@ -97,8 +98,8 @@ class MessagePushClient(
                 .put("senderKey", senderAddress)
                 .put("messageId", messageId)
                 .put("v2", "1")
-                .put("bodyLocKey", "notification.push.body.encrypted")
-                .put("titleLocKey", "notification.push.title.message")
+                .put("bodyLocKey", catalogKey("notification.push.body.encrypted"))
+                .put("titleLocKey", catalogKey("notification.push.title.message"))
         )
         .toString().toByteArray(Charsets.UTF_8)
 

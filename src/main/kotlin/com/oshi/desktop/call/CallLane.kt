@@ -243,6 +243,15 @@ class CallLane(
 
     var onEvent: (CallEvent) -> Unit = {}
 
+    init {
+        // __CALL_LOG_AT_REST_2026_09_23__ iOS-shaped diagnostic lines, so the redacted
+        // export (same allow-list on every platform) carries the desktop's side of a call.
+        machine.onStateChange = { from, to -> log("🔄 STATE CHANGE: $from → $to") }
+    }
+
+    /** Last time [mediaTick] wrote its DIAG_PATH snapshot. */
+    @Volatile private var lastPathDiagMs = 0L
+
     /**
      * Whether this lane was built with a media opener — i.e. whether a connected call will
      * open a microphone and a speaker, or be two devices agreeing and silence.
@@ -295,16 +304,6 @@ class CallLane(
         )
     }
 
-    /** Transport-level counters for a live call, for the CLI's /calls (diagnostics only). */
-    fun mediaDebug(): String {
-        val l = leg ?: return "no media leg"
-        val s = l.socket
-        return "socket rx=${s.packetsReceived.get()} dropped=${s.packetsDropped.get()} " +
-            "rxErr=${s.receiveErrors.get()} tx=${s.framesSent.get()} pings=${s.pingsSent.get()}/" +
-            "${s.pingsAnswered.get()}/${s.pongsCorrelated.get()} · selected=${l.selected} · " +
-            "turn=${l.turnTransport} · ${l.carrierStats()}"
-    }
-
     /** Sealed signals that did not open. See WHO SENT IT — never zero silently. */
     @Volatile var unopenable: Int = 0
         private set
@@ -342,10 +341,6 @@ class CallLane(
      * that failure shipping on both phones ("rings back, no audio").
      */
     @Volatile var candidatesIgnored: Int = 0
-
-    /** Remote candidates that arrived before the media leg finished opening. */
-    private val pendingCandidates = mutableListOf<IceCandidate>()
-    private var pendingCandidatesCallId: String? = null
         private set
 
     /**
@@ -420,6 +415,9 @@ class CallLane(
             ?: return Dialled.Refused("'$peerAddress' is not an OSHI address")
 
         val decision = machine.startCall(canonical, nowMs, video, newCallId)
+        if (decision.refusal == CallRefusal.UNAVAILABLE) {
+            log("call: not dialling ${canonical.take(12)}… — it told us it blocks us (unavailable)")
+        }
         if (decision.refusal != CallRefusal.NONE) {
             return Dialled.Refused(refusalText(decision.refusal), decision.refusal)
         }
@@ -671,32 +669,6 @@ class CallLane(
     private fun onIceCandidates(from: String, packet: CallPacket.Decoded, envelopeCallId: String?) {
         val live = leg
         if (live == null || live.isClosed) {
-            // __CANDIDATE_BUFFER_2026_09_24__ The leg is not open YET. Opening it now loads
-            // the echo canceller's native library and fetches TURN credentials and a relay
-            // token before `leg` is assigned, and a phone sends its candidates exactly
-            // once, right after the offer/accept — so they landed in that window and were
-            // dropped. Real iPhone, 2026-09-24: "candidates received/ignored=0/5", no
-            // direct path, call ended CONNECTION_LOST. Keep them for THIS call (same peer,
-            // same callId when one is given) and apply them the moment the leg opens.
-            val current = machine.peer
-            val id = machine.callId
-            if (current != null && id != null &&
-                BlockPolicy.normalizeKey(current) == BlockPolicy.normalizeKey(from) &&
-                (envelopeCallId == null || envelopeCallId == id)
-            ) {
-                val candidates = IceCandidateCodec.decode(packet.payload)
-                if (candidates.isNotEmpty()) {
-                    synchronized(mediaLock) {
-                        if (pendingCandidatesCallId != id) {
-                            pendingCandidates.clear()
-                            pendingCandidatesCallId = id
-                        }
-                        if (pendingCandidates.size < MAX_PENDING_CANDIDATES) pendingCandidates.addAll(candidates)
-                    }
-                    log("call: $id buffered ${candidates.size} remote candidates until the media leg opens")
-                    return
-                }
-            }
             candidatesIgnored++
             return
         }
@@ -722,6 +694,7 @@ class CallLane(
         val added = live.addRemoteCandidates(candidates)
         candidatesReceived += added
         log("call: ${machine.callId} learned $added of ${candidates.size} remote candidates")
+        log("DIAG_ICE_RX | count=${candidates.size} | typesCsv=${diagTypes(candidates)} | added=$added")
     }
 
     /**
@@ -747,6 +720,11 @@ class CallLane(
     fun mediaTick(nowMs: Long = System.currentTimeMillis()): IceCandidate? {
         val live = leg ?: return null
         val selected = live.tick(nowMs)
+        // DIAG_PATH / DIAG_JITTER — the periodic snapshot iOS and Android write, ~every 2 s.
+        if (nowMs - lastPathDiagMs >= PATH_DIAG_INTERVAL_MS) {
+            lastPathDiagMs = nowMs
+            runCatching { live.diagSnapshot(nowMs).forEach(log) }
+        }
         // A call carried by the :8089 relay alone has a media path too (row 2.1-t).
         if (selected != null || live.isClosed || live.relayCarrying(nowMs)) return selected
 
@@ -856,6 +834,7 @@ class CallLane(
         val spec = CallMediaSpec(
             action.callId, action.sessionKey, action.nonceSalt, action.isCaller, video = machine.isVideo,
             wbAdpcm = action.wbAdpcm,
+            opus = action.opus,
             selfKey = myAddress, peerKey = action.peer,
             wsUpgradeHeaders = transport::webSocketUpgradeHeaders,
             // __CALL_MEDIA_AUTH_DESKTOP_2026_09_23__ contract §2: this call's relay token.
@@ -896,19 +875,30 @@ class CallLane(
             return
         }
 
+        log(
+            "DIAG_CODEC | role=${if (action.isCaller) "caller" else "callee"} | useOpus=${action.opus} | " +
+                "useWbAdpcm=${action.wbAdpcm} | isVideo=${machine.isVideo}",
+        )
         opened.audio?.muted = muted
-        val buffered = synchronized(mediaLock) {
+        // __VIDEO_PLI_SIGNAL_2026_09_23__ Every keyframe request the video half puts on the
+        // media channel also goes out as a sealed call signal (≤ 1/s): iOS up to b145 reads
+        // `0x0B` ONLY there. Typed `keyframeRequest` so the call server budgets it as one
+        // (__CALL_VIDEO_SIGNAL_2026_09_23__). Posted off the socket thread, never blocking
+        // media, and a refusal (a 429 during a storm) is logged, never shown as a problem.
+        opened.video?.signalKeyframeRequest = {
+            val send = CallAction.Send(
+                peer = action.peer,
+                type = CallPacket.Type.REQUEST_KEYFRAME,
+                payload = ByteArray(0),
+                envelopeType = KEYFRAME_REQUEST_ENVELOPE_TYPE,
+                callId = action.callId,
+            )
+            Thread({ runCatching { deliver(send, System.currentTimeMillis(), quiet = true) } }, "oshi-pli-signal")
+                .apply { isDaemon = true; start() }
+        }
+        synchronized(mediaLock) {
             leg = opened
             if (mediaProbeIntervalMs > 0) mediaTimer = startProbeTimer()
-            val b = if (pendingCandidatesCallId == action.callId) pendingCandidates.toList() else emptyList()
-            pendingCandidates.clear()
-            pendingCandidatesCallId = null
-            b
-        }
-        if (buffered.isNotEmpty()) {
-            val added = opened.addRemoteCandidates(buffered)
-            candidatesReceived += added
-            log("call: ${action.callId} applied $added of ${buffered.size} buffered remote candidates")
         }
         log(
             "call: connected to ${action.peer.take(12)}… with a media leg on UDP port " +
@@ -951,12 +941,16 @@ class CallLane(
         if (post is CallSignalClient.Post.Queued) {
             candidatesSent++
             log("call: $callId signalled ${candidates.size} candidates")
+            log("DIAG_ICE_TX | count=${candidates.size} | typesCsv=${diagTypes(candidates)} | sentVia=call_signal")
         }
         // A refusal is already counted and announced by deliver(). It is NOT fatal the way
         // a refused offer is: the peer may still reach us from its own candidates, and
         // ending a live call because one of two candidate signals bounced would be worse
         // than the degraded path it is trying to avoid.
     }
+
+    private fun diagTypes(candidates: List<IceCandidate>): String =
+        candidates.joinToString(",") { it.type.name.lowercase() }
 
     private fun apply(decision: CallDecision, nowMs: Long): CallRefusal {
         for (action in decision.actions) perform(action, nowMs)
@@ -1020,6 +1014,8 @@ class CallLane(
                     callLog += entry
                     while (callLog.size > MAX_CALL_LOG) callLog.removeAt(0)
                 }
+                // Same line as iOS `📞 CALL ENDED - <reason>` (call-end reason in the export).
+                log("📞 CALL ENDED - ${action.reason.wire} | connected=${action.connected} | incoming=${entry.incoming}")
                 // Best effort, and never load-bearing — see CallSignalClient.endCall.
                 transport.endCall(action.callId, myAddress)
                 onEvent(CallEvent.Ended(action.peer, action.callId, action.reason, action.connected))
@@ -1027,7 +1023,7 @@ class CallLane(
         }
     }
 
-    private fun deliver(send: CallAction.Send, nowMs: Long): CallSignalClient.Post {
+    private fun deliver(send: CallAction.Send, nowMs: Long, quiet: Boolean = false): CallSignalClient.Post {
         val peerKey = ContactQr.canonicalAddress(send.peer)?.let { Base64.getDecoder().decode(it) }
         if (peerKey == null) {
             sendFailures++
@@ -1050,6 +1046,10 @@ class CallLane(
             senderDeviceId = deviceId,
         )
         val post = transport.sendSignal(envelope, nowMs)
+        if (post is CallSignalClient.Post.Refused && quiet) {
+            log("call: ${send.type} for ${send.callId} not delivered — ${post.code}: ${post.reason}")
+            return post
+        }
         if (post is CallSignalClient.Post.Refused) {
             sendFailures++
             log("call: could not send ${send.type} for ${send.callId} — ${post.code}: ${post.reason}")
@@ -1072,11 +1072,15 @@ class CallLane(
 
     private fun refusalText(refusal: CallRefusal): String = when (refusal) {
         CallRefusal.BLOCKED -> "that contact is blocked"
+        CallRefusal.UNAVAILABLE -> "unavailable"
         CallRefusal.BUSY -> "this client is already on a call"
         else -> refusal.name.lowercase().replace('_', ' ')
     }
 
     companion object {
+        /** __CALL_VIDEO_SIGNAL_2026_09_23__ the envelope `type` of an in-call keyframe request. */
+        const val KEYFRAME_REQUEST_ENVELOPE_TYPE = "keyframeRequest"
+
 
         /**
          * The sentence every surface that starts a call **on the media-less path** is
@@ -1129,8 +1133,8 @@ class CallLane(
          */
         const val MEDIA_PATH_TIMEOUT_MS = 20_000L
 
-        /** Upper bound on candidates held for a leg that is still opening. */
-        const val MAX_PENDING_CANDIDATES = 32
+        /** DIAG_PATH / DIAG_JITTER cadence — the phones' 2 s snapshot. */
+        const val PATH_DIAG_INTERVAL_MS = 2_000L
 
         /**
          * How long a processed signal stays remembered.

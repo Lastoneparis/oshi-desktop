@@ -1,5 +1,7 @@
 package com.oshi.desktop.ui.state
 
+import com.oshi.messenger.util.CashuPayCommand
+
 import com.oshi.desktop.app.OshiClient
 import com.oshi.desktop.app.short
 import com.oshi.desktop.app.stamp
@@ -100,7 +102,14 @@ class ChatShellModel(
     private val client: OshiClient,
     private val worker: Executor = defaultWorker(),
     /** UI-only local alert; persistence and relay acknowledgement never depend on it. */
-    private val onIncomingNotification: () -> Unit = {},
+    private val onIncomingNotification: (sender: String?, preview: String?) -> Unit = { _, _ -> },
+    /**
+     * __DESKTOP_PREVIEW_PARITY_2026_10_27__ Whether the shell notification may carry
+     * the sender and the text. Read at notify time, not captured once, so flipping
+     * the switch takes effect on the next message rather than the next launch.
+     * Default false keeps the guarantee in the comment at the call site intact.
+     */
+    private val notificationPreviewEnabled: () -> Boolean = { false },
 ) : AutoCloseable {
 
     // ------------------------------------------------------------------ mutable core
@@ -239,6 +248,24 @@ class ChatShellModel(
     }
 
     /**
+     * Who is reachable as of [nowMs] — read when the reach badge is CLICKED, never on the
+     * badge's own tick. See [MeshReach].
+     */
+    fun meshReach(nowMs: Long = System.currentTimeMillis()): MeshReach = MeshReach(
+        lanPeers = client.meshPeerNames,
+        loraNodes = client.loraOnlineNodeList(nowMs).map {
+            MeshReach.LoRaNode(
+                name = it.name,
+                // The same `!%08x` a Meshtastic node, the stock app and OSHI's own LoRa
+                // conversation keys all spell a node with. A decimal node number here and a hex
+                // one in the thread title reads as two different radios.
+                id = "!%08x".format(it.num.toLong()),
+                lastHeardMs = it.lastHeardMs,
+            )
+        },
+    )
+
+    /**
      * Contacts sharing their live location WITH this desktop as of [nowMs]. The desktop
      * cannot share its own (no GPS, PARITY.md row 0.19), so this is the only direction.
      */
@@ -308,6 +335,30 @@ class ChatShellModel(
                         ) else Notice(dt("desktop.export.done", r.messages, r.file.path), Severity.OK)
                     },
                     onFailure = { Notice(dt("desktop.export.failed", it.message ?: it.javaClass.simpleName), Severity.ERROR) },
+                )
+            }
+            publish()
+        }
+    }
+
+    /**
+     * __CALL_LOG_AT_REST_2026_09_23__ "Share call diagnostics": decrypt the sealed call log,
+     * apply the cross-platform allow-list redaction (iOS `redact(logs:)`, byte-identical) and
+     * write it to [target]. On the worker: decrypting an hour of call log is not UI work.
+     */
+    fun exportCallDiagnostics(target: File) {
+        synchronized(lock) { busy = true; backupNotice = null }
+        publish()
+        worker.execute {
+            val result = runCatching { com.oshi.desktop.diag.DesktopCallLog.exportTo(target) }
+            synchronized(lock) {
+                busy = false
+                backupNotice = result.fold(
+                    onSuccess = { f ->
+                        if (f == null) Notice(dt("desktop.calldiag.empty"), Severity.ERROR)
+                        else Notice(dt("desktop.calldiag.done", f.path), Severity.OK)
+                    },
+                    onFailure = { Notice(dt("desktop.calldiag.failed", it.message ?: it.javaClass.simpleName), Severity.ERROR) },
                 )
             }
             publish()
@@ -470,6 +521,51 @@ class ChatShellModel(
      */
     fun send() {
         var stopTyping: String? = null
+        // __CASHU_2026_10_24__ `/pay <token> [public]`, decided before anything
+        // is queued. Two refusals, the same two as on the phones:
+        //   * nothing that fails to decode goes on the wire — a typo in a
+        //     pasted token is money thrown away, and neither side ever learns
+        //     why;
+        //   * a bearer token into a GROUP needs the word `public`, because
+        //     everyone who can read the thread can spend it and the first to
+        //     redeem wins.
+        // A refusal keeps the draft: a token is tedious to paste twice, and the
+        // user has to see it to fix it.
+        synchronized(lock) {
+            val id = selectedId
+            if (id != null && CashuPayCommand.handles(draftText)) {
+                val isGroup = kindOf(id) == ConversationKind.GROUP
+                when (val outcome = CashuPayCommand.parse(draftText, isGroup)) {
+                    is CashuPayCommand.Outcome.Send -> draftText = outcome.token.raw
+                    is CashuPayCommand.Outcome.NeedsPublicConfirm -> {
+                        notice = Notice(
+                            // The IDENTIFIER iOS uses, not the English sentence:
+                            // this catalogue is extracted from the iOS tree, so a
+                            // key the desktop invents exists in no locale at all —
+                            // English included, which is the worst case because a
+                            // locale-versus-English parity test then finds nothing
+                            // wrong. And one literal, never a concatenation: the
+                            // extractor would read half a key.
+                            t("cashu_pay_public_confirm", outcome.summary),
+                            Severity.ERROR,
+                        )
+                        publish(); return
+                    }
+                    CashuPayCommand.Outcome.Usage -> {
+                        notice = Notice(t("cashu_pay_usage"), Severity.INFO)
+                        publish(); return
+                    }
+                    CashuPayCommand.Outcome.NotAToken -> {
+                        notice = Notice(t("cashu_pay_not_token"), Severity.ERROR)
+                        publish(); return
+                    }
+                    CashuPayCommand.Outcome.Invalid -> {
+                        notice = Notice(t("cashu_pay_invalid"), Severity.ERROR)
+                        publish(); return
+                    }
+                }
+            }
+        }
         val (target, text) = synchronized(lock) {
             val id = selectedId
             val composer = composerFor(id)
@@ -572,7 +668,13 @@ class ChatShellModel(
      * group media fan-out on this client at all — `sendGroupText` carries text — so an attach
      * button that appeared to work in a group would upload a blob nobody receives.
      */
-    fun attach(file: File, mediaType: MediaType? = null, discardAfterSend: Boolean = false) {
+    fun attach(
+        file: File,
+        mediaType: MediaType? = null,
+        discardAfterSend: Boolean = false,
+        /** __VIDEO_NOTE_2026_09_24__ send as a round video note (the file is a sealed MP4 kept for our own bubble). */
+        videoNote: com.oshi.desktop.media.VideoNoteWire.Meta? = null,
+    ) {
         val target = synchronized(lock) {
             val id = selectedId
             val composer = composerFor(id)
@@ -599,9 +701,9 @@ class ChatShellModel(
         worker.execute {
             val result = try {
                 // __GROUP_E2E_V2_2026_09_23__ group media: one sealed file, one blob per member (spec §4).
-                if (group) client.sendGroupFile(target, file)?.let(::groupSendResult)
+                if (group) client.sendGroupFile(target, file, videoNote = videoNote)?.let(::groupSendResult)
                     ?: SendResult(dt("desktop.group.media.refused"), Severity.ERROR, keepDraft = false)
-                else directSendResult(client.sendFile(target, file, mediaType))
+                else directSendResult(client.sendFile(target, file, mediaType, videoNote))
             } catch (e: Exception) {
                 if (discardAfterSend) runCatching { file.delete() }
                 synchronized(lock) {
@@ -1099,6 +1201,43 @@ class ChatShellModel(
         }
     }
 
+    /**
+     * __DESKTOP_REPORT_2026_09_23__ "Signaler" a contact or a group. Off the UI thread (it
+     * is a network POST); the notice says what REALLY happened — sent, saved for retry, or
+     * refused — in the phones' own words (`report.*` strings, 34 languages).
+     */
+    fun report(
+        conversationId: String,
+        isGroup: Boolean,
+        reason: com.oshi.desktop.net.V2ReportClient.Reason,
+        details: String,
+        alsoBlock: Boolean,
+    ) {
+        synchronized(lock) { busy = true; notice = null }
+        publish()
+        worker.execute {
+            val outcome = runCatching {
+                client.report(
+                    if (isGroup) com.oshi.desktop.net.V2ReportClient.Subject.GROUP else com.oshi.desktop.net.V2ReportClient.Subject.CONTACT,
+                    conversationId, reason, details, alsoBlock,
+                )
+            }
+            synchronized(lock) {
+                busy = false
+                val state = outcome.getOrNull()?.state
+                notice = when (state) {
+                    com.oshi.desktop.net.V2ReportClient.State.SENT ->
+                        Notice(t("report.sent_title") + " — " + t("report.sent_message"), Severity.OK)
+                    com.oshi.desktop.net.V2ReportClient.State.REJECTED ->
+                        Notice("The server refused this report (${outcome.getOrNull()?.lastError ?: "4xx"}).", Severity.ERROR)
+                    else -> Notice(t("report.queued_title") + " — " + t("report.queued_message"), Severity.OK)
+                }
+                if (alsoBlock && !isGroup && selectedId == conversationId) selectedId = null
+            }
+            refresh()
+        }
+    }
+
     private fun runGroupInfoChange(what: String, change: () -> com.oshi.desktop.group.GroupDefinition?) {
         synchronized(lock) { busy = true; notice = null }
         publish()
@@ -1192,7 +1331,9 @@ class ChatShellModel(
         val shouldNotify: Boolean
         synchronized(lock) {
             val unseen = !m.fromMe && m.conversationId != selectedId
-            if (unseen) {
+            // A BLOCKED group's messages are kept (iOS parity) but must not grow a badge the
+            // user asked never to hear from again; a muted one still counts, quietly.
+            if (unseen && !client.isGroupBlocked(m.conversationId)) {
                 unread[m.conversationId] = (unread[m.conversationId] ?: 0) + 1
             }
             // __MENTIONS_2026_09_23__ an admitted `@you` breaks through mute (never through a block).
@@ -1202,16 +1343,30 @@ class ChatShellModel(
             if (unseen && mentionsMe) mentionedYou.add(m.conversationId)
             // __GROUP_PARITY_2026_09_23__ a muted group still counts unread, it just stays quiet.
             shouldNotify = unseen && (mentionsMe || !client.isGroupMuted(m.conversationId)) &&
-                !client.isGroupBlocked(m.conversationId) &&
-                // __BLOCKED_NOTIF_2026_09_23__ a blocked person stays silent inside a group
-                // too. `senderAddress` is the authenticated envelope sender, never a name.
-                !com.oshi.desktop.block.BlockPolicy.isBlocked(client.contacts, m.senderAddress)
+                !client.isGroupBlocked(m.conversationId)
         }
         publish()
         // Deliberately after durable storage (which OshiClient completed before this
         // callback) and after the UI state update. A broken shell notification is never a
         // delivery failure, and it contains no decrypted text or sender metadata.
-        if (shouldNotify) onIncomingNotification()
+        if (shouldNotify) {
+            // __DESKTOP_PREVIEW_PARITY_2026_10_27__ The text leaves this object ONLY
+            // with the switch on, and never for a control payload or a message its
+            // sender revoked — a poll envelope quoted into notification history would
+            // be both unreadable and permanent.
+            // `content` is nullable: a media-only row, and a row the sender revoked,
+            // both reach here with nothing to quote. Those notify generically.
+            val text = m.content?.takeIf { it.isNotBlank() }
+            val previewable = notificationPreviewEnabled() &&
+                !m.isDeletedForEveryone &&
+                text != null &&
+                !com.oshi.desktop.msg.ControlPrefix.isControl(text)
+            if (previewable) {
+                onIncomingNotification(senderLabel(m.senderAddress), text)
+            } else {
+                onIncomingNotification(null, null)
+            }
+        }
     }
 
     /** Control payloads mutate the store silently; typing additionally drives a short-lived hint. */
@@ -1464,6 +1619,10 @@ class ChatShellModel(
             // __DESKTOP_CALL_UI_2026_09_23__ a call-history row carries a KEY; draw it localized.
             com.oshi.desktop.msg.CallSummary.isCallSummary(m.content) -> com.oshi.desktop.msg.CallSummary.render(m.content!!) { t(it) }
             env != null -> env.content
+            // __VIDEO_NOTE_2026_09_24__ a round note has no caption box (spec §4): its `content`
+            // is the informative filename, which the circle must not print under itself.
+            m.videoNote && m.mediaType == com.oshi.desktop.store.MediaType.VIDEO &&
+                (m.content == null || m.content.endsWith(".mp4", ignoreCase = true)) -> ""
             m.mediaRef != null -> m.content.orEmpty()
             else -> m.content ?: "(deleted)"
         },
@@ -1484,6 +1643,8 @@ class ChatShellModel(
         edited = m.editedAtMs != null,
         deleted = m.isDeletedForEveryone,
         reactions = m.reactions.keys.sorted().joinToString(""),
+        videoNote = !m.isDeletedForEveryone && m.videoNote && m.mediaType == com.oshi.desktop.store.MediaType.VIDEO,
+        mediaDurationMs = m.mediaDurationMs,
     )
     }
 
@@ -1494,6 +1655,8 @@ class ChatShellModel(
         com.oshi.desktop.msg.ReplyEnvelope.isWrapped(m.content) ->
             com.oshi.desktop.msg.ReplyEnvelope.unwrap(m.content)?.content ?: m.content.orEmpty()
         com.oshi.desktop.msg.CallSummary.isCallSummary(m.content) -> com.oshi.desktop.msg.CallSummary.render(m.content!!) { t(it) }
+        // __VIDEO_NOTE_2026_09_24__ spec §4: the list says "Video message", not a filename.
+        m.videoNote && m.mediaType == com.oshi.desktop.store.MediaType.VIDEO -> t("videonote.title")
         m.mediaRef != null -> "[${m.mediaType?.wire ?: "file"}] " + m.content.orEmpty()
         else -> m.content.orEmpty()
     }.replace('\n', ' ').take(80)
@@ -1735,6 +1898,10 @@ data class MessageRow(
     val forwardedFrom: String? = null,
     /** __MENTIONS_2026_09_23__ `@name` targets, highlighted in the bubble (MentionWire). */
     val mentions: List<com.oshi.desktop.group.MentionWire.Mention> = emptyList(),
+    /** __VIDEO_NOTE_2026_09_24__ draw [attachment] as a round video note (VIDEO_NOTE_SPEC §4). */
+    val videoNote: Boolean = false,
+    /** The note's announced duration, when the sender stated one; else read from the file. */
+    val mediaDurationMs: Long? = null,
 )
 
 /** A reply's quote block, and the composer's "replying to" banner. */

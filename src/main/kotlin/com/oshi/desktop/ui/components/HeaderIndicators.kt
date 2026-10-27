@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
@@ -34,6 +35,7 @@ import androidx.compose.ui.unit.sp
 import com.oshi.desktop.i18n.t
 import com.oshi.desktop.ui.OshiTheme
 import com.oshi.desktop.ui.state.IncomingShare
+import com.oshi.desktop.ui.state.MeshReach
 import com.oshi.desktop.ui.state.NetworkBadge
 import java.time.Instant
 import java.time.ZoneId
@@ -50,7 +52,11 @@ import java.time.format.FormatStyle
  * a peer flap, and the peer count itself is debounced in `NetworkBadgeTracker`.
  */
 @Composable
-fun NetworkBadgeChip(badge: NetworkBadge, modifier: Modifier = Modifier) {
+fun NetworkBadgeChip(
+    badge: NetworkBadge,
+    modifier: Modifier = Modifier,
+    reach: (() -> MeshReach)? = null,
+) {
     val tint = if (badge.connected) OshiTheme.success else Ink.soft
     val description = buildList {
         when (badge.meshPeers) {
@@ -61,21 +67,105 @@ fun NetworkBadgeChip(badge: NetworkBadge, modifier: Modifier = Modifier) {
         if (badge.loraAttached) add(t("meshtastic.title") + ", " + t("lora.node.peers") + ": " + badge.loraNodes)
     }.ifEmpty { listOf(t("mesh.no_peers")) }.joinToString(". ")
 
-    Row(
-        modifier
-            .clip(OshiTheme.pill)
-            .background(tint.copy(alpha = 0.14f))
-            .padding(horizontal = OshiTheme.sm, vertical = OshiTheme.xxs)
-            .semantics(mergeDescendants = true) { contentDescription = description },
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(OshiTheme.xs),
-    ) {
-        Antenna(tint)
-        if (badge.meshPeers > 0) {
-            Text("${badge.meshPeers}", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Ink.strong)
+    // __DESKTOP_REACH_LIST_2026_10_27__ The antenna OPENS the list, as tapping it does on both
+    // phones. Read on the click and held, never re-read while the menu is open: a list whose
+    // rows reshuffle under the pointer is not readable, and the stamps move every second.
+    var open by remember { mutableStateOf(false) }
+    var shown by remember { mutableStateOf(MeshReach.NONE) }
+
+    Box(modifier) {
+        Row(
+            Modifier
+                .clip(OshiTheme.pill)
+                .background(tint.copy(alpha = 0.14f))
+                .then(
+                    if (reach == null) Modifier
+                    else Modifier
+                        .focusRing(OshiTheme.pill)
+                        .clickable { shown = reach(); open = true }
+                )
+                .padding(horizontal = OshiTheme.sm, vertical = OshiTheme.xxs)
+                .semantics(mergeDescendants = true) { contentDescription = description },
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(OshiTheme.xs),
+        ) {
+            Antenna(tint)
+            if (badge.meshPeers > 0) {
+                Text("${badge.meshPeers}", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Ink.strong)
+            }
+            if (badge.loraAttached) {
+                Text("LoRa ${badge.loraNodes}", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Ink.strong)
+            }
         }
-        if (badge.loraAttached) {
-            Text("LoRa ${badge.loraNodes}", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Ink.strong)
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            ReachList(shown)
+        }
+    }
+}
+
+/**
+ * The phones' Nearby peers screen, as much of it as a desktop HAS: who is on the LAN mesh and
+ * which radios the attached node has heard.
+ *
+ * Rows are NOT `DropdownMenuItem`s. There is nothing to do to a peer from here — the desktop
+ * neither connects nor disconnects one by hand — and a menu item whose handler does nothing is
+ * a control that lies about being one.
+ */
+@Composable
+private fun ReachList(reach: MeshReach) {
+    val time = remember { DateTimeFormatter.ofLocalizedTime(FormatStyle.SHORT) }
+    Column(Modifier.widthIn(min = 220.dp, max = 320.dp).padding(horizontal = OshiTheme.md, vertical = OshiTheme.xs)) {
+        Text(
+            t("peers.title"),
+            style = OshiTheme.typography.labelLarge,
+            color = Ink.soft,
+            modifier = Modifier.padding(bottom = OshiTheme.xs),
+        )
+        if (reach.isEmpty) {
+            Text(t("peers.nearby.empty"), style = OshiTheme.typography.bodyMedium, color = Ink.strong)
+            return@Column
+        }
+        if (reach.lanPeers.isNotEmpty()) {
+            Text(t("peers.section.connected"), fontSize = 11.sp, color = Ink.soft)
+            for (peer in reach.lanPeers) {
+                Text(
+                    peer,
+                    style = OshiTheme.typography.bodyMedium,
+                    color = Ink.strong,
+                    modifier = Modifier.padding(vertical = OshiTheme.xxs),
+                )
+            }
+        }
+        if (reach.loraNodes.isNotEmpty()) {
+            Text(
+                t("peers.lora.section"),
+                fontSize = 11.sp,
+                color = Ink.soft,
+                modifier = Modifier.padding(top = if (reach.lanPeers.isEmpty()) 0.dp else OshiTheme.sm),
+            )
+            for (node in reach.loraNodes) {
+                Column(Modifier.padding(vertical = OshiTheme.xxs)) {
+                    Text(
+                        node.name.ifEmpty { t("lora.node.unnamed") },
+                        style = OshiTheme.typography.bodyMedium,
+                        color = Ink.strong,
+                    )
+                    Text(
+                        node.id + " · " + t(
+                            "peers.lora.seen",
+                            time.format(Instant.ofEpochMilli(node.lastHeardMs).atZone(ZoneId.systemDefault())),
+                        ),
+                        fontSize = 11.sp,
+                        color = Ink.soft,
+                    )
+                }
+            }
+            Text(
+                t("peers.lora.footer"),
+                fontSize = 11.sp,
+                color = Ink.soft,
+                modifier = Modifier.padding(top = OshiTheme.xs),
+            )
         }
     }
 }

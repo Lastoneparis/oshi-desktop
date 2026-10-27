@@ -83,7 +83,7 @@ class MentionWiringTest {
         b.setGroupMuted(g.groupId, true)
 
         val notifications = AtomicInteger()
-        val m = ChatShellModel(b, direct, { notifications.incrementAndGet() }).also { models += it; it.attach() }
+        val m = ChatShellModel(b, direct, { _, _ -> notifications.incrementAndGet() }).also { models += it; it.attach() }
 
         a.sendGroupText(g.groupId, "plain chatter")
         b.router.poll()   // attach() routes every stored inbound message to m.onInbound

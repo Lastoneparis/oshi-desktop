@@ -50,17 +50,41 @@ echo "== 2/6 shared Android sources the desktop compiles (see build.gradle.kts i
 J="$SRC/OSHI-Android/app/src/main/java/com/oshi/messenger"
 A="$PUB/shared/OSHI-Android/app/src"
 M="$A/main/java/com/oshi/messenger"
-mkdir -p "$M/network/v2/devsync" "$M/network/encryption" "$M/service" "$A/test/resources" "$A/main/assets"
+mkdir -p "$M/network/v2/devsync" "$M/network/encryption" "$M/service/diag" "$M/util" "$A/test/resources" "$A/main/assets"
 cp "$J"/network/v2/{OSHICryptoV2,OSHICryptoV2Streaming,OSHIRatchetV2,V2Session,V2FileKeyMessage,V2RetryBudget}.kt "$M/network/v2/"
 cp "$J"/network/v2/devsync/*.kt "$M/network/v2/devsync/"
 cp "$J"/network/encryption/{PostQuantumKEM,RatchetSecurityMode}.kt "$M/network/encryption/"
 cp "$J"/service/{LlamaCpp,CallRatingPolicy}.kt "$M/service/"
+# __VIDEO_REORDER_2026_09_23__ / __VIDEO_ABR_2026_09_23__ the receive reorder window and the
+# send-side rate ladder, and the call diagnostic log the desktop writes through.
+cp "$J"/service/{VideoReorderReassembler,VideoRateController}.kt "$M/service/"
+cp "$J"/service/diag/CallFileLogger.kt "$M/service/diag/"
+# __CASHU_2026_10_24__ the e-cash reader: the four files build.gradle.kts includes from
+# `util/`, and ONLY those four — the rest of that directory is Android (Context, Keystore,
+# SharedPreferences). This is why desktop 1.3.2 never reached CI: the eCash commit added a
+# shared srcDir and this list was not grown with it, so the public copy did not compile.
+cp "$J"/util/{CashuTokens,CashuCbor,CashuJson,CashuPayCommand}.kt "$M/util/"
+# __VIDEO_NOTE_2026_09_24__ round-video-note rules; V2FileKeyMessage.kt calls it.
+mkdir -p "$M/service/media" && cp "$J"/service/media/VideoNote.kt "$M/service/media/"
 cp "$SRC"/OSHI-Android/app/src/test/resources/*.json "$A/test/resources/"
 # GIF & sticker pack (byte-identical to iOS) — bundled into the installer on purpose.
 rsync -a --delete "$SRC/OSHI-Android/app/src/main/assets/GifPack" "$SRC/OSHI-Android/app/src/main/assets/StickerPack" "$A/main/assets/"
 if grep -l '^import android\.' "$M"/network/v2/{OSHICryptoV2,OSHICryptoV2Streaming,OSHIRatchetV2,V2Session,V2FileKeyMessage,V2RetryBudget}.kt "$M"/network/v2/devsync/*.kt \
-     "$M"/network/encryption/{PostQuantumKEM,RatchetSecurityMode}.kt "$M"/service/{LlamaCpp,CallRatingPolicy}.kt; then
+     "$M"/network/encryption/{PostQuantumKEM,RatchetSecurityMode}.kt \
+     "$M"/service/{LlamaCpp,CallRatingPolicy,VideoReorderReassembler,VideoRateController}.kt \
+     "$M"/service/media/VideoNote.kt "$M"/service/diag/CallFileLogger.kt \
+     "$M"/util/{CashuTokens,CashuCbor,CashuJson,CashuPayCommand}.kt; then
   echo "ABORT: android.* import in a shared source the desktop compiles" >&2; exit 1; fi
+
+# __OPUS_CODEC_2026_09_23__ Concentus, the pure-Java Opus port the call codec compiles from
+# source. Vendored at the MONOREPO root, i.e. outside everything copied above, so it needs its
+# own line — without it the public copy has OpusCallCodec.kt and nothing to resolve it against.
+# Source + LICENSE + the vendoring note only: no prebuilt jar, and not the `opus`/`opus_oshi`
+# C trees or verify-vendored.sh, matching v1.3.1's published tree exactly.
+echo "== 2b/6 vendored Concentus (Opus) source"
+mkdir -p "$PUB/Vendor/concentus"
+rsync -a --delete "$SRC/Vendor/concentus/src" "$SRC/Vendor/concentus/LICENSE" "$PUB/Vendor/concentus/"
+cp "$SRC/Vendor/README-OSHI.md" "$PUB/Vendor/"
 
 echo "== 3/6 test fixtures"
 mkdir -p "$PUB/docs/fixtures"

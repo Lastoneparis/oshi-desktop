@@ -11,7 +11,7 @@ core shared by Android + Desktop, the future iOS/CryptoKit one) must reproduce e
 | `noise_transport.json` | transport ciphertexts both directions, `Rekey()`, rekey-by-message-count and rekey-by-bytes sequences |
 | `framing.json` | record header, `CONTINUED` flag, LAN frame, relay frames (both directions), `MEDIA_CHUNK` layout, size limits |
 | `diff.json` | canonical JSON + `rev` per message, per-conversation `SUMMARY` digests, per-day `BUCKETS`, `IDS`, the expected `WANT` sets of two devices, a merged conflict |
-| `merge.json` | message / contact / profile / read-state / group merge cases, `DEVICES` propagation + revocation |
+| `merge.json` | message / contact / profile / read-state / group merge cases (incl. block/unblock LWW and group mute, 2026-09-24), `DEVICES` propagation + revocation, `records` (CONTACTS/GROUPS parse → write-back parity) |
 | `relay_auth.json` | device-bound relay upgrade (`GET /v2/devsync`): binding string `B`, account + device signatures, headers for 3 devices (RFC 8032 seeds), the server's refusal table and close codes |
 
 ## Provenance and cross-check

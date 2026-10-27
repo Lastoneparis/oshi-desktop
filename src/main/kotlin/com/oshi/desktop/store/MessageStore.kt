@@ -595,6 +595,13 @@ data class Message(
     /** __MENTIONS_2026_09_23__ admitted `@name` targets of a group message (see `MentionWire`). */
     val mentions: List<com.oshi.desktop.group.MentionWire.Mention> = emptyList(),
     /**
+     * __VIDEO_NOTE_2026_09_24__ A round video note (docs/VIDEO_NOTE_SPEC.md): a VIDEO attachment
+     * whose sender set `videoNote:true`. Only meaningful with [mediaType] VIDEO.
+     */
+    val videoNote: Boolean = false,
+    /** The note's announced duration (ms, clamped to 15 000), when the sender stated one. */
+    val mediaDurationMs: Long? = null,
+    /**
      * Append-order sequence within its conversation, assigned by [MessageStore] — the
      * ordering tiebreaker for two messages that claim the identical [sentAtMs]. Not
      * meaningful across conversations, and callers should not set it themselves; [copy]
@@ -635,6 +642,7 @@ data class Message(
             isDeletedForEveryone == other.isDeletedForEveryone && isViewOnce == other.isViewOnce &&
             viewOnceOpened == other.viewOnceOpened && reactions == other.reactions &&
             mentions == other.mentions &&
+            videoNote == other.videoNote && mediaDurationMs == other.mediaDurationMs &&
             (hiddenLocally || !other.hiddenLocally)
 
     fun toJson(): JSONObject = JSONObject().apply {
@@ -658,6 +666,8 @@ data class Message(
         if (viewOnceOpened) put("viewOnceOpened", true)
         if (hiddenLocally) put("hiddenLocally", true)
         com.oshi.desktop.group.MentionWire.render(mentions)?.let { put("mentions", JSONArray(it)) }
+        if (videoNote) put("videoNote", true)
+        mediaDurationMs?.let { put("mediaDurationMs", it) }
         if (reactions.isNotEmpty()) {
             put("reactions", JSONObject().apply {
                 for ((emoji, senders) in reactions.toSortedMap()) {
@@ -693,6 +703,8 @@ data class Message(
             viewOnceOpened = o.optBoolean("viewOnceOpened", false),
             hiddenLocally = o.optBoolean("hiddenLocally", false),
             mentions = com.oshi.desktop.group.MentionWire.parse(o.opt("mentions")),
+            videoNote = o.optBoolean("videoNote", false),
+            mediaDurationMs = if (o.has("mediaDurationMs")) o.optLong("mediaDurationMs") else null,
             reactions = o.optJSONObject("reactions")?.let { r ->
                 val out = LinkedHashMap<String, Set<String>>()
                 for (emoji in r.keys()) {

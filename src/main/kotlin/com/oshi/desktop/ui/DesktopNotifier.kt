@@ -55,7 +55,33 @@ class DesktopNotifier {
         }.getOrDefault(false)
     }
 
-    fun notifyIncomingMessage() {
+    /**
+     * __DESKTOP_PREVIEW_PARITY_2026_10_27__ [sender] and [preview] are non-null ONLY
+     * when the person switched previews on; the caller holds that decision so no
+     * decrypted text reaches this class otherwise. Both null is the original
+     * behaviour, byte for byte.
+     */
+    fun notifyIncomingMessage(sender: String? = null, preview: String? = null) {
+        val title = sender?.takeIf { it.isNotBlank() } ?: "OSHI"
+        val body = preview?.takeIf { it.isNotBlank() } ?: "New encrypted message"
+        if (sender != null || preview != null) {
+            // The macOS and Linux helpers take a body only (their title is the app),
+            // so the sender rides in the body there. The tray has a real caption and
+            // uses it. Same information either way, no new parameters on helpers that
+            // every other notification path shares.
+            val oneLine = if (sender != null && preview != null) "$title: $body" else body
+            if (MacNotification.notifyIfAvailable(oneLine)) return
+            icon?.let { trayIcon ->
+                runCatching { trayIcon.displayMessage(title, body, TrayIcon.MessageType.INFO) }
+                return
+            }
+            LinuxDesktopNotification.notifyIfAvailable(oneLine)
+            return
+        }
+        notifyIncomingMessageGeneric()
+    }
+
+    private fun notifyIncomingMessageGeneric() {
         // Do not create a tray icon from the poll thread: desktop environments often
         // require tray setup to happen on the UI thread. If it was unavailable at startup,
         // the conversation still updates normally and there is simply no toast. Desktop

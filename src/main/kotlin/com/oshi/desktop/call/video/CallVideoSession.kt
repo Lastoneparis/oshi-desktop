@@ -44,7 +44,8 @@ class CallVideoSession(
     /** The AUDIO session's sequence — `0x0E`/`0x0F` are sealed on the shared audio counter. */
     private val nextAudioSeq: (() -> Long)?,
     private val cameraFactory: (() -> VideoSource)? = { CameraCapture() },
-    private val encoderFactory: (Int, Int) -> H264Encoder = { w, h -> H264Encoder(w, h) },
+    /** width, height, bitrate (bit/s). */
+    private val encoderFactory: (Int, Int, Long) -> H264Encoder = { w, h, b -> H264Encoder(w, h, bitrate = b) },
     private val decoderFactory: (() -> H264Decoder)? = { H264Decoder() },
     private val log: (String) -> Unit = {},
     private val clock: () -> Long = System::currentTimeMillis,
@@ -94,7 +95,7 @@ class CallVideoSession(
         class Unit(val annexB: ByteArray, val rotation: Int) : Job()
     }
 
-    private val receiver = VideoReceiveSession(sessionKey, sink = object : VideoStreamSink {
+    private val receiver = VideoReceiveSession(sessionKey, clock = clock, sink = object : VideoStreamSink {
         override fun writeParameterSets(sps: ByteArray, pps: ByteArray) {
             // Never dropped: a lost parameter set would make every later frame undecodable.
             val p = Job.Params(sps, pps)
@@ -140,19 +141,24 @@ class CallVideoSession(
                 videoPacketsIn++
                 if (!active) active = true // a peer sending video IS a video call
                 ensureDecoder()
-                val r = receiver.onPacket(bytes)
+                val r = synchronized(receiver) { receiver.onPacket(bytes) }
                 lastRotation = receiver.lastRotationCode
                 if (r.requestKeyframe || keyframeRequestPending) {
                     keyframeRequestPending = false
-                    control.requestKeyframe().forEach { sendDatagram(it) }
+                    askPeerForKeyframe()
                 }
                 return true
             }
             VideoControl.isCleartextToggle(type) && bytes.size == VideoControl.TOGGLE_SIZE -> {
                 val t = VideoControl.decodeToggle(bytes) ?: return true
                 val before = control.inboundKeyframeRequests
-                control.onToggle(t).forEach { sendDatagram(it) }
-                if (control.inboundKeyframeRequests != before) sender.keyframeWanted = true
+                emitPli(control.onToggle(t)) // non-empty for 0x0D: the peer resumed on P-frames
+                if (control.inboundKeyframeRequests != before) {
+                    // __VIDEO_ABR_2026_09_23__ ≤ 2/s (the control session's bucket): force
+                    // an IDR, and tell the rate controller — the peer's only report on our uplink.
+                    sender.keyframeWanted = true
+                    rate?.onPeerKeyframeRequest()
+                }
                 return true
             }
             type == VideoControl.VIDEO_UPGRADE || type == VideoControl.VIDEO_STOP -> {
@@ -174,12 +180,35 @@ class CallVideoSession(
                         active = true
                         if (cameraWanted) startCamera()
                     }
-                    u.code == VideoControl.VUPG_CAMERA_ON -> control.requestKeyframe().forEach { sendDatagram(it) }
+                    u.code == VideoControl.VUPG_CAMERA_ON -> askPeerForKeyframe()
                 }
                 return true
             }
         }
         return false
+    }
+
+    /**
+     * __VIDEO_PLI_SIGNAL_2026_09_23__ A copy of every keyframe request for the SIGNAL lane
+     * (wired by [com.oshi.desktop.call.CallLane]). iOS up to b145 reads `0x0B` only as a
+     * sealed call signal and drops the 9-byte media-channel form, so without this copy a
+     * released iPhone never heard a desktop's request and the desktop's decoder waited for
+     * the iPhone's 1 s GOP after every loss. Android sends both copies the same way.
+     */
+    @Volatile var signalKeyframeRequest: (() -> Unit)? = null
+    @Volatile private var lastSignalPliAt = 0L
+
+    /** Ask the peer for an IDR: media channel (bucketed), plus a signal copy at most 1/s. */
+    private fun askPeerForKeyframe() = emitPli(control.requestKeyframe())
+
+    private fun emitPli(out: List<ByteArray>) {
+        out.forEach { sendDatagram(it) }
+        if (out.isEmpty()) return
+        val now = clock()
+        val hook = signalKeyframeRequest ?: return
+        if (now - lastSignalPliAt < SIGNAL_PLI_MIN_INTERVAL_MS) return
+        lastSignalPliAt = now
+        runCatching { hook() }
     }
 
     private fun ensureDecoder() {
@@ -197,7 +226,14 @@ class CallVideoSession(
         }
         decoder.use { d ->
             while (!closed.get()) {
-                val job = decodeQueue.poll(200, TimeUnit.MILLISECONDS) ?: continue
+                val job = decodeQueue.poll(100, TimeUnit.MILLISECONDS)
+                if (job == null) {
+                    // __VIDEO_REORDER_2026_09_23__ frames held behind a hole go out on the
+                    // clock when no newer datagram arrives to release them.
+                    val r = synchronized(receiver) { receiver.poll() }
+                    if (r.requestKeyframe) keyframeRequestPending = true
+                    continue
+                }
                 when (job) {
                     is Job.Params -> d.setParameterSets(job.sps, job.pps)
                     is Job.Unit -> {
@@ -326,36 +362,102 @@ class CallVideoSession(
         localFrame = null
     }
 
+    // ---------------------------------------------------------------- rate adaptation
+
+    /**
+     * __VIDEO_ABR_2026_09_23__ Send-side adaptation — the shared
+     * [com.oshi.messenger.service.VideoRateController] (the Android file, compiled here), on
+     * the same signals as iOS: loss of the call (here: the peer's video datagrams, from the
+     * nonce counter), and every keyframe request the peer sends. Step down fast, up slowly,
+     * 150 kbit/s floor, 1.2 Mbit/s ceiling, and fps/resolution rungs. FFmpeg's H.264
+     * encoders cannot change rate live, so a rung change rebuilds the encoder (one IDR).
+     */
+    @Volatile var rate: com.oshi.messenger.service.VideoRateController? = null
+        private set
+
+    /** The encoder's current bitrate, bit/s (0 when the camera is off). */
+    @Volatile var sendBitrate = 0L
+        private set
+    @Volatile var sendFps = 0
+        private set
+
     private fun captureLoop(ready: java.util.concurrent.CountDownLatch) {
         var camera: VideoSource? = null
         var encoder: H264Encoder? = null
+        var scaler: Scaler? = null
         try {
             camera = cameraFactory!!.invoke()
-            encoder = encoderFactory(camera.outW, camera.outH)
+            val rc = com.oshi.messenger.service.VideoRateController(H264Encoder.DEFAULT_BITRATE.toInt(), nowMs = clock)
+            rate = rc
+            var bitrate = H264Encoder.DEFAULT_BITRATE
+            var scalePct = 100
+            var fps = 30
+            encoder = encoderFactory(camera.outW, camera.outH, bitrate)
             encoderName = encoder.name
+            sendBitrate = bitrate; sendFps = fps
             cameraRunning = true
             log("video: camera ${camera.deviceName} open, encoder ${encoder.name} ${camera.outW}x${camera.outH}")
             ready.countDown()
             var n = 0L
+            var lastTick = clock()
+            var lastEncoded = 0L
             while (!captureStop.get() && !closed.get()) {
                 val shot = camera.next(wantPreview = n % 2 == 0L) ?: continue
                 shot.preview?.let { localFrame = it.mirrored(); localFrameCount++ }
+                n++
+                val now = clock()
+                if (now - lastTick >= com.oshi.messenger.service.VideoRateController.TICK_MS) {
+                    lastTick = now
+                    synchronized(receiver) { receiver.takeLossSample() }?.let { rc.onLossSample(it) }
+                    val d = rc.tick()
+                    if (d.bitrateBps.toLong() != bitrate || d.scalePct != scalePct || d.fps != fps) {
+                        bitrate = d.bitrateBps.toLong()
+                        scalePct = d.scalePct
+                        fps = d.fps
+                        val w = (camera.outW * scalePct / 100) and -2
+                        val h = (camera.outH * scalePct / 100) and -2
+                        runCatching { encoder?.close() }
+                        encoder = null
+                        runCatching { scaler?.close() }
+                        scaler = if (scalePct < 100) {
+                            Scaler(camera.outW, camera.outH, org.bytedeco.ffmpeg.global.avutil.AV_PIX_FMT_YUV420P,
+                                w, h, org.bytedeco.ffmpeg.global.avutil.AV_PIX_FMT_YUV420P)
+                        } else null
+                        // The encoder is told 30 fps and fed [fps]: its per-frame budget is
+                        // bitrate/30, so ask for bitrate×30/fps to land on the rung's bitrate.
+                        encoder = encoderFactory(w, h, bitrate * 30 / fps)
+                        sender.keyframeWanted = true // a new encoder starts on an IDR anyway; say so
+                        log("video: rate rung ${d.rung} — ${bitrate / 1000} kbit/s, ${d.fps} fps, ${w}x$h (target ${d.targetBps / 1000}k)")
+                    }
+                    sendBitrate = bitrate; sendFps = fps
+                }
+                // The rung's frame rate: preview keeps every frame, the encoder only these.
+                if (fps < 30 && now - lastEncoded < 1000L / fps - 4) continue
+                lastEncoded = now
                 val force = sender.keyframeWanted
                 if (force) sender.keyframeWanted = false
-                for (au in encoder.encode(shot.yuv, force)) {
-                    sender.sendAccessUnit(au.annexB, au.key, clock())
+                val input = scaler?.scale(shot.yuv) ?: shot.yuv
+                for (au in encoder!!.encode(input, force)) {
+                    sender.sendAccessUnit(au.annexB, au.key, now)
                 }
-                n++
             }
         } catch (t: Throwable) {
             cameraProblem = t.message ?: t.javaClass.simpleName
             log("video: camera stopped — $cameraProblem")
         } finally {
             cameraRunning = false
+            rate = null
+            sendBitrate = 0; sendFps = 0
             ready.countDown()
             runCatching { encoder?.close() }
+            runCatching { scaler?.close() }
             runCatching { camera?.close() }
         }
+    }
+
+    private companion object {
+        /** The signal-lane copy of a keyframe request: at most one a second (server budget). */
+        const val SIGNAL_PLI_MIN_INTERVAL_MS = 1_000L
     }
 
     override fun close() {

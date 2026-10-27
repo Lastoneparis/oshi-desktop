@@ -51,12 +51,13 @@ class CallScreenModelTest {
         val identity: DesktopIdentity = DesktopIdentity.generate()
         val address: String get() = identity.userKey
         val deviceId = "dev-" + UUID.randomUUID().toString().take(8)
+        val machine = CallStateMachine(identity.userKey, contacts, deviceId)
         val lane = CallLane(
             myAddress = identity.userKey,
             myPrivateKey = identity.identity.priv,
             transport = CallSignalClient(server.baseUrl, DesktopV2Signer(identity)),
             deviceId = deviceId,
-            machine = CallStateMachine(identity.userKey, contacts, deviceId),
+            machine = machine,
         ).also { it.siblingPushUrl = null } // answer/decline must not POST to production push
         val ringer = FakeRinger()
         val summaries = ArrayList<Triple<String, String, Boolean>>()
@@ -168,6 +169,31 @@ class CallScreenModelTest {
         assertTrue("and no ring, ever", b.ringer.log.isEmpty())
         assertTrue("and no history row", b.summaries.isEmpty())
         assertEquals(CallState.IDLE, b.lane.state)
+        // __BLOCKED_BY_PEER_2026_09_24__ owner decision: NO missed-call trace of a blocked contact.
+        now += CallTimeouts.CALLER_NO_ANSWER_MS + 1_000; b.lane.tick(now); b.poll()
+        assertTrue("no missed-call notification", b.missed.isEmpty())
+        assertTrue("no call-log entry", b.lane.calls().isEmpty())
+        assertTrue("still no history row", b.summaries.isEmpty())
+    }
+
+    /**
+     * __BLOCKED_BY_PEER_2026_09_24__ A peer that told us it blocks us is never dialled: the
+     * screen ends at once on "Contact unavailable", and nothing reaches the call server (so no
+     * VoIP push can wake the blocker's phone into a CallKit report).
+     */
+    @Test
+    fun aPeerThatBlocksUsIsShownUnavailableAndNeverDialled() {
+        val a = Party(); val b = Party()
+        a.machine.isBlockedBy = { it == b.address }
+        a.model.call(b.address)
+        assertEquals(Phase.ENDED, a.screen!!.phase)
+        assertEquals("call.error.unavailable", a.screen!!.endedKey)
+        assertNull("no technical reason shown", a.screen!!.problem)
+        assertNull(a.ringer.ringing)
+        assertTrue("nothing was posted to the call server", server.postedBodies.isEmpty())
+        now += 10; b.poll()
+        assertNull(b.screen)
+        assertTrue(b.ringer.log.isEmpty())
     }
 
     @Test

@@ -55,8 +55,25 @@ data class V2FileKeyMessage(
     val revealLayerCount: Int? = null,
     /** Total reveal duration in MILLISECONDS (a week = 604 800 000, fits in an Int). */
     val revealTotalMs: Int? = null,
+    // ---- __VIDEO_NOTE_2026_09_24__ Round video message (docs/VIDEO_NOTE_SPEC.md §2.A) ----
+    // Two more tolerant optional scalars on the same pattern: `true` or ABSENT for the
+    // flag, an integer millisecond count for the duration. Both omitted for any other
+    // attachment, so every non-note payload stays byte-identical.
+    /** `true` on a video note, otherwise null (never `false` on the wire). */
+    val videoNote: Boolean? = null,
+    /** Recorded duration in ms, clamped to 15000 on read; null when unknown. */
+    val durationMs: Int? = null,
     /** GROUP MEDIA ONLY: base64 of the JSON GroupMessage with inline media stripped. */
     val groupMessage: String? = null,
+    /**
+     * __V2_CAPTION_2026_09_27__ ANDROID EXTENSION, not an iOS field. The text typed
+     * over a photo or video. iOS's `V2FileKeyMessage` has no caption and its decoder
+     * ignores unknown keys, so a shipped iPhone never sees this — the sender also posts
+     * the caption as a follow-up text for it (`MessageRepository.captionFollowUpId`).
+     * An Android receiver shows it on the media and drops that follow-up. Last key,
+     * omitted when null, so every caption-less payload stays byte-identical.
+     */
+    val caption: String? = null,
 ) {
     /**
      * Encode in the Swift declaration order (V2MessageRouter.swift:44-74) with nil
@@ -78,7 +95,10 @@ data class V2FileKeyMessage(
         revealLayerIndex?.let { sb.append(",\"revealLayerIndex\":").append(it) }
         revealLayerCount?.let { sb.append(",\"revealLayerCount\":").append(it) }
         revealTotalMs?.let { sb.append(",\"revealTotalMs\":").append(it) }
+        if (videoNote == true) sb.append(",\"videoNote\":true")
+        durationMs?.let { sb.append(",\"durationMs\":").append(it) }
         groupMessage?.let { sb.append(",\"groupMessage\":\"").append(OSHICryptoV2.jsonEscape(it)).append('"') }
+        caption?.let { sb.append(",\"caption\":\"").append(OSHICryptoV2.jsonEscape(it)).append('"') }
         sb.append('}')
         return sb.toString()
     }
@@ -101,7 +121,10 @@ data class V2FileKeyMessage(
             revealLayerIndex == other.revealLayerIndex &&
             revealLayerCount == other.revealLayerCount &&
             revealTotalMs == other.revealTotalMs &&
-            groupMessage == other.groupMessage
+            videoNote == other.videoNote &&
+            durationMs == other.durationMs &&
+            groupMessage == other.groupMessage &&
+            caption == other.caption
     }
 
     override fun hashCode(): Int {
@@ -118,7 +141,10 @@ data class V2FileKeyMessage(
         r = 31 * r + (revealLayerIndex ?: 0)
         r = 31 * r + (revealLayerCount ?: 0)
         r = 31 * r + (revealTotalMs ?: 0)
+        r = 31 * r + (videoNote?.hashCode() ?: 0)
+        r = 31 * r + (durationMs ?: 0)
         r = 31 * r + (groupMessage?.hashCode() ?: 0)
+        r = 31 * r + (caption?.hashCode() ?: 0)
         return r
     }
 
@@ -171,7 +197,12 @@ data class V2FileKeyMessage(
                     revealLayerIndex = o.optIntOrNull("revealLayerIndex"),
                     revealLayerCount = o.optIntOrNull("revealLayerCount"),
                     revealTotalMs = o.optIntOrNull("revealTotalMs"),
+                    // Spec §1 rules 2 and 4: a malformed value degrades to "unknown",
+                    // it never costs the message.
+                    videoNote = com.oshi.messenger.service.media.VideoNote.flagFrom(o),
+                    durationMs = com.oshi.messenger.service.media.VideoNote.durationFrom(o),
                     groupMessage = o.optStringOrNull("groupMessage"),
+                    caption = o.optStringOrNull("caption"),
                 )
             } catch (_: Exception) {
                 null   // malformed → iOS's JSONDecoder would also fail → treat as text

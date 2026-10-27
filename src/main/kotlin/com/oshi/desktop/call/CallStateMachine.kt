@@ -184,6 +184,8 @@ sealed class CallAction {
         val isCaller: Boolean,
         /** __WB_ADPCM_CODEC_2026_09_23__ the peer advertised 0x18: send it instead of 0x15. */
         val wbAdpcm: Boolean = false,
+        /** __OPUS_CODEC_2026_09_23__ the peer advertised 0x19 (Opus): preferred over 0x18. */
+        val opus: Boolean = false,
     ) : CallAction() {
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
@@ -214,6 +216,13 @@ enum class CallRefusal {
 
     /** The peer is blocked. Nothing was sent back. See [BlockPolicy.incomingCall]. */
     BLOCKED,
+
+    /**
+     * __BLOCKED_BY_PEER_2026_09_24__ outgoing only: the peer told us (🚫BLOCKED🚫) that it
+     * blocks us. Not dialled — no offer, no VoIP push — and shown as "Contact unavailable".
+     * See [com.oshi.desktop.block.BlockedByPeerStore].
+     */
+    UNAVAILABLE,
 
     /** We are already in a call. See GLARE for why this is not always the answer. */
     BUSY,
@@ -372,6 +381,19 @@ class CallStateMachine(
     var state: CallState = CallState.IDLE
         private set
 
+    /**
+     * __BLOCKED_BY_PEER_2026_09_24__ "did this peer tell us it blocks us?" — consulted by
+     * [startCall] only. Default: nobody did.
+     */
+    @Volatile var isBlockedBy: (String) -> Boolean = { false }
+
+    /**
+     * __CALL_LOG_AT_REST_2026_09_23__ Observer for the sealed call log's
+     * `🔄 STATE CHANGE: a → b` line (iOS `callState.didSet`). Called on the driving
+     * thread, after the transition; must not call back into the machine.
+     */
+    var onStateChange: ((from: CallState, to: CallState) -> Unit)? = null
+
     /** The peer of the current call, or null. */
     var peer: String? = null
         private set
@@ -390,6 +412,10 @@ class CallStateMachine(
 
     /** __WB_ADPCM_CODEC_2026_09_23__ the peer advertised WB-ADPCM (offer slot 4 / accept index 4). */
     var peerWbAdpcm: Boolean = false
+        private set
+
+    /** __OPUS_CODEC_2026_09_23__ the peer advertised Opus (offer slot 5 / accept index 5). */
+    var peerOpus: Boolean = false
         private set
 
     /** The media key from the offer, once known. */
@@ -444,6 +470,7 @@ class CallStateMachine(
         if (store != null && BlockPolicy.outgoingCall(store, peerAddress) == BlockPolicy.Outbound.REFUSE_BLOCKED) {
             return CallDecision(state, refusal = CallRefusal.BLOCKED)
         }
+        if (isBlockedBy(peerAddress)) return CallDecision(state, refusal = CallRefusal.UNAVAILABLE)
 
         peer = peerAddress
         callId = newCallId
@@ -456,7 +483,7 @@ class CallStateMachine(
         lastAcceptAtMs = null
 
         val type = if (video) CallPacket.Type.VIDEO_CALL_REQUEST else CallPacket.Type.CALL_REQUEST
-        val offer = CallOffer(newSessionKey, newNonceSalt, newCallId, supportsVideo = true, supportsWbAdpcm = true).encode()
+        val offer = CallOffer(newSessionKey, newNonceSalt, newCallId, supportsVideo = true, supportsWbAdpcm = true, supportsOpus = true).encode()
 
         // CONNECTING first, then RINGING — both clients publish the intermediate state and
         // arm a 20 s watchdog on it (`:5744`/`:5766`, `:1375`/`:1377`). Collapsing the two
@@ -491,7 +518,7 @@ class CallStateMachine(
         enter(CallState.CONNECTING, nowMs)
         val actions = mutableListOf<CallAction>(
             CallAction.StopRinging,
-            CallAction.Send(p, type, CallAccept(supportsVideo = true, supportsWbAdpcm = true).encode(), CallSignalType.CALL_ACCEPT, id),
+            CallAction.Send(p, type, CallAccept(supportsVideo = true, supportsWbAdpcm = true, supportsOpus = true).encode(), CallSignalType.CALL_ACCEPT, id),
         )
         // The callee connects on sending the accept; the caller connects on receiving it.
         // Both clients do it this way, and the asymmetry is why the accept is
@@ -623,26 +650,6 @@ class CallStateMachine(
                 }
             }
 
-            // SAME PEER, NEW CALL: the peer cannot be in two calls with us, so a fresh
-            // offer from the person we are (still) connected to or ringing with means
-            // they abandoned the old one — their app restarted, crashed, or lost the
-            // call. Found with a real iPhone (2026-09-24): the iOS app died mid-call,
-            // the user redialled, and the desktop — still IN_CALL on the dead call —
-            // answered the redial with a BUSY decline, so the user saw "rejected".
-            // End the stale call locally (no callEnd: the peer has already dropped it)
-            // and ring the new one. Android's IncomingCallAdmission replaces a redial
-            // from the same caller the same way.
-            if (samePeer && !dialing) {
-                seenOffers[offer.callId] = nowMs
-                val actions = mutableListOf<CallAction>(CallAction.StopRinging)
-                if (state != CallState.ENDED) {
-                    finish(CallEndReason.CONNECTION_LOST, nowMs, actions, connected = state == CallState.IN_CALL)
-                }
-                resetCall()
-                ring(from, offer, packet.type.isVideo, nowMs, actions)
-                return CallDecision(state, actions, refusal = CallRefusal.NONE)
-            }
-
             // BUSY. iOS declines, Android sends nothing. We decline — see RACE 4.
             return CallDecision(
                 state,
@@ -676,6 +683,7 @@ class CallStateMachine(
         sessionKey = offer.sessionKey
         nonceSalt = offer.nonceSalt
         peerWbAdpcm = offer.supportsWbAdpcm
+        peerOpus = offer.supportsOpus
         connectedAtMs = null
         dialedAtMs = null
         enter(CallState.RINGING, nowMs)
@@ -706,7 +714,9 @@ class CallStateMachine(
         // it anyway keeps the codec exercised and makes an empty legacy accept a tested
         // case rather than a discovered one.
         // __WB_ADPCM_CODEC_2026_09_23__ except slot 4: WB-ADPCM is the one codec we share.
-        peerWbAdpcm = CallAccept.decode(packet.payload).supportsWbAdpcm
+        val acceptCaps = CallAccept.decode(packet.payload)
+        peerWbAdpcm = acceptCaps.supportsWbAdpcm
+        peerOpus = acceptCaps.supportsOpus
 
         val actions = mutableListOf<CallAction>(CallAction.StopRinging)
         connect(nowMs, actions)
@@ -770,16 +780,8 @@ class CallStateMachine(
         // It is recorded and never branched on, because Android discards it entirely
         // (`EnhancedCallManager.kt:2797-2800`) and a state machine that behaved
         // differently per reason would diverge from a peer that never sends one.
-        val wire = CallEndReason.fromWire(String(packet.payload, Charsets.UTF_8))
+        val reason = CallEndReason.fromWire(String(packet.payload, Charsets.UTF_8))
             ?: CallEndReason.HUNG_UP
-        // A `callEnd` from the CALLEE while our outgoing call is still RINGING is a refusal.
-        // iOS sends `callDecline` only from its in-app overlay; Decline on the CallKit
-        // screen (lock screen / banner) runs `endCall(reason: .hungUp)` and sends
-        // `callEnd` (`VoiceCallManager.swift:4982-5002`). Measured with a real iPhone on
-        // 2026-09-23: the history read "hung_up, not connected" for a decline.
-        val reason = if (isOutgoing && state == CallState.RINGING && wire == CallEndReason.HUNG_UP) {
-            CallEndReason.DECLINED
-        } else wire
         val wasConnected = state == CallState.IN_CALL
         val actions = mutableListOf<CallAction>(CallAction.StopRinging)
         finish(reason, nowMs, actions, connected = wasConnected)
@@ -882,7 +884,7 @@ class CallStateMachine(
         val key = sessionKey
         val salt = nonceSalt
         if (key != null && salt != null) {
-            actions.add(CallAction.StartMedia(peer!!, callId!!, key, salt, isOutgoing, peerWbAdpcm))
+            actions.add(CallAction.StartMedia(peer!!, callId!!, key, salt, isOutgoing, peerWbAdpcm, peerOpus))
         }
     }
 
@@ -903,8 +905,10 @@ class CallStateMachine(
     }
 
     private fun enter(next: CallState, nowMs: Long) {
+        val previous = state
         state = next
         stateSinceMs = nowMs
+        if (previous != next) onStateChange?.invoke(previous, next)
     }
 
     private fun resetCall() {
@@ -915,6 +919,7 @@ class CallStateMachine(
         sessionKey = null
         nonceSalt = null
         peerWbAdpcm = false
+        peerOpus = false
         connectedAtMs = null
         dialedAtMs = null
         lastAcceptAtMs = null

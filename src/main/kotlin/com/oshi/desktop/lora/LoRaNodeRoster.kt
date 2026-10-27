@@ -33,6 +33,17 @@ class LoRaNodeRoster {
     private var myNodeNum: UInt = 0u
     /** node number → last heard, Unix millis. 0 = known but never heard with a trusted clock. */
     private val lastHeardMs = HashMap<UInt, Long>()
+    /** node number → the name the radio announced. Absent for a node that only ever sent packets. */
+    private val names = HashMap<UInt, String>()
+
+    /**
+     * One node the radio has heard — what the header's peers list shows for it.
+     *
+     * [name] is empty when the radio never announced one: a node whose `NodeInfo` we have not
+     * seen is still heard and still counted, and the UI renders `lora.node.unnamed` for it
+     * rather than dressing a hex id up as a name.
+     */
+    data class Node(val num: UInt, val name: String, val lastHeardMs: Long)
 
     /** Fold one raw `FromRadio`. Anything it does not recognise is ignored. */
     fun observeFromRadio(fromRadio: ByteArray, nowMs: Long) {
@@ -53,9 +64,20 @@ class LoRaNodeRoster {
         if (num == 0u) return
         val reportedS = LoRaProto.field(nodeInfo, 5, wire = 5)?.asUInt32()?.toLong()
         val reportedMs = reportedS?.takeIf { it > PLAUSIBLE_EPOCH_S }?.let { minOf(nowMs, it * 1000) } ?: 0L
+        // `NodeInfo.user` (field 4) is a `User`: id (1), long_name (2), short_name (3). The long
+        // name is what every other client labels the node with; the short name is the four bytes
+        // its own screen shows, and is the fallback rather than a second line.
+        val announced = LoRaProto.field(nodeInfo, 4, wire = 2)?.let { user ->
+            val long = LoRaProto.field(user.payload, 2, wire = 2)?.payload?.decodeToString()?.trim().orEmpty()
+            val shortName = LoRaProto.field(user.payload, 3, wire = 2)?.payload?.decodeToString()?.trim().orEmpty()
+            long.ifEmpty { shortName }
+        }?.takeIf { it.isNotEmpty() }
         synchronized(lock) {
             // Never move a node we already heard directly back in time.
             lastHeardMs[num] = maxOf(lastHeardMs[num] ?: 0L, reportedMs)
+            // A name is only ever REPLACED by another name: a later NodeInfo with the user field
+            // absent must not blank the label of a node already in the list.
+            if (announced != null) names[num] = announced
         }
     }
 
@@ -71,9 +93,25 @@ class LoRaNodeRoster {
         }
     }
 
+    /**
+     * Exactly the nodes [onlineCount] counts, named, most recently heard first — the list
+     * behind the header badge (iOS `PeersView`, the "LoRa radios" section).
+     *
+     * Deliberately derived from the SAME predicate as the count: a list and a count that
+     * disagree is the defect this mirrors on the phones, where a node aged out of one and not
+     * the other.
+     */
+    fun onlineNodes(nowMs: Long): List<Node> = synchronized(lock) {
+        lastHeardMs.entries
+            .filter { (num, heard) -> num != myNodeNum && heard > 0 && nowMs - heard < ONLINE_WINDOW_MS }
+            .map { (num, heard) -> Node(num, names[num].orEmpty(), heard) }
+            .sortedByDescending { it.lastHeardMs }
+    }
+
     /** Forget everything — on detach, a different radio may be attached next. */
     fun clear() = synchronized(lock) {
         myNodeNum = 0u
         lastHeardMs.clear()
+        names.clear()
     }
 }

@@ -200,6 +200,24 @@ private fun BubbleBody(
     media: MediaPresentation?,
     onReveal: () -> Unit,
 ) {
+    // __VIDEO_NOTE_2026_09_24__ A round video note has no bubble, no tail and no caption box
+    // (VIDEO_NOTE_SPEC §4): the circle IS the message. A sealed view-once row keeps the
+    // ordinary sealed card below — the seal is decided in one place, `MediaPresentation`.
+    if (row.videoNote && !row.deleted && media != null && media.kind == com.oshi.desktop.store.MediaType.VIDEO &&
+        !media.sealedViewOnce && !media.unparseable
+    ) {
+        Column(horizontalAlignment = if (row.fromMe) Alignment.End else Alignment.Start) {
+            VideoNoteBubble(
+                path = media.path,
+                announcedDurationMs = row.mediaDurationMs,
+                missingNote = if (media.note == MediaPresentation.MISSING_FILE_NOTE) com.oshi.desktop.i18n.dt("desktop.videonote.missing") else null,
+            )
+            if (row.body.isNotBlank()) {
+                Text(row.body, style = OshiTheme.typography.bodyMedium, color = Ink.strong, modifier = Modifier.padding(top = OshiTheme.xs))
+            }
+        }
+        return
+    }
     val shape = bubbleShape(row.fromMe, lastInRun)
     val fill = if (row.fromMe) OshiTheme.bubbleOutgoing else WallpaperPainter.incomingFill(wallpaper)
     val rim = if (row.fromMe) Color.White.copy(alpha = 0.14f) else OshiTheme.textPrimary.copy(alpha = 0.07f)
@@ -259,6 +277,10 @@ private fun BubbleBody(
             // A mentioned person's `@name` is never offered to the ticker parser.
             if (!row.deleted) TickerChipsForText(row.body, row.id, Modifier.padding(top = OshiTheme.xs), tint = if (row.fromMe) Color.White else OshiTheme.brand, ink = ink,
                 exclude = mentionRanges(row.body, row.mentions))
+            // __CASHU_2026_10_24__ eCash card, same place as the ticker chips.
+            // Nothing is drawn unless a Cashu token actually DECODES in the
+            // body: a bubble must never offer to redeem a sentence.
+            if (!row.deleted) CashuTokenCardsForText(row.body, Modifier.padding(top = OshiTheme.xs))
         }
     }
 }

@@ -37,13 +37,15 @@ import javax.sound.sampled.TargetDataLine
  *
  * ============================================================ WHAT THE JDK DOES NOT GIVE YOU
  *
- * `javax.sound.sampled` is a device API and nothing more: no acoustic echo canceller, no
- * noise suppression, no automatic gain control, no jitter buffer, no packet-loss
- * concealment. **The first three now come from WebRTC's audio-processing module alone**
- * ([EchoControl], `__CALL_APM_2026_09_23__`) — a real iPhone call on 2026-09-23 heard its
- * own voice back and the Mac's microphone hiss. Where that native does not load
- * (windows-aarch64) the raw path remains, and there, on speakers, the far end hears
- * themselves; headphones make it go away. [PlaybackBuffer] below is a fixed 60 ms de-jitter queue, which is what the
+ * `javax.sound.sampled` is a device API and nothing more. It has **no acoustic echo
+ * canceller, no noise suppression, no automatic gain control, no jitter buffer and no
+ * packet-loss concealment.** All five exist in libwebrtc and none of them can be borrowed
+ * without taking the whole stack (see `build.gradle.kts`'s WEBRTC block).
+ *
+ * The practical consequence, stated plainly because a user will hear it: **on speakers,
+ * without headphones, the far end hears themselves.** That is not a bug in this file, it
+ * is the absence of an AEC, and no amount of buffer tuning fixes it. Headphones make it
+ * go away. [PlaybackBuffer] below is a fixed 60 ms de-jitter queue, which is what the
  * shipped clients started from too (`CALL_V2_PLAN.md` calls the current phone buffer "a
  * fixed 60 ms that drops everything late" and specifies an adaptive replacement that has
  * not shipped). This client is therefore no worse than the phones on jitter and worse
@@ -232,22 +234,6 @@ open class CallAudioSession(
     private var captureThread: Thread? = null
     private var renderThread: Thread? = null
 
-    /** Where the session reports echo-control availability. Set by the leg that owns it. */
-    @Volatile var log: (String) -> Unit = {}
-
-    /**
-     * __CALL_APM_2026_09_23__ AEC3 + noise suppression + AGC2 between the devices and the
-     * wire ([EchoControl]); null when the native will not load or it is disabled.
-     */
-    @Volatile internal var echo: EchoControl? = null
-        private set
-
-    /**
-     * Build the echo control for a session that opened real devices. `protected open` so
-     * a test can inject one around synthetic devices; the default is [EchoControl.create].
-     */
-    protected open fun createEchoControl(): EchoControl? = EchoControl.create(log)
-
     /** True between a successful [start] and [stop]. */
     val isRunning: Boolean get() = running.get()
 
@@ -270,6 +256,15 @@ open class CallAudioSession(
     private val wbRxResampler = WbResampler()
     /** __WB_POSTFILTER_2026_09_23__ receiver-side ADPCM hiss removal (see [WbPostFilter]). */
     private val wbRxPostFilter = WbPostFilter()
+
+    /**
+     * __OPUS_CODEC_2026_09_23__ Send 0x19 (Opus, ≤ 300 B/datagram, PESQ-WB ~4.2) — preferred
+     * over 0x18 when the peer advertised it, and flipped on by the first 0x19 received. The
+     * codec is Concentus compiled from `Vendor/concentus` (see [OpusCallEncoder]).
+     */
+    @Volatile var useOpus: Boolean = false
+    private var opusTx: OpusCallEncoder? = null
+    private var opusRx: OpusCallDecoder? = null
 
     /** Sealed frames handed to the socket. The outbound half of "audio is flowing". */
     val framesSent = java.util.concurrent.atomic.AtomicLong()
@@ -313,7 +308,6 @@ open class CallAudioSession(
         try {
             val d = openDevices()
             devices = d
-            echo = createEchoControl()
             captureThread = Thread({ pumpCapture(d) }, "oshi-call-capture").apply {
                 isDaemon = true
                 start()
@@ -347,6 +341,15 @@ open class CallAudioSession(
         if (!replay.accept(decoded.seq)) return false
         // 0x05 AAC-ELD and 0x16 OshiCodec authenticate fine and are not decodable here.
         // Dropping them is correct; playing the compressed bytes as PCM is white noise.
+        if (decoded.audioType == CallMediaFrame.TYPE_OPUS) {
+            val dec = opusRx ?: OpusCallDecoder().also { opusRx = it }
+            val frames = dec.decode(decoded.pcm)
+            if (frames.isEmpty()) return false
+            useOpus = true
+            // Recovered / concealed frames first, then the new one — all in play order.
+            for (f in frames) playback.offer(f.le())
+            return true
+        }
         if (decoded.audioType == CallMediaFrame.TYPE_WB_ADPCM) {
             val pcm = WbAdpcmCodec.decodeToPcm48(decoded.pcm, wbRxResampler, wbRxPostFilter)
             if (pcm.isEmpty()) return false
@@ -373,7 +376,17 @@ open class CallAudioSession(
                 if (buf.all { it == 0.toByte() }) consecutiveSilentFrames.incrementAndGet()
                 else consecutiveSilentFrames.set(0)
             }
-            val pcm = if (muted) ByteArray(buf.size) else (echo?.capture(buf.copyOf()) ?: buf.copyOf())
+            val pcm = if (muted) ByteArray(buf.size) else buf.copyOf()
+            if (useOpus) {
+                // One 20 ms read in ⇒ one payload out (older frames ride inside for recovery).
+                val enc = opusTx ?: OpusCallEncoder().also { opusTx = it }
+                val payloads = runCatching { enc.encodePcm48(pcm) }.getOrDefault(emptyList())
+                for (p in payloads) {
+                    val sealed = CallMediaFrame.encode(sessionKey, baseSalt, isCaller, sequence.next(), CallMediaFrame.TYPE_OPUS, p)
+                    if (runCatching { send(sealed) }.isSuccess) framesSent.incrementAndGet()
+                }
+                continue
+            }
             val wb = useWbAdpcm
             val sealed = CallMediaFrame.encode(
                 sessionKey, baseSalt, isCaller, sequence.next(),
@@ -408,8 +421,6 @@ open class CallAudioSession(
                     CallAudio.fadeIn(frame)
                 } else frame
             }
-            // The far-end reference for AEC: exactly these bytes, in play order.
-            echo?.render(pcm)
             runCatching { line.write(pcm, 0, pcm.size) }
         }
     }
@@ -432,8 +443,6 @@ open class CallAudioSession(
         renderThread = null
         devices?.let { runCatching { it.close() } }
         devices = null
-        echo?.let { runCatching { it.close() } }
-        echo = null
         playback.clear()
     }
 

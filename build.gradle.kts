@@ -15,7 +15,7 @@ plugins {
 }
 
 group = "com.oshi.desktop"
-version = "0.0.1"
+version = "1.3.2"
 
 /**
  * Where the two shipped trees live.
@@ -112,6 +112,19 @@ val sharedEncryptionSources =
     "$oshiAndroidRoot/app/src/main/java/com/oshi/messenger/network/encryption"
 
 /*
+ * __CASHU_2026_10_24__ The Cashu e-cash reader, shared rather than copied.
+ *
+ * A token pasted into a conversation has to read the SAME on a phone and on a
+ * desktop: the amount, the mint and the bearer warning are what the user acts
+ * on, and two implementations of a money format drift. The three files carry
+ * no `android.*` and no third-party dependency on purpose — the JSON and CBOR
+ * readers are hand-rolled — which is exactly what makes them compile here
+ * unchanged.
+ */
+val sharedCashuSources =
+    "$oshiAndroidRoot/app/src/main/java/com/oshi/messenger/util"
+
+/*
  * __GIF_PACK_2026_09_23__ The offline GIF + sticker library (1,718 GIFs, 1,454 stickers,
  * 15 categories, 15 languages) that iOS (`OSHI/GifPack`, `OSHI/StickerPack`) and Android
  * (`assets/GifPack`, `assets/StickerPack`) both ship — byte-identical, manifests included.
@@ -127,12 +140,34 @@ tasks.named<ProcessResources>("processResources") {
     }
 }
 
+/**
+ * __OPUS_CODEC_2026_09_23__ Concentus 1.0.2 — the pure-Java Opus port — vendored as SOURCE at
+ * the monorepo root (`Vendor/concentus`, pinned release, sha256 + PGP verified, see
+ * `Vendor/README-OSHI.md`) and compiled by this build: no prebuilt jar, no native library per
+ * OS, so Windows, Linux and macOS run the same bytecode as Android. Override with
+ * `-PoshiConcentusRoot=...` when the layout differs.
+ */
+val vendoredConcentus: String = providers.gradleProperty("oshiConcentusRoot").orNull
+    ?: rootDir.parentFile.resolve("Vendor/concentus/src/main/java").takeIf { it.isDirectory }?.absolutePath
+    // THE PUBLIC CHECKOUT: the same pinned source, copied to `Vendor/concentus` at the repo root
+    // (source + LICENSE + README-OSHI.md only — still no prebuilt jar). This third branch was
+    // added in the public repo for v1.3.1 and NOT backported, so every sync overwrote the one
+    // path that resolves Concentus there and the copy stopped compiling.
+    ?: rootDir.resolve("Vendor/concentus/src/main/java").absolutePath
+
 sourceSets {
     main {
+        java.srcDir(vendoredConcentus)
         kotlin.srcDir(sharedV2Sources)
         kotlin.srcDir(sharedServiceSources)
         kotlin.srcDir(sharedEncryptionSources)
+        kotlin.srcDir(sharedCashuSources)
         kotlin.include(
+            // __CASHU_2026_10_24__ e-cash: the reader, its two parsers, the command.
+            "**/CashuTokens.kt",
+            "**/CashuCbor.kt",
+            "**/CashuJson.kt",
+            "**/CashuPayCommand.kt",
             "**/OSHICryptoV2.kt",
             "**/OSHICryptoV2Streaming.kt",
             "**/OSHIRatchetV2.kt",
@@ -161,6 +196,28 @@ sourceSets {
             // `com.oshi.desktop.call.CallRatingClient`, which holds the same state in
             // `DesktopPaths` and calls straight into this policy.
             "**/CallRatingPolicy.kt",
+            // __VIDEO_REORDER_2026_09_23__ / __VIDEO_ABR_2026_09_23__ The video receive
+            // reorder window and the send-side rate ladder. No imports at all; shared so the
+            // phone and the desktop reassemble, skip, ask for keyframes and step bitrate by the
+            // SAME rules — a drift here would never fail to compile, it would just be a
+            // desktop that freezes where the phone does not.
+            "**/VideoReorderReassembler.kt",
+            "**/VideoRateController.kt",
+            // __CALL_LOG_AT_REST_2026_09_23__ The sealed call diagnostics log (OSHILOG1) and
+            // its allow-list redaction — `service/diag/CallFileLogger.kt`, pure JVM. Shared so
+            // the file format and the redacted export cannot drift between the phone and the
+            // desktop; iOS parity is pinned by fixtures in the Android test resources, which
+            // this build already reads. The Android seams (`CallDiag`, `CallLogKey`) are NOT
+            // included: they are Context + Keystore.
+            "**/CallFileLogger.kt",
+            // __VIDEO_NOTE_2026_09_24__ The round-video-note wire rules (docs/VIDEO_NOTE_SPEC.md):
+            // `service/media/VideoNote.kt` — key names, the true-or-absent emit rule, the tolerant
+            // duration read, the group merge and the 15 s cap. Only `org.json`, no `android.*`.
+            // Shared because the shared `V2FileKeyMessage.kt` now calls it, and because a copy of
+            // a receiver rule that drifted would never fail to compile — it would just draw a
+            // round bubble on one platform and a square one on another.
+            // (relative to the shared `service/` srcDir, hence no `**/` prefix)
+            "media/VideoNote.kt",
             // __DEVSYNC_DIRECT_2026_09_22__ The own-device sync core
             // (docs/OSHI_DEVICE_SYNC_DIRECT.md): Noise XXpsk0, framing, diff/merge, linked-device
             // registry, sessions, LAN + relay plumbing. The whole `network/v2/devsync/` package is
@@ -523,19 +580,12 @@ dependencies {
 
     // PARITY.md row 2.1. OPT-IN — see the WEBRTC block above for the whole justification
     // and for why the SHIPPING media path needs none of this.
-    //
-    // __CALL_APM_2026_09_23__ ALWAYS ON, for ONE class: `dev.onvoid.webrtc.media.audio.
-    // AudioProcessing` — WebRTC's audio-processing module (AEC3 echo canceller, noise
-    // suppression, AGC2), used by `call/media/EchoControl.kt` on the shipping PCM path. No
-    // WebRTC transport, SDP or codec is used: the `call/webrtc/**` sources stay excluded
-    // unless -PwithWebRtc=true. Why: the desktop had NO echo control, and a real iPhone
-    // call (2026-09-23) heard its own voice back plus the Mac's mic hiss; the iPhone uses
-    // Apple's voice processing (`VoiceCallManager.swift:9645`). Where no native exists
-    // (windows-aarch64), EchoControl logs it and the call keeps the raw path.
     val nativeClassifier = webrtcNativeClassifier
-    implementation("dev.onvoid.webrtc:webrtc-java:$webrtcVersion")
-    if (nativeClassifier != null) {
-        implementation("dev.onvoid.webrtc:webrtc-java:$webrtcVersion:$nativeClassifier")
+    if (withWebRtc) {
+        implementation("dev.onvoid.webrtc:webrtc-java:$webrtcVersion")
+        if (nativeClassifier != null) {
+            implementation("dev.onvoid.webrtc:webrtc-java:$webrtcVersion:$nativeClassifier")
+        }
     }
     if (withWebRtc && nativeClassifier == null) {
         logger.warn(
@@ -806,7 +856,7 @@ val linuxPackageName = "oshi-desktop"
  * Installer version. Override with `-PappVersion=1.2.3`.
  *
  * THE PROJECT VERSION IS NOT A LEGAL INSTALLER VERSION, and this was OBSERVED, not read
- * in a manual. `version` is `0.0.1`, and jpackage 17 on macOS refuses it outright:
+ * in a manual. `version` used to be `0.0.1`, and jpackage 17 on macOS refused it outright:
  *
  *     Bundler Mac Application Image skipped because of a configuration problem:
  *     The first number in an app-version cannot be zero or negative.

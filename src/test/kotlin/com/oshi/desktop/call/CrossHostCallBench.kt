@@ -73,6 +73,7 @@ class CrossHostCallBench {
         val callerId = identity("caller"); val calleeId = identity("callee")
         println("[cross] os=${System.getProperty("os.name")} ${System.getProperty("os.arch")} role=$role " +
             "relay=$relayMode caller=${callerId.userKey.take(12)}… callee=${calleeId.userKey.take(12)}…")
+        if (System.getenv("OSHI_CROSS_PRINT_KEYS") == "1") println("[cross] keys caller=${callerId.userKey} callee=${calleeId.userKey}")
         when (role) {
             "both" -> {
                 val a = Side("caller", callerId); val b = Side("callee", calleeId)
@@ -142,7 +143,7 @@ class CrossHostCallBench {
                     CallMediaLeg(
                         spec = spec,
                         datagram = datagram,
-                        audioFor = { send -> ToneAudioSession(spec, send, heard) },
+                        audioFor = { send -> ToneAudioSession(spec, send, heard).also { it.useWbAdpcm = spec.wbAdpcm; it.useOpus = spec.opus } },
                         stunServer = StunBinding.DEFAULT_SERVER,
                         log = log,
                         relayConfig = relayConfig,
@@ -220,6 +221,7 @@ class CrossHostCallBench {
             val secs = holdMs / 1000.0
             println(
                 "[cross-result] $name os=${System.getProperty("os.name")} encoder=${v.encoderName} " +
+                    "audioCodec=${if (lane.media?.audio?.useOpus == true) "opus(0x19)" else if (lane.media?.audio?.useWbAdpcm == true) "wb-adpcm(0x18)" else "pcm(0x15)"} " +
                     "camera=${v.cameraRunning} problem=${v.cameraProblem} | received over ${secs}s: " +
                     "$pics pictures (${"%.1f".format(pics / secs)} fps, ${v.remoteFrame?.width}x${v.remoteFrame?.height}), " +
                     "$audio audio frames accepted, $tone non-silent frames played | sent ${d.framesSent} audio, " +

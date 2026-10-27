@@ -29,12 +29,20 @@ import java.io.OutputStream
 class VideoReceiveSession(
     private val sessionKey: ByteArray,
     private val sink: VideoStreamSink? = null,
-    /** Frames to wait before asking for another IDR. ~1 s at 30 fps. */
-    private val keyframeRequestIntervalFrames: Int = 30,
+    /**
+     * Datagrams to wait before asking for another IDR.
+     *
+     * __VIDEO_REORDER_2026_09_23__ 30 → 8. The request is now raised only for a reference
+     * frame that is truly lost (not for a reordered one), and the control session's token
+     * bucket still bounds what reaches the wire; at 30 datagrams (~5 frames of a 1 Mbit/s
+     * stream) a second loss inside the same second went unanswered until the peer's GOP.
+     */
+    private val keyframeRequestIntervalFrames: Int = 8,
+    clock: () -> Long = System::currentTimeMillis,
 ) {
 
     private val replay = NonceReplayWindow()
-    private val reassembler = VideoReassembler()
+    private val reassembler = VideoReassembler(clock)
 
     private var cachedSps: ByteArray? = null
     private var cachedPps: ByteArray? = null
@@ -72,6 +80,9 @@ class VideoReceiveSession(
     /** Completed ÷ (completed + lost), as a percentage. */
     fun completionRate(): Double = reassembler.completionRate()
 
+    /** One frame released to the decoder. */
+    class DeliveredFrame(val frameId: Int, val isKeyFrame: Boolean, val annexB: ByteArray)
+
     /**
      * The result of one datagram.
      *
@@ -80,6 +91,10 @@ class VideoReceiveSession(
      * own `requestKeyFrame()` so the request never reached the wire while the peer went on
      * sending P-frames into a broken decoder (`kt:702-712`, audit A-4 / D-7). Sending it
      * is the caller's job; this class only says when.
+     *
+     * One datagram may release SEVERAL frames (a late fragment that completes a held-back
+     * frame lets the ones queued behind it go too): [frames] has them all, in decode
+     * order; [delivered]/[isKeyFrame]/[frameId]/[annexB] describe the first.
      */
     class Result(
         val delivered: Boolean,
@@ -88,6 +103,7 @@ class VideoReceiveSession(
         val requestKeyframe: Boolean = false,
         /** The Annex-B access unit, when one was produced. Also written to the sink. */
         val annexB: ByteArray? = null,
+        val frames: List<DeliveredFrame> = emptyList(),
     )
 
     /** Feed one `0xF1` envelope straight off the transport. */
@@ -96,15 +112,80 @@ class VideoReceiveSession(
         if (opened == null) { rejected++; return Result(false) }
         if (!replay.accept(opened.nonce)) { replayed++; return Result(false) }
         if (sinceKeyframeRequest < Int.MAX_VALUE) sinceKeyframeRequest++
+        meterLoss(opened)
+        return release(reassembler.offer(opened.fragment))
+    }
 
-        val outcome = reassembler.offer(opened.fragment)
-        val abandoned = outcome.requestKeyframe
-        if (outcome.reason != VideoReassembler.Reason.COMPLETE || outcome.frame == null) {
-            return Result(false, requestKeyframe = throttle(abandoned))
+    // __VIDEO_ABR_2026_09_23__ Datagram loss of the peer's video, from the nonce counter —
+    // one per fragment, from 1, on every current sender (iOS, Android, desktop), inside the
+    // AEAD so it cannot be forged. The header `seq` is useless for this (its byte order
+    // depends on the phone). A new salt is a restarted sender: the meter restarts with it.
+    // A counter is SETTLED only once [LOSS_LAG] newer ones have arrived, so a reordered
+    // datagram still in flight is not read as lost (it was, at 5 % reordering: the
+    // controller stepped a loss-free link down).
+    private var meterSalt = 0
+    private var meterMax = -1L
+    private var meterBase = 0L
+    private val meterPending = java.util.PriorityQueue<Long>()
+    private var settledBound = 0L
+    private var settledReceived = 0L
+    private var sampleBound = 0L
+    private var sampleReceived = 0L
+
+    private fun meterLoss(o: VideoMediaFrame.Decoded) {
+        if (!o.hasVideoDomainBit) return
+        val salt = ((o.nonce[0].toInt() and 0xFF) shl 24) or ((o.nonce[1].toInt() and 0xFF) shl 16) or
+            ((o.nonce[2].toInt() and 0xFF) shl 8) or (o.nonce[3].toInt() and 0xFF)
+        val c = o.counter
+        if (meterMax < 0 || salt != meterSalt) {
+            meterSalt = salt; meterMax = c; meterBase = c - 1
+            meterPending.clear()
+            settledBound = meterBase; settledReceived = 0; sampleBound = meterBase; sampleReceived = 0
         }
+        if (c <= settledBound) { settledReceived++; return } // late, but it did arrive
+        meterPending.add(c)
+        if (c > meterMax) meterMax = c
+        val bound = meterMax - LOSS_LAG
+        if (bound > settledBound) {
+            settledBound = bound
+            while (meterPending.isNotEmpty() && meterPending.peek() <= bound) { meterPending.poll(); settledReceived++ }
+        }
+    }
 
-        val parsed = VideoFramePacket.decode(outcome.frame)
-        if (parsed == null) { rejected++; return Result(false, requestKeyframe = throttle(abandoned)) }
+    /**
+     * Datagram loss (%) of the peer's video since the previous call, or null when fewer
+     * than [minDatagrams] have settled — too few to say anything.
+     */
+    fun takeLossSample(minDatagrams: Int = 20): Double? {
+        if (meterMax < 0) return null
+        val dExp = settledBound - sampleBound
+        if (dExp < minDatagrams) return null
+        val dRec = settledReceived - sampleReceived
+        sampleBound = settledBound; sampleReceived = settledReceived
+        return ((dExp - dRec).coerceAtLeast(0) * 100.0 / dExp)
+    }
+
+    /** Release frames whose hold window expired while no datagram arrived. */
+    fun poll(): Result = release(reassembler.poll())
+
+    private fun release(outcome: VideoReassembler.Outcome): Result {
+        var wantKey = outcome.requestKeyframe
+        val out = ArrayList<DeliveredFrame>(outcome.released.size)
+        for (r in outcome.released) {
+            val d = decodeFrame(r.frameId, r.frame)
+            if (d == null) { wantKey = true; continue }
+            out += d
+            // An IDR delivered after a hole already IS the recovery.
+            if (d.isKeyFrame) { wantKey = false; owedKeyframe = false }
+        }
+        val first = out.firstOrNull()
+        return Result(first != null, first?.isKeyFrame ?: false, first?.frameId ?: outcome.frameId,
+            throttle(wantKey), first?.annexB, out)
+    }
+
+    private fun decodeFrame(frameId: Int, frame: ByteArray): DeliveredFrame? {
+        val parsed = VideoFramePacket.decode(frame)
+        if (parsed == null) { rejected++; return null }
         lastRotationCode = parsed.rotationCode
 
         val (sps, pps) = VideoFramePacket.bestParameterSets(parsed, cachedSps, cachedPps)
@@ -117,7 +198,7 @@ class VideoReceiveSession(
         if (!sawIdr) {
             if (!idr || sps == null || pps == null) {
                 droppedBeforeIdr++
-                return Result(false, requestKeyframe = throttle(true))
+                return null
             }
             sink?.writeParameterSets(sps, pps)
             writtenSps = sps; writtenPps = pps
@@ -126,19 +207,18 @@ class VideoReceiveSession(
             (!sps.contentEquals(writtenSps) || !pps.contentEquals(writtenPps))
         ) {
             // The peer's encoder was rebuilt — an iPhone recreates VideoToolbox on every
-            // rotation (`swift:1666`), so 360×640 becomes 640×360 mid-call. A decoder that
-            // keeps the first SPS decodes the new IDR against the wrong geometry.
+            // rotation (`swift:1666`), and a desktop or Android sender stepping down its
+            // resolution ladder does the same. A decoder that keeps the first SPS decodes
+            // the new IDR against the wrong geometry.
             sink?.writeParameterSets(sps, pps)
             writtenSps = sps; writtenPps = pps
         }
 
         val annexB = VideoFramePacket.toAnnexB(body)
-        if (annexB.isEmpty()) { rejected++; return Result(false, requestKeyframe = throttle(abandoned)) }
+        if (annexB.isEmpty()) { rejected++; return null }
         sink?.writeAccessUnit(annexB)
         delivered++
-        // An IDR that arrives after a hole already IS the recovery: asking for another one
-        // would only spend the peer's uplink on a second keyframe.
-        return Result(true, idr, outcome.frameId, throttle(abandoned && !idr), annexB)
+        return DeliveredFrame(frameId, idr, annexB)
     }
 
     /**
@@ -148,10 +228,20 @@ class VideoReceiveSession(
      * datagram — a request storm aimed at the peer that is already struggling.
      */
     private fun throttle(want: Boolean): Boolean {
-        if (!want) return false
+        // A request the throttle holds back is OWED, not forgotten: the loss that raised it
+        // happened once, and no later datagram would raise it again. An IDR clears the debt.
+        if (want) owedKeyframe = true
+        if (!owedKeyframe) return false
         if (sinceKeyframeRequest < keyframeRequestIntervalFrames) return false
         sinceKeyframeRequest = 0
+        owedKeyframe = false
         return true
+    }
+    private var owedKeyframe = false
+
+    private companion object {
+        /** Datagrams (~100 ms of a 1 Mbit/s stream) a counter waits before it may count as lost. */
+        const val LOSS_LAG = 32L
     }
 
     /** The rotation the DISPLAY would have to apply, from the last frame that carried one. */

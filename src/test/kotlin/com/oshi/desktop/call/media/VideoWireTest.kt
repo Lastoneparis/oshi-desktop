@@ -356,8 +356,8 @@ class VideoWireTest {
     fun `lateness is measured on the circle, not on the line`() {
         val r = VideoReassembler()
         r.offer(VideoFragment.fragment(65535, ByteArray(4))[0])
-        // id 2 is NEWER than 65535 across the wrap
-        assertEquals(VideoReassembler.Reason.COMPLETE, r.offer(VideoFragment.fragment(2, ByteArray(4))[0]).reason)
+        // id 2 is NEWER than 65535 across the wrap: held for 0 and 1, never late
+        assertEquals(VideoReassembler.Reason.BUFFERED, r.offer(VideoFragment.fragment(2, ByteArray(4))[0]).reason)
         // id 65534 is older
         assertEquals(VideoReassembler.Reason.LATE, r.offer(VideoFragment.fragment(65534, ByteArray(4))[0]).reason)
     }
@@ -385,37 +385,75 @@ class VideoWireTest {
         assertEquals(0, r.pending())
     }
 
+    private class Clock(var now: Long = 1_000L) : () -> Long { override fun invoke() = now }
+
     /**
-     * An in-flight frame that a newer one overtakes is unrecoverable, so it goes — and the
-     * peer has to be asked for an IDR, because our reference frame just died.
+     * __VIDEO_REORDER_2026_09_23__ A newer frame no longer abandons an older unfinished one:
+     * a datagram that overtook another across a frame boundary is reordering, not loss.
+     * The late fragment completes the old frame, and both go out in decode order.
      */
     @Test
-    fun `a newer frame abandons an older in-flight one and asks the peer for a keyframe`() {
-        val old = VideoFragment.fragment(10, ByteArray(2200) { 1 })
-        val new = VideoFragment.fragment(11, ByteArray(2200) { 2 })
-        val r = VideoReassembler()
-        assertFalse(r.offer(old[0]).requestKeyframe)
-        val out = r.offer(new[0])
-        assertTrue("the abandoned frame must produce a keyframe request", out.requestKeyframe)
-        assertEquals(1, r.pending())
+    fun `a reordered fragment completes its frame and both frames go out in order`() {
+        val old = VideoFragment.fragment(10, ByteArray(1500) { 1 })
+        val new = VideoFragment.fragment(11, ByteArray(1500) { 2 })
+        val r = VideoReassembler(Clock())
+        assertEquals(VideoReassembler.Reason.BUFFERED, r.offer(old[0]).reason)
+        val a = r.offer(new[0]); val b = r.offer(new[1])
+        assertFalse("reordering is not loss", a.requestKeyframe || b.requestKeyframe)
+        assertEquals("11 is whole but waits for 10", VideoReassembler.Reason.BUFFERED, b.reason)
+        val out = r.offer(old[1])
+        assertEquals(VideoReassembler.Reason.COMPLETE, out.reason)
+        assertEquals(listOf(10, 11), out.released.map { it.frameId })
+        assertFalse(out.requestKeyframe)
+        assertEquals(0L, r.lostFrames)
+        assertEquals(1L, r.reorderedFrames)
+        assertEquals(0, r.pending())
     }
 
     /**
-     * A frame lost WHOLE leaves nothing in flight to abandon — only the gap in frame ids
-     * shows it. That gap must ask for an IDR too (iOS `noteFrameCompleted`), or the decoder
-     * runs on a broken reference until the peer's next periodic keyframe.
+     * A frame lost WHOLE is waited for at most 2 newer frames, then skipped — and only then
+     * is a keyframe requested (iOS `noteFrameCompleted`), because the next frame references it.
      */
     @Test
-    fun `a frame lost whole is seen from the gap and asks the peer for a keyframe`() {
-        val r = VideoReassembler()
-        assertFalse(r.offer(VideoFragment.fragment(20, ByteArray(300) { 1 })[0]).requestKeyframe)
-        // frame 21 (one fragment) never arrives
-        val out = r.offer(VideoFragment.fragment(22, ByteArray(300) { 3 })[0])
+    fun `a frame lost whole is skipped after the window and asks the peer for a keyframe`() {
+        val r = VideoReassembler(Clock())
+        fun p(id: Int) = VideoFragment.fragment(id, byteArrayOf(0) + ByteArray(299) { 1 })[0] // flags 0: P-frame
+        assertFalse(r.offer(p(20)).requestKeyframe)
+        // frame 21 never arrives
+        assertEquals(VideoReassembler.Reason.BUFFERED, r.offer(p(22)).reason)
+        assertEquals(VideoReassembler.Reason.BUFFERED, r.offer(p(23)).reason)
+        val out = r.offer(p(24))
         assertEquals(VideoReassembler.Reason.COMPLETE, out.reason)
-        assertTrue("a gap in frame ids is a lost reference", out.requestKeyframe)
+        assertEquals(listOf(22, 23, 24), out.released.map { it.frameId })
+        assertEquals(1, out.released[0].lostBefore)
+        assertTrue("a lost reference is a keyframe request", out.requestKeyframe)
         assertEquals(1L, r.lostFrames)
-        assertFalse("the next in-order frame is healthy",
-            r.offer(VideoFragment.fragment(23, ByteArray(300) { 4 })[0]).requestKeyframe)
+        assertFalse("the next in-order frame is healthy", r.offer(p(25)).requestKeyframe)
+    }
+
+    /** The hold is also bounded in TIME: 100 ms, released by [VideoReassembler.poll]. */
+    @Test
+    fun `a held frame is released by the clock`() {
+        val clock = Clock()
+        val r = VideoReassembler(clock)
+        r.offer(VideoFragment.fragment(1, ByteArray(4))[0])
+        assertEquals(VideoReassembler.Reason.BUFFERED, r.offer(VideoFragment.fragment(3, ByteArray(4))[0]).reason)
+        clock.now += 99
+        assertTrue(r.poll().released.isEmpty())
+        clock.now += 1
+        assertEquals(listOf(3), r.poll().released.map { it.frameId })
+    }
+
+    /** A keyframe behind a hole needs nothing before it: released at once, no request. */
+    @Test
+    fun `a keyframe behind a hole is released at once and needs no request`() {
+        val r = VideoReassembler(Clock())
+        r.offer(VideoFragment.fragment(1, byteArrayOf(0, 9))[0])
+        val out = r.offer(VideoFragment.fragment(3, byteArrayOf(1, 9))[0]) // flags bit 0: keyframe
+        assertEquals(listOf(3), out.released.map { it.frameId })
+        assertTrue(out.released[0].isKeyFrame)
+        assertFalse(out.requestKeyframe)
+        assertEquals("2 is late now", VideoReassembler.Reason.LATE, r.offer(VideoFragment.fragment(2, ByteArray(4))[0]).reason)
     }
 
     /** Every datagram a full fragment makes must fit 1200 B even after the `:8089` relay framing. */
@@ -430,28 +468,32 @@ class VideoWireTest {
     }
 
     @Test
-    fun `decreasing unfinished frame ids cannot grow reassembly without bound`() {
-        val r = VideoReassembler()
-        // Every id is older than its predecessor on the circular sequence, so the normal
-        // newer-frame eviction deliberately cannot apply. Before the cap this grew to all
-        // 65,536 ids, each retaining an array sized by the peer-controlled total field.
-        for (id in 40 downTo 9) {
+    fun `unfinished frame ids cannot grow reassembly without bound`() {
+        val r = VideoReassembler(Clock())
+        // A decreasing id stream is late from its second id on; an increasing stream of
+        // frames that never finish is what could grow — each retaining an array sized by the
+        // peer-controlled total field. 32 are held, then the oldest is given up.
+        for (id in 9..40) {
             assertEquals(VideoReassembler.Reason.BUFFERED,
                 r.offer(byteArrayOf(0x01, 0, id.toByte(), 0, 2, 0x55)).reason)
         }
         assertEquals(32, r.pending())
-        val capped = r.offer(byteArrayOf(0x01, 0, 8, 0, 2, 0x55))
+        val capped = r.offer(byteArrayOf(0x01, 0, 41, 0, 2, 0x55))
         assertEquals(VideoReassembler.Reason.BUFFERED, capped.reason)
         assertTrue("eviction must ask the peer for a recoverable keyframe", capped.requestKeyframe)
         assertEquals("the 33rd unfinished frame replaces the oldest, never grows the map", 32, r.pending())
+        assertEquals(VideoReassembler.Reason.LATE, r.offer(byteArrayOf(0x01, 0, 8, 0, 2, 0x55)).reason)
     }
 
-    /** Fragment loss never fires a completion callback, so it is counted from the gaps. */
+    /** Fragment loss never fires a completion callback, so skipped frames are counted. */
     @Test
-    fun `frames that never complete are counted from the frame_id gaps`() {
-        val r = VideoReassembler()
+    fun `frames that never complete are counted when skipped`() {
+        val clock = Clock()
+        val r = VideoReassembler(clock)
         r.offer(VideoFragment.fragment(1, ByteArray(4))[0])
         r.offer(VideoFragment.fragment(5, ByteArray(4))[0])
+        clock.now += 150
+        r.poll()
         assertEquals(2L, r.completedFrames)
         assertEquals("2, 3 and 4 never completed", 3L, r.lostFrames)
         assertEquals(40.0, r.completionRate(), 0.001)
