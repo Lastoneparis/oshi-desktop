@@ -213,11 +213,32 @@ internal object BotSealFixtures {
     const val PLACEHOLDER = "🔒 Encrypted bot message. Update OSHI to read it."
     private val rng = SecureRandom()
 
+    /**
+     * The sealing vectors, wherever this checkout keeps them.
+     *
+     * __BOT_VECTORS_DID_NOT_TRAVEL_2026_10_30__ The first two candidates are the monorepo's
+     * own layout and only work when `ServerPatches/` is a sibling. In the PUBLIC repo the
+     * desktop project IS the repo root, `ServerPatches/` does not exist, and all 18 bot
+     * tests called `error()` on Ubuntu AND Windows while passing on the machine that wrote
+     * them. The third candidate is where `sync_public_repo.sh` now places a copy.
+     *
+     * Still `error()` and not a skip when none of them is there, and that is deliberate:
+     * BOT_SEAL_SPEC.md says every client MUST pass these, so quietly not checking a sealing
+     * contract is worse than a red build. The fix is to make the file travel, not to make
+     * its absence silent.
+     */
     fun vectors(): JSONObject {
         val f = listOf(
             File(System.getProperty("oshi.repo.root") ?: "..", "ServerPatches/bot_e2e/test/vectors.json"),
             File("ServerPatches/bot_e2e/test/vectors.json"),
-        ).firstOrNull { it.isFile } ?: error("vectors.json not found (ServerPatches/bot_e2e/test/vectors.json)")
+            File("docs/fixtures/bot_e2e/vectors.json"),
+        ).firstOrNull { it.isFile }
+            ?: error(
+                "vectors.json not found. Looked for ServerPatches/bot_e2e/test/vectors.json " +
+                    "(monorepo) and docs/fixtures/bot_e2e/vectors.json (public repo, placed " +
+                    "by release/sync_public_repo.sh). BOT_SEAL_SPEC.md: every client MUST " +
+                    "pass the vectors, so this fails rather than skips.",
+            )
         return JSONObject(f.readText())
     }
 

@@ -97,12 +97,23 @@ package com.oshi.desktop.msg
  * true at once: the GROUP pin travels in `MessageGroup`, and the 1:1 pin travels in
  * `🔧ACTION🔧`. Android deleted its emitters for three other good reasons (plaintext send,
  * Unix millis, and `JSONObject.NULL`) and then attributed the deletion to a fourth that is
- * not the case — so today an Android user's 1:1 pin does not reach an iPhone that would
- * happily have shown it.
+ * not the case.
  *
- * This client therefore encodes and decodes all four action types, and takes iOS's side.
- * Applying a pin needs somewhere to put it, which this row does not have yet; see
- * [ControlPayloadRouter.Outcome.PIN_NOT_APPLIED].
+ * **RESOLVED ON ALL THREE, and re-measured 2026-10-29.** This section's last paragraph used
+ * to end *"today an Android user's 1:1 pin does not reach an iPhone"*. Android put its
+ * emitters back as RP-3 of the 2026-08-24 react-reply audit, and the re-added path fixes all
+ * three of the original defects rather than reinstating them:
+ * `MessageRepository.sendActionPayload` (`:7502`) encrypts with the Double Ratchet before
+ * sending, and `MessageRepository.buildActionPayload` (`:595`) writes the Apple-epoch
+ * `timestamp` and OMITS `newContent` instead of putting `JSONObject.NULL` — its own comment
+ * names the dead emitter it is not copying, and `MessageActionWireFormatTest` pins the
+ * `pinMessage` case. So the three clients now agree on these bytes, and the only one that
+ * decoded a 1:1 pin and dropped it was THIS one.
+ *
+ * This client encodes and decodes all four action types, and now applies all four:
+ * [com.oshi.desktop.store.PinnedMessageStore] is where a pin lands, and it records the
+ * phones' three rules (one pin per conversation, no ownership check, case-insensitive ids)
+ * together with the dated measurement above.
  */
 data class MessageActionPayload(
     val actionType: ActionType,

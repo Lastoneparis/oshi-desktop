@@ -30,6 +30,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -93,6 +94,8 @@ fun MessageBubbleRow(
     /** Contacts a message can be forwarded to (address → label), and the action. */
     forwardTargets: List<Pair<String, String>> = emptyList(),
     onForward: ((toAddress: String) -> Unit)? = null,
+    /** __DESKTOP_POLLS_2026_10_29__ cast or toggle a vote on this row's poll. */
+    onVote: ((optionIndex: Int) -> Unit)? = null,
 ) {
     var forwarding by remember(row.id) { mutableStateOf(false) }
     var editing by remember(row.id) { mutableStateOf(false) }
@@ -120,7 +123,7 @@ fun MessageBubbleRow(
                     modifier = Modifier.padding(start = OshiTheme.sm, bottom = OshiTheme.xxs),
                 )
             }
-            BubbleBody(row, lastInRun, wallpaper, media, onReveal)
+            BubbleBody(row, lastInRun, wallpaper, media, onReveal, onVote)
 
             if (row.reactions.isNotEmpty()) {
                 Spacer(Modifier.height(OshiTheme.xs))
@@ -199,6 +202,7 @@ private fun BubbleBody(
     wallpaper: WallpaperId,
     media: MediaPresentation?,
     onReveal: () -> Unit,
+    onVote: ((optionIndex: Int) -> Unit)? = null,
 ) {
     // __VIDEO_NOTE_2026_09_24__ A round video note has no bubble, no tail and no caption box
     // (VIDEO_NOTE_SPEC §4): the circle IS the message. A sealed view-once row keeps the
@@ -263,7 +267,14 @@ private fun BubbleBody(
             MediaContent(media, row.fromMe, inkSoft, onReveal)
             if (row.body.isNotBlank()) Spacer(Modifier.height(OshiTheme.sm))
         }
-        if (row.body.isNotBlank() || media == null) {
+        // __DESKTOP_POLLS_2026_10_29__ A poll draws a card instead of a body. `row.body` is
+        // blank for a poll (the model empties it), so without this the bubble would be an
+        // empty box — which is what an undecoded poll would look like once it no longer
+        // prints its JSON.
+        row.poll?.let { card ->
+            PollCard(card, row.fromMe, ink, inkSoft, onVote)
+        }
+        if (row.poll == null && (row.body.isNotBlank() || media == null)) {
             // __MENTIONS_2026_09_23__ `@name` of a picked member is highlighted (MentionUi.kt).
             MentionAwareText(
                 row.body,
@@ -366,6 +377,7 @@ private fun MediaContent(
     when {
         media.sealedViewOnce -> SealedViewOnce(media, onReveal)
         media.inlineImage -> InlineImage(media, inkSoft)
+        media.posterVideo -> VideoPoster(media, fromMe, inkSoft)
         else -> FileCard(media, fromMe, inkSoft)
     }
 }
@@ -486,6 +498,91 @@ private fun InlineImage(media: MediaPresentation, inkSoft: Color) {
                 .clickable(enabled = target != null) { target?.let(opener::open) },
         )
         Text(media.fileName, fontSize = 10.sp, color = inkSoft, fontFamily = FontFamily.Monospace)
+        media.note?.let { Text(it, fontSize = 10.sp, color = inkSoft) }
+    }
+}
+
+/**
+ * A video's FIRST FRAME in the bubble, with a play badge — what the phones show.
+ *
+ * Until this existed a video was a file card: a glyph, a filename and a path. That was the
+ * honest thing to draw while nothing here could decode one, and the class note of
+ * [MediaPresentation] says why — "a thumbnail this window could not actually produce would
+ * be a promise". It can produce one now, through the same `VideoNoteReader` the viewer and
+ * the round note bubble use, so the card would be an UNDERSTATEMENT rather than a promise.
+ *
+ * The decode is off the UI thread and the result is cached by path AND fit, which matters
+ * more here than in the viewer: a thread is a `LazyColumn` and it forgets a row that scrolls
+ * away, so a poster with no cache would re-decrypt and re-decode a video every time it came
+ * back into view. That is the same defect __PHOTO_DECODE_OFF_UI_2026_09_23__ records for
+ * photographs, measured there at 62 ms per photo entering the viewport.
+ *
+ * While the frame is still decoding this holds the bubble's width at a 16:9 box rather than
+ * collapsing to nothing: the thread's LazyColumn anchors its first visible row, so a row that
+ * grows after it arrives pushes the newest messages off the bottom of a chat that had just
+ * opened scrolled to them.
+ */
+@Composable
+private fun VideoPoster(media: MediaPresentation, fromMe: Boolean, inkSoft: Color) {
+    val targetPx = with(androidx.compose.ui.platform.LocalDensity.current) { Metrics.mediaBubble.roundToPx() }
+    val fit = com.oshi.desktop.media.VideoNoteReader.Fit.CONTAIN
+    val thumb by androidx.compose.runtime.produceState(
+        com.oshi.desktop.media.VideoNoteThumbnails.cached(media.path, targetPx, fit), media.path, targetPx,
+    ) {
+        if (value != null) return@produceState
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            com.oshi.desktop.media.VideoNoteThumbnails.load(media.path, targetPx, fit)
+        }
+    }
+
+    val opener = LocalMediaOpener.current
+    val target = remember(media) { MediaViewerTarget.of(media) }
+    val bitmap = remember(thumb) { thumb?.image?.toImageBitmap() }
+
+    // A video this window cannot decode falls back to the card it used to be, with the
+    // reason on it. Silently drawing an empty box would be worse than the card ever was.
+    if (thumb?.error != null) {
+        FileCard(media, fromMe, inkSoft, overrideNote = "No preview: ${thumb?.error}")
+        return
+    }
+
+    Column(Modifier.width(Metrics.mediaBubble), verticalArrangement = Arrangement.spacedBy(OshiTheme.xs)) {
+        Box(
+            Modifier
+                .width(Metrics.mediaBubble)
+                .heightIn(max = Metrics.mediaBubble)
+                .clip(OshiTheme.radiusMd)
+                .background(OshiTheme.surface)
+                .clickable(enabled = target != null) { target?.let(opener::open) },
+            contentAlignment = Alignment.Center,
+        ) {
+            if (bitmap != null) {
+                Image(
+                    bitmap = bitmap,
+                    contentDescription = media.fileName,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.width(Metrics.mediaBubble),
+                )
+            } else {
+                // The decoding placeholder: 16:9 at the bubble's width, so the row does not
+                // change height when the frame lands.
+                Box(Modifier.width(Metrics.mediaBubble).height(Metrics.mediaBubble * 9 / 16))
+            }
+            // The badge is drawn whether or not the frame has landed — it is what says this
+            // row is a video rather than a photograph, and that is true before the decode.
+            Box(
+                Modifier
+                    .clip(androidx.compose.foundation.shape.CircleShape)
+                    .background(Color.Black.copy(alpha = 0.45f))
+                    .padding(OshiTheme.sm),
+            ) {
+                PlayGlyph(Color.White, 20.dp)
+            }
+        }
+        Text(media.fileName, fontSize = 10.sp, color = inkSoft, fontFamily = FontFamily.Monospace)
+        thumb?.durationMs?.let {
+            Text("%d:%02d".format(it / 60_000, (it / 1000) % 60), fontSize = 10.sp, color = inkSoft)
+        }
         media.note?.let { Text(it, fontSize = 10.sp, color = inkSoft) }
     }
 }
@@ -626,5 +723,96 @@ private fun FileCard(
                 Text(it, fontSize = 10.sp, color = if (onBrand) Ink.onBrandSoft else inkSoft)
             }
         }
+    }
+}
+
+/**
+ * __DESKTOP_POLLS_2026_10_29__ A poll, drawn the way both phones draw one: the question, a
+ * row per option with a filled bar behind it, and a footer counting PEOPLE.
+ *
+ * ## Three things here are correctness, not decoration
+ *
+ *  - **The bar is drawn against `voterCount`, never against the sum of the counts.** In a
+ *    multiple-answer poll one person can pick three options, so the counts sum past the
+ *    number of voters and bars drawn against that sum would all be too short. The percentage
+ *    comes from [PollOptionRow.percent], which is computed once in the tally so this view
+ *    and the phones cannot disagree.
+ *  - **A closed poll still shows its results and stops being clickable.** `onVote` is simply
+ *    not attached, so there is no disabled-looking control that silently does nothing — the
+ *    footer says it is closed instead.
+ *  - **An anonymous poll draws no names because it HAS none** — the tally never collected
+ *    them. There is nothing here to omit, which is why this view does not take a flag that
+ *    would have to be remembered.
+ */
+@Composable
+private fun PollCard(
+    card: com.oshi.desktop.ui.state.PollCardRow,
+    fromMe: Boolean,
+    ink: Color,
+    inkSoft: Color,
+    onVote: ((optionIndex: Int) -> Unit)?,
+) {
+    val fill = if (fromMe) Color.White.copy(alpha = 0.22f) else OshiTheme.brand.copy(alpha = 0.16f)
+    val chosen = if (fromMe) Color.White else OshiTheme.brand
+    Column(Modifier.padding(top = OshiTheme.xs).widthIn(max = 320.dp)) {
+        Text(
+            card.question,
+            style = OshiTheme.typography.bodyLarge,
+            color = ink,
+        )
+        Spacer(Modifier.height(OshiTheme.xs))
+        card.options.forEachIndexed { index, option ->
+            val clickable = onVote != null && !card.closed
+            Box(
+                Modifier.fillMaxWidth()
+                    .padding(vertical = 2.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .let { if (clickable) it.clickable { onVote!!(index) } else it },
+            ) {
+                // The bar. `fillMaxWidth` of a fraction rather than a measured width, so it
+                // tracks the bubble when the window is resized.
+                Box(
+                    Modifier.fillMaxWidth(option.percent.coerceIn(0, 100) / 100f)
+                        .height(26.dp)
+                        .background(fill, RoundedCornerShape(6.dp)),
+                )
+                Row(
+                    Modifier.fillMaxWidth().height(26.dp).padding(horizontal = OshiTheme.sm),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    // A tick marks OUR pick. A multiple-answer poll can have several.
+                    Text(
+                        if (option.mine) "\u2713 " else "",
+                        style = OshiTheme.typography.bodySmall,
+                        color = chosen,
+                    )
+                    Text(
+                        option.label,
+                        style = OshiTheme.typography.bodySmall,
+                        color = ink,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        "${option.percent}%",
+                        style = OshiTheme.typography.labelMedium,
+                        color = inkSoft,
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(2.dp))
+        Text(
+            buildString {
+                // "people", counting VOTERS — see the class note on why this is not the sum.
+                append(if (card.voterCount == 1) "1 vote" else "${card.voterCount} votes")
+                if (card.allowsMultipleAnswers) append(" \u00b7 pick several")
+                if (card.isAnonymous) append(" \u00b7 anonymous")
+                if (card.closed) append(" \u00b7 closed")
+            },
+            style = OshiTheme.typography.labelMedium,
+            color = inkSoft,
+        )
     }
 }

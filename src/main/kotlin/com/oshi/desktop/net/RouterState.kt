@@ -40,6 +40,23 @@ class RouterState(private val file: File) {
     private val retries = LinkedHashMap<String, V2RetryBudget.Entry>()
 
     /**
+     * __DESKTOP_RATCHET_HEAL_2026_10_29__ When a peer's session first looked broken, and when
+     * we last sent that peer a heal acknowledgement.
+     *
+     * **Persisted, and that is the point rather than a nicety.** `RatchetHealSignal.Policy`
+     * has a one-minute cooldown and a `me < peer` tie-break in which the non-initiator waits
+     * a full cooldown from FIRST EVIDENCE. Both numbers are useless if a restart forgets
+     * them: the cooldown stops bounding anything, and — worse — the non-initiator's clock
+     * restarts, so a pair that keeps reconnecting could both act and reproduce exactly the
+     * symmetric loop the tie-break exists to prevent.
+     *
+     * Kept apart from [retries] for the reason the stall clock is: the retry map is CAPPED
+     * and evicts, and a rate limit that can be evicted is not a rate limit.
+     */
+    private val healEvidence = HashMap<String, Long>()
+    private val healSent = HashMap<String, Long>()
+
+    /**
      * __BUDGET_REFUND_DEADLOCK_2026_10_20__ Epoch millis since which the ack cursor
      * has NOT advanced, or 0 when it has never been set.
      *
@@ -110,6 +127,31 @@ class RouterState(private val file: File) {
         }
     }
 
+    /**
+     * When this peer's session first looked broken. Records [nowMs] the first time and
+     * returns it unchanged afterwards, so the non-initiator's wait is measured from the
+     * FIRST evidence and not from the latest envelope in a long broken batch.
+     */
+    @Synchronized
+    fun healEvidenceAt(peer: String, nowMs: Long): Long =
+        healEvidence.getOrPut(peer) { nowMs.also { dirty = true } }
+
+    /** When we last sent this peer a heal acknowledgement, or null. */
+    @Synchronized
+    fun healSentAt(peer: String): Long? = healSent[peer]
+
+    /**
+     * Record that an acknowledgement went out, and CLEAR the evidence stamp: the next
+     * breakage is a new episode, and measuring its wait from an old stamp would let the
+     * non-initiator act immediately for ever after one slow repair.
+     */
+    @Synchronized
+    fun noteHealSent(peer: String, nowMs: Long) {
+        healSent[peer] = nowMs
+        healEvidence.remove(peer)
+        dirty = true
+    }
+
     /** Write, if anything changed. A quiet poll must not cost a file write. */
     @Synchronized
     fun flush() {
@@ -132,13 +174,22 @@ class RouterState(private val file: File) {
                 }
             })
             .apply { if (stallSince > 0) put("cursorStalledSince", stallSince) }
+            .apply {
+                if (healEvidence.isNotEmpty()) put("healEvidence", JSONObject().apply {
+                    healEvidence.forEach { (k, v) -> put(k, v) }
+                })
+                if (healSent.isNotEmpty()) put("healSent", JSONObject().apply {
+                    healSent.forEach { (k, v) -> put(k, v) }
+                })
+            }
         AtomicFile.write(file, json.toString().toByteArray(Charsets.UTF_8))
         dirty = false
     }
 
     @Synchronized
     fun clear() {
-        lastSeq = 0; deviceLastSeq = 0; seen.clear(); retries.clear(); stallSince = 0; dirty = true
+        lastSeq = 0; deviceLastSeq = 0; seen.clear(); retries.clear(); stallSince = 0
+        healEvidence.clear(); healSent.clear(); dirty = true
         flush()
     }
 
@@ -157,6 +208,12 @@ class RouterState(private val file: File) {
             // dated now — the alternative, zero, would make every migrated entry the
             // first thing evicted and hand back exactly the budget this is here to
             // spend.
+            o.optJSONObject("healEvidence")?.let { h ->
+                for (k in h.keys()) h.optLong(k, 0L).takeIf { it > 0 }?.let { healEvidence[k] = it }
+            }
+            o.optJSONObject("healSent")?.let { h ->
+                for (k in h.keys()) h.optLong(k, 0L).takeIf { it > 0 }?.let { healSent[k] = it }
+            }
             o.optJSONObject("retries")?.let { r ->
                 val now = System.currentTimeMillis()
                 for (k in r.keys()) {

@@ -273,6 +273,27 @@ class MessageStore(
 
     /** __GROUP_PARITY_2026_09_23__ delete one message on this device only. */
     @Synchronized
+    /**
+     * __DESKTOP_TIMED_REVEAL_2026_10_29__ Point a row at new media bytes, keeping everything
+     * else about it.
+     *
+     * The one caller is the timed-photo reveal: layer 0 is an ordinary photo row and each
+     * later layer REPLACES its bytes so the picture sharpens in place. A new row per layer
+     * would show the same photograph four times, which is what this client did before.
+     *
+     * Returns null when the row is unknown — a layer whose carrier never arrived is dropped
+     * by the caller rather than becoming an orphan, which is iOS's rule in the same words.
+     */
+    fun replaceMedia(conversationId: String, id: String, mediaRef: String): Message? {
+        val current = message(conversationId, id) ?: return null
+        if (current.isDeletedForEveryone || current.hiddenLocally) return null
+        if (current.mediaRef == mediaRef) return current
+        val updated = current.copy(mediaRef = mediaRef)
+        logFor(conversationId).append(updated)
+        notifyChanged(conversationId)
+        return updated
+    }
+
     fun hideLocally(conversationId: String, id: String): Message? {
         val current = message(conversationId, id) ?: return null
         if (current.hiddenLocally) return current

@@ -39,9 +39,18 @@ import java.io.File
  *      so a full-resolution decode is what an inline image costs and the cap is lower;
  *   5. the row is not a sealed view-once.
  *
- * Everything that is not an inline image is a named file card. A card is a true statement
- * about a file on disk; a thumbnail this window could not actually produce would be a
- * promise, which is the failure mode `DesktopLimits` exists to prevent.
+ * [posterVideo] is the same contract for a VIDEO: the type is [MediaType.VIDEO], the file is
+ * on this disk, and the row is not a sealed view-once. There is no byte cap on it, and that
+ * is deliberate rather than an omission — an inline image costs a FULL-RESOLUTION decode
+ * (this window has no downsampling image decoder, which is what [MAX_INLINE_BYTES] is
+ * protecting against), while a poster costs one video frame scaled down by swscale, and the
+ * decoder refuses a source over 1920px itself. A 200 MB film and a 2 MB clip cost the same
+ * first frame.
+ *
+ * Everything that is not an inline image or a poster is a named file card. A card is a true
+ * statement about a file on disk; a thumbnail this window could not actually produce would be
+ * a promise, which is the failure mode `DesktopLimits` exists to prevent — and until
+ * 2026-10-28 a video WAS that card, because nothing here could decode one.
  */
 data class MediaPresentation(
     /** The declared type. [MediaType.UNKNOWN] when the reference could not be parsed. */
@@ -52,6 +61,8 @@ data class MediaPresentation(
     val fileName: String,
     /** True only when all five conditions in the class note hold. */
     val inlineImage: Boolean,
+    /** A video whose first frame this window can draw in the bubble. See the class note. */
+    val posterVideo: Boolean = false,
     /** Sealed view-once: the bytes exist and this window is deliberately not drawing them. */
     val sealedViewOnce: Boolean,
     /**
@@ -147,6 +158,7 @@ data class MediaPresentation(
                 path = path,
                 fileName = nameOf(path),
                 inlineImage = kind == MediaType.IMAGE && size != null && !oversize && !sealed,
+                posterVideo = kind == MediaType.VIDEO && size != null && !sealed,
                 sealedViewOnce = sealed,
                 viewOnceRow = viewOnce,
                 note = when {
@@ -166,7 +178,7 @@ data class MediaPresentation(
         /** The word a file card puts above the filename. Never "Photo" for a non-image. */
         fun cardLabel(kind: MediaType): String = when (kind) {
             MediaType.IMAGE -> "Image"
-            MediaType.VIDEO -> "Video — no player in this window"
+            MediaType.VIDEO -> "Video — click to play"
             MediaType.AUDIO -> "Voice note — click to play"
             MediaType.DOCUMENT -> "File"
             MediaType.CONTACT -> "Contact card"

@@ -198,6 +198,26 @@ class CallVideoSession(
     @Volatile var signalKeyframeRequest: (() -> Unit)? = null
     @Volatile private var lastSignalPliAt = 0L
 
+    /**
+     * __VIDEO_TOGGLE_SIGNAL_2026_10_29__ Send a camera on/off announcement as a sealed call
+     * signal too, the way both phones do. `true` = camera on.
+     *
+     * Row 2.1-c's last line read *"the phones ALSO send camera toggles over the signalling
+     * server (`call_signal`); the desktop neither sends nor reads that copy"*. The READING
+     * half had in fact landed on 2026-09-23 (`__VIDEO_PLI_SIGNAL_2026_09_23__`,
+     * `CallLane.kt:681`) and the line was never updated; the SENDING half is this.
+     *
+     * Android sends both copies for a reason it wrote down: without the signal copy iOS
+     * "receives the plaintext blob, fails to decrypt, silently drops the signal, and the
+     * no-audio watchdog ends up killing the call ~45 s after the user toggled video"
+     * (`EnhancedCallManager.sendVideoToggleSignal`). This client is less exposed than
+     * Android was, because it ALSO announces the camera as a sealed `0x0E` + `0x06`/`0x07`
+     * that both phones read — but that is redundancy working, not the copy being
+     * unnecessary, and the asymmetry (we read the signal copy, we never sent one) was the
+     * kind that only shows up on someone else's handset.
+     */
+    @Volatile var signalCameraToggle: ((Boolean) -> Unit)? = null
+
     /** Ask the peer for an IDR: media channel (bucketed), plus a signal copy at most 1/s. */
     private fun askPeerForKeyframe() = emitPli(control.requestKeyframe())
 
@@ -333,6 +353,9 @@ class CallVideoSession(
             )
         }
         sendDatagram(VideoControl.encodeToggle(if (on) VideoControl.VIDEO_RESUMED else VideoControl.VIDEO_PAUSED, clock()))
+        // __VIDEO_TOGGLE_SIGNAL_2026_10_29__ …and the same announcement as a sealed call
+        // signal, which is the only copy a released iPhone reads.
+        signalCameraToggle?.let { hook -> runCatching { hook(on) } }
     }
 
     @Synchronized

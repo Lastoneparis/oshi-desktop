@@ -98,7 +98,16 @@ class AiWiringTest {
         install(null)
         val out = fx.repl(fx.client("me", publish = false), "/ai status")
         assertTrue(out.any { it.contains("engine") })
-        assertTrue(out.any { it.contains("no inference has ever been verified") })
+        // __INFERENCE_NOTE_STATES_ONLY_WHAT_IT_KNOWS_2026_10_29__ This asserted the literal
+        // sentence "no inference has ever been verified", which is a claim about history the
+        // running process cannot check — and which was still printed under a successful
+        // generation. The INTENT of this test is the name it carries, "never claims more than
+        // it has", so it now asserts that intent instead of one spelling of it.
+        assertTrue("status must say what ships", out.any { it.contains("ships with this client") })
+        assertFalse(
+            "status must not claim inference has been verified — the ledger owns that claim",
+            out.any { it.contains("inference has been verified") },
+        )
     }
 
     @Test

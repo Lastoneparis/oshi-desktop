@@ -35,6 +35,25 @@ object LocalDataKeys {
     /** __DESKTOP_REPORT_2026_09_23__ [com.oshi.desktop.net.V2ReportClient] local report log. */
     const val REPORTS = "reports-v1"
 
+    /**
+     * __DESKTOP_LORA_MANUAL_LINK_2026_10_28__ Radio node → contact identity.
+     *
+     * Sealed to the same standard as [CONTACTS] and for the same reason: the file says
+     * which radio belongs to which person, which is the social graph the contact list
+     * already holds. A separate purpose string so one file's key cannot open another's.
+     */
+    const val LORA_BINDINGS = "lora-node-bindings-v1"
+
+    /**
+     * __RATCHET_IS_SHARED_SOURCE_2026_10_28__ Legacy Double Ratchet session state.
+     *
+     * The most sensitive file this client writes: root keys, both chain keys, every
+     * skipped message key and the ratchet private key. Android keeps the same blob in
+     * EncryptedSharedPreferences and refuses to fall back to plaintext; the desktop seals
+     * it under this purpose and [RatchetSessionStore] refuses the same degradation.
+     */
+    const val RATCHET_SESSIONS = "ratchet-sessions-v1"
+
     private val SALT = "oshi-desktop-local-data-at-rest-v1".toByteArray(Charsets.UTF_8)
 
     /** Read-or-create the root in one vault operation, so two callers cannot mint two roots. */

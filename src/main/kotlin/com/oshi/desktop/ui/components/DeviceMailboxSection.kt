@@ -21,6 +21,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.oshi.desktop.i18n.dt
+import com.oshi.desktop.i18n.t
 import com.oshi.desktop.net.DeviceMailbox
 import com.oshi.desktop.ui.OshiTheme
 import kotlinx.coroutines.Dispatchers
@@ -61,7 +62,7 @@ fun DeviceMailboxSection(mailbox: DeviceMailbox) {
                 Text(dt("desktop.devices.mailbox.removed.body"), color = Ink.soft)
                 Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.md)) {
                     PrimaryButton(dt("desktop.devices.mailbox.relink")) { Thread { mailbox.relink() }.start() }
-                    TextAction(dt("desktop.devices.mailbox.dismiss")) { mailbox.dismissRemovedAlert() }
+                    TextAction(t("chat.peer_outdated.dismiss")) { mailbox.dismissRemovedAlert() }
                 }
             }
         }
@@ -71,7 +72,7 @@ fun DeviceMailboxSection(mailbox: DeviceMailbox) {
                 verticalArrangement = Arrangement.spacedBy(OshiTheme.sm),
             ) {
                 Text(dt("desktop.devices.mailbox.newDevice"), color = Ink.strong, fontWeight = FontWeight.SemiBold)
-                TextAction(dt("desktop.devices.mailbox.dismiss")) { mailbox.dismissNewDeviceAlerts() }
+                TextAction(t("chat.peer_outdated.dismiss")) { mailbox.dismissNewDeviceAlerts() }
             }
         }
         Text(dt("desktop.devices.mailbox.title"), style = OshiTheme.typography.titleMedium, color = Ink.strong)
@@ -110,7 +111,7 @@ fun DeviceMailboxSection(mailbox: DeviceMailbox) {
                         )
                         Text(fmt.format(Date(d.lastSeenAt)), color = Ink.soft, fontSize = 12.sp)
                     }
-                    if (!self) TextAction(dt("desktop.devices.mailbox.remove")) { Thread { mailbox.unregister(d.deviceId) }.start() }
+                    if (!self) TextAction(t("common.remove")) { Thread { mailbox.unregister(d.deviceId) }.start() }
                 }
             }
         }

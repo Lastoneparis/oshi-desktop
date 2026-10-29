@@ -25,6 +25,20 @@ import java.util.concurrent.atomic.AtomicReference
 class VideoNotePlayer(
     private val devices: AudioDevices = AudioDevices.JavaSound,
     private val side: Int = 240,
+    /**
+     * SQUARE_CROP for a round note; CONTAIN for an ordinary video attachment, which keeps
+     * the shape it was filmed in. See [VideoNoteReader.Fit].
+     */
+    private val fit: VideoNoteReader.Fit = VideoNoteReader.Fit.SQUARE_CROP,
+    /**
+     * The media ceiling, in milliseconds.
+     *
+     * A note is capped at its own 15 s; an ordinary attachment is whatever somebody filmed,
+     * so the viewer passes a real limit instead. It is still a CAP and not "no limit": the
+     * bytes come from a stranger, and a container that claims an hour must not be able to
+     * hold a decode thread forever.
+     */
+    private val maxDurationMs: Long = VideoNoteFormat.MAX_DURATION_MS + 1_000,
 ) {
     interface Listener {
         fun onFrame(image: VideoImage, positionMs: Long) {}
@@ -48,6 +62,16 @@ class VideoNotePlayer(
 
     fun stop() { running.getAndSet(null)?.set(false) }
 
+    /**
+     * Take over as the one player that [stopAll] stops.
+     *
+     * [play] does this already. It is separate because the ATTACHMENT viewer shows a still
+     * first and only starts a thread when someone presses play, while a note bubble starts
+     * on tap — both have to be the thing a later `stopAll` silences, or two videos end up
+     * talking over each other.
+     */
+    fun claim() { current.set(this) }
+
     private fun run(file: File, flag: AtomicBoolean, listener: Listener) {
         var scratch: File? = null
         var error: String? = null
@@ -56,7 +80,7 @@ class VideoNotePlayer(
                 val v = MediaVault.current() ?: throw IllegalStateException("no media key is loaded in this window")
                 v.decryptToScratch(file).also { scratch = it }
             } else file
-            VideoNoteReader(plain, targetSide = side).use { reader ->
+            VideoNoteReader(plain, targetSide = side, maxDurationMs = maxDurationMs, fit = fit).use { reader ->
                 val line = if (reader.hasAudio) runCatching {
                     devices.openRender(VoiceNoteFormat.CAPTURE_FORMAT, VoiceNoteFormat.BYTES_PER_SECOND / 8)
                 }.getOrNull() else null
@@ -110,12 +134,25 @@ object VideoNoteThumbnails {
     }
     private val inFlight = ConcurrentHashMap<String, Boolean>()
 
-    fun cached(path: String, side: Int): Thumb? = synchronized(cache) { cache["$side@$path"] }
+    fun cached(
+        path: String,
+        side: Int,
+        fit: VideoNoteReader.Fit = VideoNoteReader.Fit.SQUARE_CROP,
+    ): Thumb? = synchronized(cache) { cache[key(path, side, fit)] }
+
+    // The FIT is part of the key. A round note's still and an attachment's still are two
+    // different pictures of the same file — one centre-cropped, one whole — and a cache
+    // keyed only by path and size hands the viewer the note's crop, or the other way round.
+    private fun key(path: String, side: Int, fit: VideoNoteReader.Fit) = "$fit:$side@$path"
 
     /** Blocking — call it off the UI thread. */
-    fun load(path: String, side: Int): Thumb {
-        cached(path, side)?.let { return it }
-        val key = "$side@$path"
+    fun load(
+        path: String,
+        side: Int,
+        fit: VideoNoteReader.Fit = VideoNoteReader.Fit.SQUARE_CROP,
+    ): Thumb {
+        cached(path, side, fit)?.let { return it }
+        val key = key(path, side, fit)
         inFlight[key] = true
         val file = File(path)
         var scratch: File? = null
@@ -124,7 +161,7 @@ object VideoNoteThumbnails {
                 val v = MediaVault.current() ?: throw IllegalStateException("no media key is loaded")
                 v.decryptToScratch(file).also { scratch = it }
             } else file
-            VideoNoteReader(plain, targetSide = side).use { r -> Thumb(r.firstPicture(), r.durationMs, null) }
+            VideoNoteReader(plain, targetSide = side, fit = fit).use { r -> Thumb(r.firstPicture(), r.durationMs, null) }
         } catch (t: Throwable) {
             Thumb(null, null, t.message ?: t.javaClass.simpleName)
         } finally {

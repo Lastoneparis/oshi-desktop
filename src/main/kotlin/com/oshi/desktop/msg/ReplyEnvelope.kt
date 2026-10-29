@@ -163,6 +163,12 @@ object ReplyEnvelope {
     fun quotableText(body: String?, mediaLabel: String? = null): String {
         val unwrapped = unwrap(body)?.content ?: body.orEmpty()
         val text = if (ControlPrefix.isControl(unwrapped)) "…" else unwrapped
-        return (text.ifBlank { mediaLabel.orEmpty() }).replace('\n', ' ').take(QUOTE_MAX_CHARS)
+        // __DESKTOP_INLINE_MARKUP_2026_10_29__ A quote and a pinned bar draw a message
+        // WITHOUT styling it, so they must not draw its markers either. iOS names this exact
+        // case: a reply to `*gras*` quoted it with the asterisks still attached — the one
+        // place the markers are guaranteed to show is the place the feature exists to hide
+        // them. Stripping is safe here because nothing downstream re-parses this string.
+        return InlineMarkup.stripped(text.ifBlank { mediaLabel.orEmpty() })
+            .replace('\n', ' ').take(QUOTE_MAX_CHARS)
     }
 }

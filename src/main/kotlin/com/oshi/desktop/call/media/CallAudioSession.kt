@@ -281,6 +281,48 @@ open class CallAudioSession(
      */
     val consecutiveSilentFrames = java.util.concurrent.atomic.AtomicLong()
 
+    /**
+     * __CALL_QUALITY_TIERS_2026_10_28__ Render frames written to the speaker, and the
+     * subset of them the queue could not supply.
+     *
+     * These two are the desktop's loss measurement, and they are deliberately counted HERE
+     * rather than at the socket. iOS judges the badge on *what is heard*
+     * (`__QUALITY_FROM_WHAT_IS_HEARD_2026_09_22__`): a packet that arrived late but inside
+     * the buffer costs the listener nothing and must not darken the badge, while a hole the
+     * renderer had to fill with silence is audible whatever the network says. In
+     * [pumpRender] a null from the queue is exactly that hole — it is already written as
+     * silence rather than skipped, so the event is sitting there uncounted.
+     *
+     * Cumulative. `CallScreenModel` reads per-second DELTAS, because a rough first second
+     * must not mark a half-hour call.
+     */
+    val framesRendered = java.util.concurrent.atomic.AtomicLong()
+    val framesSilenced = java.util.concurrent.atomic.AtomicLong()
+
+    /**
+     * __CALL_VOICE_EFFECTS_2026_10_28__ The live voice effect applied to what we SEND.
+     *
+     * One chain, replaced wholesale when the effect changes, so the delay lines and the
+     * pitch heads stay continuous within one effect. Replacing the object rather than
+     * mutating it is also what makes this safe to set from the UI thread while the capture
+     * thread reads it: the capture loop reads the reference once per frame and the worst a
+     * race can do is apply the previous effect to one more 20 ms frame.
+     *
+     * NOT rebuilt per frame. iOS learned that the expensive way
+     * (`__EFFECT_GRAPH_CHURN_2026_08_25__`): re-applying an unchanged effect tore down and
+     * rebuilt the audio graph, which restarted the engine five times in one 15-minute call,
+     * and three of the six audio-dropout windows in that log fall in the second after a
+     * switch. Here the equivalent mistake would be a new [CallVoiceEffects.Chain] every
+     * 20 ms, which resets the delay lines and buzzes at the frame rate.
+     */
+    @Volatile var voiceEffect: CallVoiceEffects.Chain = CallVoiceEffects.Chain(CallDevices.defaultVoiceEffect())
+
+    /** Switch the live effect, keeping [CallVoiceEffects.Effect.NONE] a true bypass. */
+    fun setVoiceEffect(effect: CallVoiceEffects.Effect) {
+        if (voiceEffect.effect == effect) return
+        voiceEffect = CallVoiceEffects.Chain(effect)
+    }
+
     /** ~3 s of digital zero from an unmuted microphone. See [consecutiveSilentFrames]. */
     val micLooksBlocked: Boolean get() = consecutiveSilentFrames.get() >= MIC_BLOCKED_FRAMES
 
@@ -376,7 +418,12 @@ open class CallAudioSession(
                 if (buf.all { it == 0.toByte() }) consecutiveSilentFrames.incrementAndGet()
                 else consecutiveSilentFrames.set(0)
             }
-            val pcm = if (muted) ByteArray(buf.size) else buf.copyOf()
+            // __CALL_VOICE_EFFECTS_2026_10_28__ The effect is applied HERE — to the
+            // captured frame, before any codec — so one call site covers Opus, WB-ADPCM
+            // and raw PCM, and only what we SEND is coloured: the peer hears the effect
+            // and the person speaking does not, which is how iOS behaves. A muted frame is
+            // left as true digital silence rather than being run through a reverb tail.
+            val pcm = if (muted) ByteArray(buf.size) else voiceEffect.apply(buf.copyOf())
             if (useOpus) {
                 // One 20 ms read in ⇒ one payload out (older frames ride inside for recovery).
                 val enc = opusTx ?: OpusCallEncoder().also { opusTx = it }
@@ -408,7 +455,11 @@ open class CallAudioSession(
             // A missing frame is written as silence rather than skipped. Skipping shortens
             // the stream and every later frame plays early, which compounds — the drift a
             // PLC would otherwise hide.
+            framesRendered.incrementAndGet()
             val pcm = if (frame == null) {
+                // __CALL_QUALITY_TIERS_2026_10_28__ An audible hole: counted where it is
+                // already being filled, so the badge and the silence cannot disagree.
+                framesSilenced.incrementAndGet()
                 fadeInNext = true
                 ByteArray(CallAudio.BYTES_PER_FRAME)
             } else {

@@ -15,7 +15,7 @@ plugins {
 }
 
 group = "com.oshi.desktop"
-version = "1.3.2"
+version = "1.4.0"
 
 /**
  * Where the two shipped trees live.
@@ -33,6 +33,47 @@ val oshiAndroidRoot: String = providers.gradleProperty("oshiAndroidRoot").orNull
     // the source and not compile it, which is the difference between published and
     // auditable. `shared-sources-match` in CI is what keeps the vendored copy honest.
     ?: rootDir.resolve("shared/OSHI-Android").absolutePath
+
+/*
+ * __SHARED_TREE_SAYS_SO_2026_10_29__ And if neither of those is there, SAY SO.
+ *
+ * Every `srcDir` below points into `oshiAndroidRoot`. Gradle treats a srcDir that does not
+ * exist as an empty one — no warning, no error — so the desktop compiled WITHOUT the shared
+ * crypto and failed on the far side of it. Measured with `-PoshiAndroidRoot=/tmp/not-here`:
+ * **916 errors**, the first being `Unresolved reference 'OSHICryptoV2'` in `DesktopIdentity`,
+ * and not one line naming the missing tree. Someone who clones this project alone — the
+ * "outside reader" the comment above is written for — reads 916 reasons to think the source
+ * is broken.
+ *
+ * This file already refuses in this voice elsewhere (`CatalogExtractor` will not generate an
+ * empty catalog set "because that is indistinguishable from an app with no translations").
+ * Same rule here: an absent dependency must not look like a broken one.
+ *
+ * Checked on the crypto directory rather than the root, because the root existing proves
+ * nothing — a half-checked-out or wrongly-nested tree is the case that produces the most
+ * confusing version of those 916 errors.
+ */
+run {
+    val crypto = file("$oshiAndroidRoot/app/src/main/java/com/oshi/messenger/network/encryption")
+    require(crypto.isDirectory) {
+        """
+        |The shared OSHI-Android sources were not found.
+        |
+        |  looked for : ${crypto.absolutePath}
+        |  resolved   : $oshiAndroidRoot
+        |
+        |This project does NOT re-implement OSHI's crypto — it compiles the same Kotlin the
+        |Android app compiles, straight out of that tree. Without it every shared class is
+        |missing and the build fails with hundreds of "Unresolved reference" errors that say
+        |nothing about the cause, which is why this stops here instead.
+        |
+        |Fix it with ONE of:
+        |  * check OSHI-Android out as a SIBLING of this project (the monorepo layout), or
+        |  * pass -PoshiAndroidRoot=/path/to/OSHI-Android, or
+        |  * vendor the shared files at ${rootDir.resolve("shared/OSHI-Android")}.
+        """.trimMargin()
+    }
+}
 
 /** The iOS tree. Read only by tests, and only to diff wire contracts against Swift. */
 val oshiIosRoot: String = providers.gradleProperty("oshiIosRoot").orNull
@@ -174,9 +215,53 @@ sourceSets {
             "**/V2Session.kt",
             "**/V2FileKeyMessage.kt",
             "**/V2RetryBudget.kt",
+            // __DESKTOP_RATCHET_HEAL_2026_10_29__ THE REPAIR OF A DEAD 1:1 SESSION — and it
+            // is COMPILED, not ported.
+            //
+            // The bug it answers was reported twice by real users of the phones: *"I get the
+            // notification but not the message"*. Half the cure has existed here for months
+            // (the shared `V2Session` adopts a fresh session from an inbound X3DH header) and
+            // the other half did not: a receiver whose session is dead must tell the peer,
+            // because an X3DH header is attached ONLY by a sender that has no session, and
+            // the peer believes its own is fine.
+            //
+            // This file is the policy and the payload, and it is 203 lines of `org.json` and
+            // `java.util.UUID` — nothing Android about it — so the desktop runs the phones'
+            // rules rather than a third set. That matters more here than almost anywhere:
+            // `isHealInitiator` is a SYMMETRIC TIE-BREAK (`me < peer`), and two
+            // implementations that disagreed about which side waits would produce exactly
+            // the loop it exists to prevent.
+            "**/RatchetHealSignal.kt",
             "**/LlamaCpp.kt",
             "**/PostQuantumKEM.kt",
             "**/RatchetSecurityMode.kt",
+            // __RATCHET_IS_SHARED_SOURCE_2026_10_28__ THE LEGACY DOUBLE RATCHET — row 0.16.
+            //
+            // This row was recorded as blocked on the grounds that the file "imports
+            // android.util.Base64, android.util.Log, android.content.Context and
+            // EncryptedSharedPreferences", so that talking to a phone over the mesh or over
+            // LoRa meant "porting a SECOND ratchet — exactly the 'third independent
+            // implementation' PLAN.md §1 argues against, and this time with no vectors
+            // published to check it against."
+            //
+            // That was a true description of the FILE and the wrong conclusion about the
+            // PROTOCOL. None of the coupling was in the cryptography: base64, a logger, and
+            // a persistence shell wrapped around `toJSON`/`fromJSON`, which were already
+            // pure. Those seams now live in `RatchetSeams.kt` (shared, pure) and
+            // `DoubleRatchetAndroidStore.kt` (Android's own, NOT shared) — the same split
+            // `CallRatingPolicy` and `CallRatingManager` already use below.
+            //
+            // So the phone and this client run the SAME ratchet. There is no second
+            // implementation to prove equal to the first, which is the strongest possible
+            // answer to "no vectors published to check it against": the question does not
+            // arise. What this client supplies instead is the five-method collaborator the
+            // file is constructed with — `com.oshi.messenger.network.encryption.CryptoManager`
+            // in THIS tree, pure BouncyCastle, each body copied from Android's.
+            //
+            // NOT shared, deliberately: Android's own `CryptoManager.kt` (Keystore, prefs,
+            // android.util.*) and `DoubleRatchetAndroidStore.kt`.
+            "**/DoubleRatchet.kt",
+            "**/RatchetSeams.kt",
             // __CALL_RATING_2026_09_22__ The TENTH shared file — PARITY.md, post-call
             // rating. `service/CallRatingPolicy.kt` decides WHETHER to ask someone about
             // a finished call: the minimum length, the 1-in-3 sampling of ordinary calls,
@@ -229,6 +314,15 @@ sourceSets {
             "devsync/*.kt",
             // ...plus everything this project actually owns:
             "com/oshi/desktop/**",
+            // __RATCHET_IS_SHARED_SOURCE_2026_10_28__ …and the collaborator the shared
+            // ratchet is constructed with, which must carry the package name the shared file
+            // expects. Written as a path under THIS source root on purpose: the shared
+            // Android srcDir is the `encryption` DIRECTORY itself, so its files are matched
+            // as bare names (`DoubleRatchet.kt`) and nothing in it can be reached through a
+            // `com/oshi/messenger/...` path. A `**/CryptoManager.kt` pattern WOULD reach it,
+            // and would drag in 701 lines of Keystore and android.util.* — which is the whole
+            // thing this arrangement exists to avoid.
+            "com/oshi/messenger/**",
         )
     }
     test {
@@ -568,6 +662,17 @@ dependencies {
     // error.
     implementation("org.bouncycastle:bcprov-jdk18on:1.81")
     implementation("org.json:json:20231013")
+
+    // __RATCHET_IS_SHARED_SOURCE_2026_10_28__ The ANNOTATIONS only (`@Inject`,
+    // `@Singleton`), because the shared `DoubleRatchet.kt` carries Android's Dagger
+    // annotations on its constructor. This is the JSR-330 spec artifact: three interfaces
+    // and three annotations, no transitive dependencies, no injector, no runtime behaviour.
+    // This client constructs the ratchet by hand; the annotations simply have to resolve.
+    //
+    // The alternative was stripping them from the Android file, which would have meant
+    // editing that app's dependency injection to share a crypto file. A 2 KB jar is the
+    // cheaper of the two by a wide margin.
+    implementation("javax.inject:javax.inject:1")
     implementation("com.google.zxing:core:3.5.3")
     implementation("com.google.zxing:javase:3.5.3")
 
@@ -643,6 +748,24 @@ application {
  */
 tasks.named<JavaExec>("run") {
     standardInput = System.`in`
+
+    // macOS: the application menu's title, which is NOT settable from inside the process.
+    //
+    // MEASURED with System Events reading the live menu bar of the running JVM. Without
+    // this, the bold menu beside the Apple logo is named after the main class:
+    //
+    //     Apple, MainKt, OSHI, Conversation      ← ./gradlew run --args="--ui"
+    //     Apple, OSHI,   OSHI, Conversation      ← the same, with -Xdock:name=OSHI
+    //
+    // Setting `apple.awt.application.name` from `main` before AWT starts does NOT do this;
+    // that was tried and measured as inert. `-Xdock:name` is a JVM LAUNCH argument, so a
+    // Kotlin file cannot set it at all and this is the only place it can live.
+    //
+    // The packaged .app never needed it — jpackage writes `CFBundleName`, which answers
+    // first — so this is purely for the people who run the window from Gradle, which is
+    // everyone who develops it. See `MacDesktopIntegration` for the two macOS properties
+    // that were tried here and do nothing.
+    if (hostIsMac) jvmArgs("-Xdock:name=OSHI")
 }
 
 /**
@@ -683,6 +806,20 @@ tasks.register<JavaExec>("renderScreens") {
     // Skiko picks a software renderer here; there is no window to composite into and the
     // default GPU path wants a surface it will not get on a headless runner.
     systemProperty("skiko.renderApi", "SOFTWARE")
+}
+
+// __PANE_HARNESS_2026_10_29__ One pane in a REAL window, so a REAL mouse can press it.
+// `renderScreens` proves a composition measures and paints; it cannot click, and the two
+// things worth knowing about these screens are click-time transitions. See PaneHarness for
+// why the assembled app is not driven instead.
+tasks.register<JavaExec>("paneHarness") {
+    group = "verification"
+    description = "Opens ONE pane in a window with a fake host: no vault, no keychain, no account."
+    dependsOn(tasks.named("testClasses"))
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("com.oshi.desktop.ui.PaneHarness")
+    args(providers.gradleProperty("harnessPane").orNull ?: "lora")
+    providers.gradleProperty("harnessLog").orNull?.let { systemProperty("oshi.harness.log", it) }
 }
 
 tasks.register<JavaExec>("i18nExtract") {
@@ -1028,12 +1165,38 @@ fun org.gradle.api.file.FileCopyDetails.qualifyDuplicateJarName() {
     name = stagedJarName(file)
 }
 
+/**
+ * The llama.cpp JNI library to put INSIDE the installer, when one has been built.
+ *
+ * `-PllamaLibDir=<dir>` already existed for the test JVM; this makes the same directory
+ * reach the packaged app. Without it the native could be built and loaded on a developer's
+ * machine and still be absent from everything a user installs — which was the state row 2.5
+ * was in: the shim had never been compiled anywhere, so nothing downstream of it had ever
+ * been exercised either.
+ *
+ * Optional on purpose. The jpackage tasks must keep working on a machine that has not built
+ * it, because an installer that refuses to build without an offline AI model is worse than
+ * one that ships without it.
+ */
+val llamaNativeDir: File? = providers.gradleProperty("llamaLibDir").orNull
+    ?.let { File(it) }
+    ?.takeIf { it.isDirectory }
+
 /** The flat directory jpackage packages: our jar plus every runtime dependency. */
 val jpackageInput by tasks.registering(Sync::class) {
     group = "distribution"
     description = "Stages the app jar and its runtime dependencies for jpackage."
     from(tasks.jar)
     from(configurations.runtimeClasspath) { eachFile { qualifyDuplicateJarName() } }
+    // The JNI library rides in the SAME flat directory as the jars, because that directory
+    // becomes `$APPDIR` in the installed app and is what the launcher's java.library.path
+    // points at. Only the host's own shared-library extension is taken: a Linux .so staged
+    // into a macOS bundle is dead weight that looks like support.
+    llamaNativeDir?.let { dir ->
+        // `System.mapLibraryName` gives this platform's spelling of the one file the
+        // shared `LlamaCpp.kt` asks for by name: libllama_jni.dylib / .so / llama_jni.dll.
+        from(dir) { include(System.mapLibraryName("llama_jni")) }
+    }
     into(jpackageInputDir)
 }
 
@@ -1199,6 +1362,20 @@ fun registerJpackage(
                 // `packageMsi` succeeding only proves an installer was produced. It was
                 // found by asking what a user double-clicking the download would get.
                 "--arguments", "--ui",
+                // THE INSTALLED APP CAN FIND ITS NATIVE LIBRARY.
+                //
+                // `$APPDIR` is jpackage's own runtime substitution for the directory the
+                // `--input` contents land in, so this resolves inside the installed bundle
+                // rather than on the build machine. It is passed unconditionally: an empty
+                // library path entry costs nothing, and making it conditional would mean a
+                // build that staged the native and a build that could load it were two
+                // different builds.
+                //
+                // It has to be `java.library.path`. The shared `LlamaCpp.kt` calls
+                // `System.loadLibrary("llama_jni")`, which loads BY NAME — an absolute path
+                // cannot be substituted for it, which is exactly what `LlamaNative.diagnose`
+                // tells a user who has the file in the right place and the wrong variable.
+                "--java-options", "-Djava.library.path=${'$'}APPDIR",
                 "--dest", outDir.absolutePath,
                 "--vendor", "OSHI",
                 "--description", "OSHI encrypted messenger — desktop client",
@@ -1230,6 +1407,44 @@ fun resourceDirArgs(platformDir: String): List<String> {
 }
 
 /**
+ * The override directory for the host we are running on — for the installer types that are
+ * not tied to one platform by name.
+ *
+ * `packageAppImage` builds on ANY host and so cannot name its directory at the call site the
+ * way `packageMsi` ("windows") and `packageDeb` ("linux") can. Until this existed it passed
+ * NO `--resource-dir` at all, on every host, which on macOS meant the app image was built
+ * from jpackage's stock `Info-lite.plist.template` — see [macosResourceDirArgs].
+ */
+fun hostResourceDirArgs(): List<String> = when {
+    hostIsWindows -> resourceDirArgs("windows")
+    hostIsLinux -> resourceDirArgs("linux")
+    hostIsMac -> resourceDirArgs("macos")
+    else -> emptyList()
+}
+
+/**
+ * macOS's `--resource-dir`, and the reason it is NOT optional on this platform.
+ *
+ * `platform/macos/packaging/Info.plist` is jpackage's own template plus two keys:
+ * `NSCameraUsageDescription` and a readable `NSMicrophoneUsageDescription`. On macOS a
+ * usage-description string is not cosmetic — TCC terminates a process that touches the
+ * camera or the microphone without one. The file was written for exactly that reason and
+ * says so in its own comment.
+ *
+ * **It was never passed.** `resourceDirArgs` had two call sites, "windows" and "linux";
+ * `packageDmg` passed only `--mac-package-identifier`, and `packageAppImage` passed nothing.
+ * So every macOS bundle this project has ever produced carried the stock plist with NO
+ * camera key and NO microphone key, and the first video call in a packaged app would be
+ * killed by the OS — the precise failure the file exists to prevent. Nothing was red: the
+ * override directory sat in the repository, `BrandingTest` confirmed its contents, and
+ * `packagingOverrides` — the task written so that "silently not passed" could never look
+ * like "passed and ignored" — listed windows and linux and did not mention macOS at all.
+ * An audit of its output on a Mac would have reported the host it was running on as having
+ * no overrides.
+ */
+fun macosResourceDirArgs(): List<String> = resourceDirArgs("macos")
+
+/**
  * What each platform's `packaging/` directory would contribute to jpackage — on ANY host.
  *
  * `resourceDirArgs` is evaluated at CONFIGURATION time and its effect only shows up inside a
@@ -1245,8 +1460,11 @@ tasks.register("packagingOverrides") {
     description = "Prints the jpackage --resource-dir each platform would contribute, and why."
     val windows = resourceDirArgs("windows")
     val linux = resourceDirArgs("linux")
+    // macOS was missing here until 2026-10-28, which made this task blind on the only host
+    // the project actually builds installers on. See [macosResourceDirArgs].
+    val macos = resourceDirArgs("macos")
     doLast {
-        listOf("windows" to windows, "linux" to linux).forEach { (name, args) ->
+        listOf("windows" to windows, "linux" to linux, "macos" to macos).forEach { (name, args) ->
             val dir = layout.projectDirectory.dir("platform/$name/packaging").asFile
             if (args.isEmpty()) {
                 logger.lifecycle("$name: no overrides in ${dir.path} — jpackage uses its own templates")
@@ -1351,7 +1569,7 @@ val packageRpm = registerJpackage(
  */
 val packageDmg = registerJpackage(
     "packageDmg", "dmg", "macOS",
-    listOf("--mac-package-identifier", "com.oshi.desktop"),
+    listOf("--mac-package-identifier", "com.oshi.desktop") + macosResourceDirArgs(),
 )
 
 /**
@@ -1362,7 +1580,47 @@ val packageDmg = registerJpackage(
  * written; launching the app image proves the packaged app can start at all, which is the
  * part the Class-Path manifest gets wrong silently.
  */
-val packageAppImage = registerJpackage("packageAppImage", "app-image", "any")
+val packageAppImage = registerJpackage("packageAppImage", "app-image", "any", hostResourceDirArgs()).apply {
+    configure { doLast { localiseMacBundle(jpackageOutputDir.get().asFile.resolve("$appName.app")) } }
+}
+
+/**
+ * Install the 33 translated `InfoPlist.strings` into a built macOS bundle.
+ *
+ * **jpackage will not do this and that was measured, not assumed.** Its `--resource-dir`
+ * matches overrides by exact FILENAME — the same rule that makes a renamed icon silently
+ * stock — so a `fr.lproj` directory placed there is ignored entirely. A probe file was put
+ * in `platform/macos/packaging/fr.lproj/InfoPlist.strings`, an app image was built, and
+ * `Contents/Resources` came back holding `OSHI.icns` and nothing else.
+ *
+ * What this buys: macOS shows the TCC permission prompt — the one that asks for the camera
+ * or the microphone — in the user's own language, reading the localised value out of the
+ * bundle. Without it every language gets the English sentence from `Info.plist`, which is
+ * the state the Mac app was in while the phone it is a port of had all 34.
+ *
+ * English is deliberately absent from `lproj/`: macOS falls back to the values in
+ * `Info.plist` itself, and a second English source would drift from the first.
+ *
+ * A no-op off macOS (there is no bundle) and when the directory is missing.
+ */
+fun localiseMacBundle(appDir: File) {
+    if (!hostIsMac) return
+    val src = layout.projectDirectory.dir("platform/macos/packaging/lproj").asFile
+    val resources = File(appDir, "Contents/Resources")
+    if (!src.isDirectory || !resources.isDirectory) {
+        logger.lifecycle("[jpackage] no macOS .lproj to install (${src.path} -> ${resources.path})")
+        return
+    }
+    var n = 0
+    src.listFiles { f -> f.isDirectory && f.name.endsWith(".lproj") }?.sortedBy { it.name }?.forEach { dir ->
+        val strings = File(dir, "InfoPlist.strings")
+        if (!strings.isFile) return@forEach
+        val target = File(resources, dir.name).apply { mkdirs() }
+        strings.copyTo(File(target, "InfoPlist.strings"), overwrite = true)
+        n++
+    }
+    logger.lifecycle("[jpackage] installed $n localised InfoPlist.strings into ${resources.path}")
+}
 
 tasks.register("packageNative") {
     group = "distribution"

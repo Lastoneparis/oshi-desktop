@@ -18,7 +18,11 @@ import javax.imageio.ImageIO
 import org.jetbrains.skia.EncodedImageFormat
 import org.junit.Assert.assertTrue
 import org.junit.Rule
+import org.junit.Assume.assumeTrue
 import org.junit.Test
+import com.oshi.desktop.media.VideoNoteThumbnails
+import com.oshi.desktop.media.VideoNoteReader
+import com.oshi.desktop.media.TestClips
 import org.junit.rules.TemporaryFolder
 
 /**
@@ -111,16 +115,51 @@ class MediaViewerRenderTest {
         assertTrue("and must not paint a picture it refused", count(png, FIXTURE_ARGB) == 0)
     }
 
+    /**
+     * This test used to be called *"a video draws the no-player panel and never touches the
+     * file"*, and it rendered a path that did not exist in order to prove that the branch
+     * decoded nothing. The viewer plays video now, so both halves of that had to go: the
+     * panel decodes a still, and the still has to be ON THE SCREEN.
+     *
+     * The clip's chroma is set hard away from neutral, so its pixels are a colour the
+     * window's own greys and accents never produce. "The panel is not blank" would pass on
+     * the placeholder glyph alone; "there are 5 000 strongly green pixels" can only pass if
+     * a decoded frame was really drawn.
+     */
     @Test
-    fun `a video draws the no-player panel and never touches the file`() {
-        // The path does not exist. If the video branch ever grew a decode, this would refuse
-        // with "Not on this disk" instead of drawing the panel — so this asserts both that
-        // the panel draws and that nothing tried to read anything.
+    fun `a video draws its first frame in the viewer`() {
+        assumeTrue("no H.264 encoder on this machine", TestClips.canEncode())
+        val clip = tmp.newFile("clip.h264")
+        // U low + V low reads as a strong green after YUV→RGB.
+        TestClips.rawH264(clip, width = 640, height = 360, frames = 8, chromaU = 20, chromaV = 20)
+        assumeTrue("encoder produced nothing", clip.length() > 256)
+
+        // The panel reads the cache synchronously on first composition and only falls back to
+        // a coroutine when it misses. `ImageComposeScene` renders ONE frame and does not pump
+        // a dispatcher, so a miss here would draw the placeholder no matter how correct the
+        // player is — warming it is what makes this a test of drawing rather than of timing.
+        VideoNoteThumbnails.load(clip.absolutePath, 720, VideoNoteReader.Fit.CONTAIN)
+
         val png = render(
             "viewer-04-video.png",
-            MediaViewerTarget(MediaType.VIDEO, "/does/not/exist/clip.mp4", "clip.mp4", viewOnce = false),
+            MediaViewerTarget(MediaType.VIDEO, clip.absolutePath, "clip.h264", viewOnce = false),
         )
         assertTrue(spread(png) > 3.0)
+        assertTrue(
+            "the decoded frame is not on the screen: ${greenish(png)} strongly green pixels",
+            greenish(png) > 5_000,
+        )
+    }
+
+    /** Pixels no part of this window's palette produces — only a decoded frame can. */
+    private fun greenish(img: BufferedImage): Int {
+        var n = 0
+        for (y in 0 until img.height) for (x in 0 until img.width) {
+            val p = img.getRGB(x, y)
+            val r = (p shr 16) and 0xFF; val g = (p shr 8) and 0xFF; val b = p and 0xFF
+            if (g > r + 40 && g > b + 40) n++
+        }
+        return n
     }
 
     @Test

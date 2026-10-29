@@ -290,6 +290,23 @@ class IcePairTable(private val successWindow: Int = SUCCESS_WINDOW) {
     @Synchronized
     fun pair(key: String): PairState? = pairs[key]
 
+    /**
+     * __CALL_QUALITY_TIERS_2026_10_28__ The smoothed round trip of one pair, in whole
+     * milliseconds, or null when no pong has ever come back on it.
+     *
+     * Here rather than reading `pair(key)!!.ewmaRttMs` at the call site, and the reason is
+     * not tidiness: `PairState` is documented as *"only ever touched under
+     * [IcePairTable]'s lock"*, `ewmaRttMs` is a mutable `Double`, and it is written from
+     * the socket's receive thread while the UI tick would be reading it. `pair()` hands
+     * the object out and releases the lock, so the field read happens outside it — a
+     * torn or stale value on a badge is harmless, but it is still a data race, and the
+     * next field someone reads this way may not be harmless. `selectedRemote` gets away
+     * with `pair(key)?.candidate` because that one is a `val`.
+     */
+    @Synchronized
+    fun rttMs(key: String): Int? =
+        pairs[key]?.ewmaRttMs?.takeIf { it >= 0 }?.let { Math.round(it).toInt() }
+
     /** Adds a signalled remote candidate. Idempotent on `"ip:port"`. */
     @Synchronized
     fun addRemote(candidate: IceCandidate): Boolean {

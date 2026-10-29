@@ -132,8 +132,13 @@ private fun VideoNoteGlyph(tint: Color, size: Dp) {
     }
 }
 
+/**
+ * The play triangle. `internal` rather than private because the VIDEO POSTER in a message
+ * bubble badges itself with the same shape — two hand-drawn triangles in one window drift
+ * apart, and the second one is always the one nobody looks at.
+ */
 @Composable
-private fun PlayGlyph(tint: Color, size: Dp) {
+internal fun PlayGlyph(tint: Color, size: Dp) {
     Canvas(Modifier.size(size)) {
         val s = this.size.minDimension
         drawPath(Path().apply { moveTo(s * 0.30f, s * 0.20f); lineTo(s * 0.82f, s * 0.5f); lineTo(s * 0.30f, s * 0.80f); close() }, tint)

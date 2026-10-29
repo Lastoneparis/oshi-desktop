@@ -59,6 +59,8 @@ fun mentionAnnotated(
     text: String,
     spans: List<MentionWire.Span>,
     tint: Color,
+    /** __DESKTOP_INLINE_MARKUP_2026_10_29__ formatting runs over the SAME [text]. */
+    markup: List<com.oshi.desktop.msg.InlineMarkup.Span> = emptyList(),
     onClick: (MentionWire.Span) -> Unit,
 ): AnnotatedString = buildAnnotatedString {
     var at = 0
@@ -73,6 +75,29 @@ fun mentionAnnotated(
         at = s.endExclusive
     }
     append(text.substring(at))
+    // Applied as STYLES over the finished string rather than by nesting, because a formatting
+    // run and a mention can overlap (`*hello @bob*`) and nesting would have to choose one.
+    // `addStyle` composes instead: the mention keeps its colour and the run still goes bold.
+    for (m in markup) addStyle(styleFor(m.kind), m.location, (m.location + m.length).coerceAtMost(length))
+}
+
+/** One formatting run as an `AnnotatedString` style. */
+private fun styleFor(kind: com.oshi.desktop.msg.InlineMarkup.Kind): SpanStyle = when (kind) {
+    com.oshi.desktop.msg.InlineMarkup.Kind.BOLD -> SpanStyle(fontWeight = FontWeight.Bold)
+    com.oshi.desktop.msg.InlineMarkup.Kind.ITALIC -> SpanStyle(fontStyle = androidx.compose.ui.text.font.FontStyle.Italic)
+    com.oshi.desktop.msg.InlineMarkup.Kind.STRIKETHROUGH ->
+        SpanStyle(textDecoration = androidx.compose.ui.text.style.TextDecoration.LineThrough)
+    com.oshi.desktop.msg.InlineMarkup.Kind.CODE ->
+        SpanStyle(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+}
+
+/** Formatting only, for a body with no mentions in it. */
+fun markupAnnotated(
+    text: String,
+    markup: List<com.oshi.desktop.msg.InlineMarkup.Span>,
+): AnnotatedString = buildAnnotatedString {
+    append(text)
+    for (m in markup) addStyle(styleFor(m.kind), m.location, (m.location + m.length).coerceAtMost(length))
 }
 
 /**
@@ -88,15 +113,24 @@ fun MentionAwareText(
     fontStyle: FontStyle,
     tint: Color,
 ) {
-    val spans = remember(text, mentions) { MentionWire.spans(text, mentions) }
+    // __DESKTOP_INLINE_MARKUP_2026_10_29__ Markers are stripped BEFORE mentions are located,
+    // so both span sets index the SAME string. Doing it the other way round would leave the
+    // mention offsets pointing past the characters the strip removed.
+    val markup = remember(text) { com.oshi.desktop.msg.InlineMarkup.parse(text) }
+    val body = markup.text
+    val spans = remember(body, mentions) { MentionWire.spans(body, mentions) }
     if (spans.isEmpty()) {
-        Text(text, style = style, fontStyle = fontStyle, color = color)
+        if (markup.spans.isEmpty()) {
+            Text(body, style = style, fontStyle = fontStyle, color = color)
+        } else {
+            Text(markupAnnotated(body, markup.spans), style = style, fontStyle = fontStyle, color = color)
+        }
         return
     }
     var shown by remember { mutableStateOf<MentionWire.Span?>(null) }
     Box {
         Text(
-            mentionAnnotated(text, spans, tint) { shown = it },
+            mentionAnnotated(body, spans, tint, markup.spans) { shown = it },
             style = style,
             fontStyle = fontStyle,
             color = color,

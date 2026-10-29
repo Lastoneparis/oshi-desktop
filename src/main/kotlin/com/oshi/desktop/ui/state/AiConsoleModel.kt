@@ -5,7 +5,13 @@ import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 
 /**
- * The AI destination's state — PARITY.md row 2.5, and the row says "no inference has ever run".
+ * The AI destination's state — PARITY.md row 2.5.
+ *
+ * This line used to end "and the row says 'no inference has ever run'". The row says the
+ * opposite now: the native was built on 2026-10-28 and three answers were generated on
+ * 2026-10-29 (1431/1194/1444 ms). The paragraph below said "**Neither is shipped**, and on
+ * this machine neither has ever been present at the same time" — also no longer true here,
+ * though still true of what ships.
  *
  * ============================================================ WHAT THIS SCREEN IS FOR
  *
@@ -13,8 +19,9 @@ import java.util.concurrent.Executors
  * the plumbing is shared source — `service/LlamaCpp.kt` is compiled straight out of the
  * Android tree so the desktop and the handset load a JNI shim built from one header — but
  * two things have to be true before a single token is generated: a `llama_jni` native has to
- * be on `java.library.path`, and a GGUF file has to be pointed at. **Neither is shipped**,
- * and on this machine neither has ever been present at the same time.
+ * be on `java.library.path`, and a GGUF file has to be pointed at. **Neither is SHIPPED** —
+ * that part stands — but both have been present together on a development machine since
+ * 2026-10-28, which is what closed row 2.5.
  *
  * So the honest screen is not a chat box that silently does nothing. It is a screen that
  * reports, in order: whether the native loaded, whether a model is configured, and only then

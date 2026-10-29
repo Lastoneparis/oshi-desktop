@@ -375,7 +375,15 @@ class CameraCapture(
         // __CALL_DEVICES_2026_09_23__ the camera the user picked, while it is still present.
         val chosen = com.oshi.desktop.call.media.CallDevices.camera
         val (fmtName, device) = when {
-            os.contains("mac") -> "avfoundation" to "default:none"
+            // avfoundation's input is `video:audio`. The chosen camera is addressed BY NAME
+            // — it accepts a name or an index, and only the name survives a device being
+            // unplugged and replaced, where an index silently becomes a different camera.
+            // It is checked against the live list first, so a camera chosen last week and
+            // since removed falls back to the system default instead of failing to open.
+            os.contains("mac") -> "avfoundation" to (
+                chosen?.takeIf { c -> com.oshi.desktop.call.media.CallDevices.macCameras().any { it.first == c } }
+                    ?.let { "$it:none" } ?: "default:none"
+                )
             os.contains("win") -> "dshow" to "video=${
                 chosen?.takeIf { c -> dshowCameras().any { it.first == c } }
                     ?: firstDshowCamera() ?: throw CameraUnavailable(NO_CAMERA_WINDOWS)

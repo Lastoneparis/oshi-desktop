@@ -72,9 +72,21 @@ import com.oshi.desktop.store.ContactStore
  * telling the caller anything — "Silently decline - don't even notify the caller we
  * received it" (`:6335`) — and Android drops at `CallManager.kt:669`,
  * `IncomingCallService.kt:106`. Scheduled-call events from a blocked peer are dropped too
- * (`ScheduledCallManager.swift:208`, `.kt:194`). The desktop has no calls (PARITY.md 2.1),
- * so [outgoingCall] exists as the decision that row will need and nothing calls it yet;
- * it is here because the answer belongs with the rest of the policy, not scattered later.
+ * (`ScheduledCallManager.swift:208`, `.kt:194`).
+ *
+ * **This paragraph used to end "The desktop has no calls (PARITY.md 2.1), so [outgoingCall]
+ * exists as the decision that row will need and nothing calls it yet." Both halves are now
+ * false, and the second one is the dangerous kind of false** — it tells a reader that call
+ * blocking is unimplemented, which would send them to write a second gate or, worse, to
+ * assume a blocked contact can still ring this machine. Checked 2026-10-29: the desktop has
+ * calls (row 2.1 — voice and video both ways, a call button per direct conversation,
+ * `CallOverlay`, `IncomingCallWindow`), and BOTH directions are gated.
+ * `CallStateMachine:470` calls [outgoingCall] on the way out and [incomingCall] on the way
+ * in, and the real client wires the collaborators they need —
+ * `CallStateMachine(address, contacts, …)` passes the contact store and sets `isBlockedBy`
+ * (`OshiClient:449-451`). The `store != null` guard on that call site is the testing seam,
+ * not the shipped behaviour: the same shape row 2.1 records being caught on once with
+ * `mediaOpener`, so it is said here explicitly rather than left to look like a hole.
  *
  * **7. Outgoing TEXT is NOT suppressed by either phone.** Worth stating because it is the
  * intuitive assumption and it is wrong: there is no block check on any send path in

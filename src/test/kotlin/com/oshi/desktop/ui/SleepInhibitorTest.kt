@@ -58,11 +58,24 @@ class SleepInhibitorTest {
         assertFalse(inhibitor.active)
     }
 
+    /**
+     * The NAMING and ORDERING rule, which is pure logic over a directory listing and so is
+     * worth running on every platform the suite runs on — not only Linux.
+     *
+     * __WIN_SEPARATOR_IN_TEST_2026_10_29__ This read `it.first.substringAfterLast('/')`, and
+     * `linuxCameras` returns `File.path`, which uses the PLATFORM separator. On Windows that
+     * is a backslash, so the split found nothing and every entry stayed a full
+     * `C:\…\dev\video0` — the assertion then compared absolute paths against bare node
+     * names and failed. The production code was right and portable all along; the test was
+     * the thing that assumed Unix, which is why it failed only on the `windows-latest` leg
+     * and passed here and on Linux forever. `File(...).name` is the separator the platform
+     * actually uses.
+     */
     @Test
     fun `linux cameras are the video nodes, in numeric order, named from sysfs when it can`() {
         val dev = Files.createTempDirectory("dev").toFile()
         listOf("video10", "video2", "video0", "vhci", "videoX").forEach { File(dev, it).createNewFile() }
-        val cams = CallDevices.linuxCameras(dev).map { it.first.substringAfterLast('/') }
+        val cams = CallDevices.linuxCameras(dev).map { File(it.first).name }
         assertEquals(listOf("video0", "video2", "video10"), cams)
         dev.deleteRecursively()
     }

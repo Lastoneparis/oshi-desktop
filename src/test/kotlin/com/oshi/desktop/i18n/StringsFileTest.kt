@@ -202,7 +202,20 @@ class StringsFileTest {
         // red before today's work touched the tree. That is precisely the failure they
         // exist to make loud: the checked-in desktop catalogs had been shipping 152 keys
         // behind the phones, in all 34 languages.
-        assertEquals("en Localizable key count", 4228, en.localizable.size)
+        // 4228 → 4232 on 2026-10-28: __MAP_STALLED_AT_24_PERCENT_2026_10_28__ added the four
+        // `map.component.*` names (road graph, street index, routing data, places database)
+        // to the iOS source in all 34 languages, so the region screen can say WHICH part of
+        // a download stopped instead of freezing its ring at a percentage. Catalogs
+        // regenerated with `./gradlew i18nExtract` in this same change, which is what keeps
+        // CatalogFreshnessTest beside this one green.
+        // 4232 → 4235 on 2026-10-28: __LORA_POSITION_BEACON_2026_10_28__ added the three
+        // `lora.position.*` strings (section, toggle, and the footer that says the beacon
+        // is a PUBLIC CLEARTEXT broadcast to every radio in range) to the iOS source in all
+        // 34 languages, for the switch that finally gives `broadcastPosition` a caller.
+        // The desktop cannot originate a beacon — it has no position of its own, only its
+        // radio's — so it ships the strings without a switch; they arrive here because the
+        // catalogs are extracted from iOS wholesale, not cherry-picked.
+        assertEquals("en Localizable key count", 4235, en.localizable.size)
         assertEquals("en InfoPlist key count", 16, en.infoPlist.size)
         assertEquals("Messages", en.localizable["tab.messages"])
         // Spot-check a value with an escape and one with a bare percent.

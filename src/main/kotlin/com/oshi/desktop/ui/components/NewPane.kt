@@ -36,6 +36,12 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.oshi.desktop.pairing.QrMatrix
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.width
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.layout.ContentScale
+import java.awt.EventQueue
+import com.oshi.desktop.pairing.QrCameraScanner
 import com.oshi.desktop.pairing.QrImageDecoder
 import com.oshi.desktop.ui.OshiTheme
 import com.oshi.desktop.ui.state.ShellState
@@ -46,10 +52,15 @@ import java.io.File
  *
  * ============================================================ HALF OF PAIRING, HONESTLY
  *
- * Pairing on the phones is symmetric: each side shows a code and each side scans one. This
- * window can show its code, accept pasted text, and decode a QR from a selected image. A live
- * webcam scanner remains a separate native capability; an image picker works on every supported
- * desktop and covers a screenshot or a photo of the phone's code.
+ * Pairing on the phones is symmetric: each side shows a code and each side scans one, and
+ * this window does all three now: it shows its code, accepts pasted text, decodes a QR from
+ * a selected image, and — since 2026-10-28 — SCANS ONE WITH THE CAMERA.
+ *
+ * This note used to end "a live webcam scanner remains a separate native capability", and
+ * `ContactQr` said in bold that *"this client has no live camera"*. The capability had been
+ * in the tree since video calls: `CameraCapture` opens avfoundation, dshow or video4linux2,
+ * honours the camera chosen in settings, and renders a BGRA preview of every frame. It had
+ * one caller. [com.oshi.desktop.pairing.QrCameraScanner] is the second.
  *
  * The code drawn is the real thing, not a picture of one. [QrMatrix] is this project's own
  * encoder — the same one `/qr png` writes a file with — and what it encodes is
@@ -75,6 +86,12 @@ fun NewPane(
 ) {
     var pasted by remember { mutableStateOf("") }
     var scanError by remember { mutableStateOf<String?>(null) }
+    var scanning by remember { mutableStateOf(false) }
+    var cameraFrame by remember { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
+    val scanner = remember { QrCameraScanner { com.oshi.desktop.call.video.CameraCapture() } }
+    // Leaving this screen releases the camera. A scanner left running behind another pane is
+    // a camera light that stays on for no reason anybody can see.
+    DisposableEffect(scanner) { onDispose { scanner.stop() } }
 
     Column(
         modifier
@@ -155,6 +172,67 @@ fun NewPane(
                             )
                         }
                     }
+                    TextAction(if (scanning) "Stop camera" else "Scan with camera") {
+                        if (scanning) {
+                            scanner.stop()
+                        } else {
+                            scanError = null
+                            cameraFrame = null
+                            scanning = true
+                            scanner.start(object : QrCameraScanner.Listener {
+                                override fun onPreview(image: com.oshi.desktop.call.video.VideoImage) {
+                                    val bmp = image.toImageBitmap()
+                                    EventQueue.invokeLater { cameraFrame = bmp }
+                                }
+                                override fun onFinished(payload: String?, error: String?, stopped: Boolean) {
+                                    EventQueue.invokeLater {
+                                        scanning = false
+                                        cameraFrame = null
+                                        // The scanner decides nothing: a scanned string lands
+                                        // in the SAME field a pasted one does, so the person
+                                        // sees what was read before anything is added, and
+                                        // `ContactQr` judges both by one code path.
+                                        if (payload != null) pasted = payload
+                                        scanError = error
+                                    }
+                                }
+                            })
+                        }
+                    }
+                }
+                if (scanning) {
+                    Spacer(Modifier.height(OshiTheme.sm))
+                    Box(
+                        Modifier
+                            .width(260.dp)
+                            .height(195.dp)
+                            .clip(OshiTheme.radiusMd)
+                            .background(OshiTheme.surface),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        val shot = cameraFrame
+                        if (shot != null) {
+                            Image(
+                                bitmap = shot,
+                                contentDescription = null,
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                        } else {
+                            Text(
+                                "Opening the camera…",
+                                style = OshiTheme.typography.bodySmall,
+                                color = Ink.soft,
+                            )
+                        }
+                    }
+                    Text(
+                        "Hold the other phone's code up to the camera. Nothing is recorded and " +
+                            "no frame leaves this machine — the picture is decoded in memory and " +
+                            "dropped.",
+                        style = OshiTheme.typography.bodySmall,
+                        color = Ink.soft,
+                    )
                 }
                 scanError?.let { Text(it, style = OshiTheme.typography.bodySmall, color = Color(0xffb3261e)) }
                 Spacer(Modifier.height(OshiTheme.md))

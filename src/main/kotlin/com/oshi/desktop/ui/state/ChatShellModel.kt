@@ -110,6 +110,23 @@ class ChatShellModel(
      * Default false keeps the guarantee in the comment at the call site intact.
      */
     private val notificationPreviewEnabled: () -> Boolean = { false },
+    /**
+     * __HIDDEN_WINDOW_NOTIFY_2026_10_29__ Is the window on screen RIGHT NOW?
+     *
+     * A message in the conversation the user is looking at must not pop a notification —
+     * that is the phones' rule and it was this object's too. But the desktop has a state
+     * no phone has: the window hidden to the tray with a conversation still selected.
+     * The close button hides rather than quits (row 2.3), so this is the ordinary way to
+     * put OSHI away. In that state the old rule read "selected, therefore seen" and the
+     * message arrived with **no notification and no unread badge** — the one chat the
+     * user is most likely to be waiting on was the one chat that could not tell them.
+     * Row 2.3 recorded it under "Not verified" as a rule rather than as the defect it is.
+     *
+     * Read at notify time, like [notificationPreviewEnabled], so hiding the window takes
+     * effect on the next message rather than the next launch. Defaults to `true`, which
+     * keeps every headless caller and test on the previous behaviour.
+     */
+    private val windowVisible: () -> Boolean = { true },
 ) : AutoCloseable {
 
     // ------------------------------------------------------------------ mutable core
@@ -664,9 +681,14 @@ class ChatShellModel(
      * relay. Nothing about the encryption, the chunking or the blob upload is re-decided
      * here; this is a file chooser wired to a tested call.
      *
-     * GROUPS ARE REFUSED, and that is a client fact rather than a window one: there is no
-     * group media fan-out on this client at all — `sendGroupText` carries text — so an attach
-     * button that appeared to work in a group would upload a blob nobody receives.
+     * GROUPS GO THROUGH `OshiClient.sendGroupFile` (GROUP_E2E_V2_SPEC §4). This comment used
+     * to say groups were REFUSED because there was no group media fan-out on this client at
+     * all; that stopped being true when `sendGroupFile` landed, and a comment describing a
+     * gap the code closed sends the next reader to write what is already there. The fan-out
+     * is the shape Android sends: the bytes are sealed ONCE and PUT into one blob reservation
+     * PER MEMBER — the blob store authorises exactly one recipient, so N uploads of the same
+     * ciphertext is the design, not a workaround — and each member's `type:"group"` envelope
+     * carries the `v2file` key JSON plus `groupMessage`. Over the blob cap ⇒ nobody.
      */
     fun attach(
         file: File,
@@ -723,6 +745,75 @@ class ChatShellModel(
                 )
             }
             if (discardAfterSend) runCatching { file.delete() }
+            publish()
+        }
+    }
+
+    /**
+     * Send one contact INTO the open conversation — PARITY.md row 0.19's third payload.
+     *
+     * __DESKTOP_CONTACT_CARD_COMPOSER_2026_10_29__ `OshiClient.sendContactCard` has existed
+     * since the media path landed and was reachable only from the console, so this window
+     * could DISPLAY a received card (`MediaPresentation` draws "Contact card",
+     * `MediaGalleryPane` a 👤) and had no way to send one. iOS attaches one from its media
+     * picker (`MediaPickerView.swift:815`, `ChatView.swift:6159`).
+     *
+     * Not to be confused with iOS's `shareContact()`, which builds share text and a QR for
+     * the system share sheet — the window already has that, as a per-contact QR in More and
+     * Copy address. This is the other thing: a card that travels as media inside OSHI.
+     *
+     * DIRECT conversations only, and that is a real limit rather than an oversight:
+     * `sendContactCard` addresses one peer and there is no group fan-out for it, so the
+     * control is not offered where it cannot work.
+     */
+    fun sendContactCard(cardAddress: String) {
+        val target = synchronized(lock) {
+            val id = selectedId
+            val composer = composerFor(id)
+            when {
+                id == null -> return
+                busy -> return
+                !composer.attachEnabled -> {
+                    notice = Notice(
+                        composer.attachDisabledReason ?: "This conversation takes no attachments.",
+                        Severity.ERROR,
+                    )
+                    null
+                }
+                kindOf(id) == ConversationKind.GROUP -> {
+                    notice = Notice("A contact card goes to one person, not a group.", Severity.ERROR)
+                    null
+                }
+                cardAddress == id -> {
+                    // Sending someone their own card is not an error the client would catch,
+                    // and it is never what was meant.
+                    notice = Notice("That is this conversation's own contact.", Severity.ERROR)
+                    null
+                }
+                else -> { busy = true; id }
+            }
+        }
+        if (target == null) { publish(); return }
+
+        val name = client.contacts.get(cardAddress)?.displayName ?: cardAddress.take(12)
+        worker.execute {
+            val result = try {
+                directSendResult(client.sendContactCard(target, cardAddress))
+            } catch (e: Exception) {
+                synchronized(lock) {
+                    busy = false
+                    notice = Notice("Contact card failed: ${e.javaClass.simpleName}: ${e.message}", Severity.ERROR)
+                }
+                publish()
+                return@execute
+            }
+            synchronized(lock) {
+                busy = false
+                notice = Notice(
+                    if (result.severity == Severity.OK) "Sent $name's contact card." else result.text,
+                    result.severity,
+                )
+            }
             publish()
         }
     }
@@ -1156,9 +1247,57 @@ class ChatShellModel(
 
     fun setGroupDescription(groupId: String, text: String) = runGroupInfoChange("description") { client.setGroupDescription(groupId, text) }
 
+    /**
+     * Pin ([messageId]) or unpin (null) in the open conversation.
+     *
+     * __DESKTOP_DIRECT_PIN_2026_10_29__ The `?: return` on the group id used to end this
+     * function, so pressing Pin in a 1:1 did nothing. It was not a dead control — the pane
+     * correctly offered the item only in groups — it was a missing feature, and the one
+     * client of the three that had it: iOS and Android both send a 1:1 pin and apply an
+     * inbound one. See [OshiClient.pinDirectMessage].
+     */
     fun pinMessage(messageId: String?) {
-        val gid = groupSelected() ?: return
-        runGroupInfoChange("pin") { client.setGroupPin(gid, messageId) }
+        groupSelected()?.let { gid -> return runGroupInfoChange("pin") { client.setGroupPin(gid, messageId) } }
+        runDirectPin(messageId)
+    }
+
+    /**
+     * The 1:1 half of [pinMessage], with its own wording.
+     *
+     * [runDirectMessageAction] would have fitted the shape and not the words: it builds its
+     * notice as `"Message " + action + "ed"`, which spells "pined"; its
+     * `REFUSED_CONTROL_PAYLOAD` line says *"Only messages you sent can be …"*, which is the
+     * opposite of the pin rule; and it reports anything that is not `SENT` as a local
+     * success, so [OshiClient.pinDirectMessage]'s `NO_V2_PATH` — a message this device does
+     * not hold — would have been announced as a pin that happened. Reusing it would have
+     * been three wrong sentences in exchange for four saved lines.
+     */
+    private fun runDirectPin(messageId: String?) {
+        val target = synchronized(lock) { selectedId?.takeIf { kindOf(it) == ConversationKind.DIRECT } } ?: return
+        synchronized(lock) { busy = true; notice = null }
+        publish()
+        worker.execute {
+            val outcome = runCatching { client.pinDirectMessage(target, messageId) }
+            val verb = if (messageId == null) "unpinned" else "pinned"
+            synchronized(lock) {
+                busy = false
+                notice = when {
+                    outcome.isFailure ->
+                        Notice("Could not pin the message: ${outcome.exceptionOrNull()?.message ?: "network error"}", Severity.ERROR)
+                    outcome.getOrNull() == OshiClient.SendOutcome.BLOCKED ->
+                        Notice("That contact is blocked; nothing was pinned.", Severity.ERROR)
+                    outcome.getOrNull() == OshiClient.SendOutcome.NO_V2_PATH ->
+                        Notice("That message is not in this conversation's history.", Severity.ERROR)
+                    outcome.getOrNull() == OshiClient.SendOutcome.SENT ->
+                        Notice("Message $verb.", Severity.OK)
+                    // Pinned here, not yet delivered. Said plainly: both phones show their
+                    // own banner immediately too, so the two ends can disagree until the
+                    // next successful send, and a user who is told nothing cannot know that.
+                    else -> Notice("Message $verb here; your contact has not been told yet.", Severity.OK)
+                }
+            }
+            publish()
+        }
     }
 
     fun setGroupBlocked(groupId: String, blocked: Boolean) = runGroupInfoChange("block") { client.setGroupBlocked(groupId, blocked) }
@@ -1326,11 +1465,33 @@ class ChatShellModel(
         }
     }
 
+    /**
+     * __HIDDEN_WINDOW_NOTIFY_2026_10_29__ The window came back. Whatever arrived in the
+     * open conversation while it was away has now been seen, so its badge goes.
+     *
+     * Deliberately NOT a call to [select]: that clears `draftText`, so reopening the
+     * window would eat a half-typed message. This touches the badge and nothing else.
+     * It also does not send a read receipt — `select` owns that, and firing one from a
+     * window-visibility change would put an outward-facing signal on a gesture the user
+     * may not think of as opening the chat. That asymmetry is named here rather than
+     * left to be discovered.
+     */
+    fun onWindowShown() {
+        val changed = synchronized(lock) {
+            val id = selectedId ?: return@synchronized false
+            val had = unread.remove(id) != null
+            had or mentionedYou.remove(id)
+        }
+        if (changed) publish()
+    }
+
     /** Called on the poll thread for every inbound message. See THREADING. */
     fun onInbound(m: Message) {
         val shouldNotify: Boolean
         synchronized(lock) {
-            val unseen = !m.fromMe && m.conversationId != selectedId
+            // __HIDDEN_WINDOW_NOTIFY_2026_10_29__ "selected" only means "seen" while the
+            // window is actually on screen. Hidden to the tray, every conversation is unseen.
+            val unseen = !m.fromMe && (m.conversationId != selectedId || !windowVisible())
             // A BLOCKED group's messages are kept (iOS parity) but must not grow a badge the
             // user asked never to hear from again; a muted one still counts, quietly.
             if (unseen && !client.isGroupBlocked(m.conversationId)) {
@@ -1496,11 +1657,63 @@ class ChatShellModel(
                 groupInviteLink = group?.let { client.groupInviteLink(id) },
                 groupDescription = group?.description,
                 groupBlocked = group != null && client.isGroupBlocked(id),
-                groupPinned = group?.pinnedMessageId?.let { pid ->
+                // __DESKTOP_DIRECT_PIN_2026_10_29__ One pinned row for either kind. A group's
+                // pin lives in its definition; a 1:1's lives in `client.pinnedMessages`. The
+                // id match is case-insensitive on both branches, because an iPhone's pin
+                // targets an id it rendered from `UUID.uuidString`.
+                pinned = (group?.pinnedMessageId ?: client.pinnedMessages.get(id))?.let { pid ->
                     client.history(id).firstOrNull { com.oshi.desktop.group.GroupMessageWire.sameMessageId(it.id, pid) }?.let { m ->
                         QuoteRow(m.id, if (m.fromMe) "me" else senderLabel(m.senderAddress),
                             com.oshi.desktop.msg.ReplyEnvelope.quotableText(m.content, m.mediaType?.wire))
                     }
+                },
+                // A group pin needs the info-editing permission; in a 1:1 either party may
+                // pin, which is both phones' rule. Nothing else may pin at all.
+                // __DESKTOP_OFFLINE_ONLY_2026_10_29__
+                offlineOnly = client.offlineOnly.isOfflineOnly(id),
+                offlineOnlyConfirmed = if (!client.offlineOnly.isOfflineOnly(id)) null else
+                    com.oshi.desktop.msg.OfflineOnlyPayload.confirmationSummary(
+                        confirmed = client.offlineOnly.confirmedCount(id),
+                        // A 1:1 has exactly one other participant; a group has its roster
+                        // minus us. We are never counted — our own compliance is not in doubt.
+                        otherMemberCount = if (kind == ConversationKind.GROUP)
+                            group?.members?.count { !com.oshi.desktop.group.GroupIdentity.sameIdentity(it.publicKey, client.address) } ?: 0
+                        else 1,
+                    ),
+                pinCanToggle = when (kind) {
+                    ConversationKind.GROUP -> group != null && client.canEditGroupInfo(id)
+                    ConversationKind.DIRECT -> true
+                    else -> false
+                },
+                // __DESKTOP_MEDIA_GALLERY_2026_10_29__ Newest first, and a deleted or
+                // locally hidden row contributes nothing — the gallery shows what the thread
+                // would show, never more.
+                media = client.history(id).asReversed().mapNotNull { m ->
+                    val ref = m.mediaRef ?: return@mapNotNull null
+                    if (m.isDeletedForEveryone || m.hiddenLocally) return@mapNotNull null
+                    // A VIEW-ONCE ATTACHMENT IS NEVER IN THE GALLERY, revealed or not.
+                    //
+                    // The weaker rule — hide it only while still sealed — was written first
+                    // and is wrong twice over: the reveal state lives in the window, not
+                    // here, so this layer cannot even ask; and "view once" means once, so a
+                    // grid that lists it afterwards is a second look by another route. A
+                    // gallery that quietly re-opens what the bubble spent effort sealing is
+                    // worse than no gallery.
+                    if (m.isViewOnce) return@mapNotNull null
+                    MediaItemRow(
+                        messageId = m.id,
+                        path = ref,
+                        kind = m.mediaType ?: com.oshi.desktop.store.MediaType.DOCUMENT,
+                        // The SENDER's filename, not the path's. `receiveMedia` writes the
+                        // file as "<msgId8>-<name>" so two attachments called photo.jpg
+                        // cannot collide on disk — an internal detail that has no business
+                        // in a grid a person reads. `content` is where the real name is
+                        // (`receiveMedia` sets it to `key.filename`); the path's name is
+                        // only the fallback for a row that has none.
+                        fileName = m.content?.takeIf { it.isNotBlank() } ?: java.io.File(ref).name,
+                        stamp = stamp(m.sentAtMs),
+                        fromMe = m.fromMe,
+                    )
                 },
                 forwardTargets = if (kind == ConversationKind.DIRECT || kind == ConversationKind.GROUP) {
                     client.contacts.all().filterNot { it.blocked || it.address == id }
@@ -1556,6 +1769,7 @@ class ChatShellModel(
             displayName = client.displayName,
             relayUrl = client.serverUrl,
             gateOpen = client.config.isEnabledCached(),
+            gateAnswered = client.config.everAnswered,
             deliveryReceiptsEnabled = client.deliveryReceiptsEnabled,
             readReceiptsEnabled = client.readReceiptsEnabled,
             syncNotice = syncNotice,
@@ -1624,6 +1838,11 @@ class ChatShellModel(
             m.videoNote && m.mediaType == com.oshi.desktop.store.MediaType.VIDEO &&
                 (m.content == null || m.content.endsWith(".mp4", ignoreCase = true)) -> ""
             m.mediaRef != null -> m.content.orEmpty()
+            // __DESKTOP_POLLS_2026_10_29__ The card draws the question, so the body must be
+            // empty rather than the payload. Before polls were decoded this `when` fell
+            // through to `content`, which is why a stored poll printed as raw JSON — and that
+            // is exactly what would happen again if `poll` were drawn and this line were not.
+            com.oshi.desktop.msg.PollPayload.isPoll(m.content) -> ""
             else -> m.content ?: "(deleted)"
         },
         quote = env?.quote?.let(::quoteRow),
@@ -1643,9 +1862,170 @@ class ChatShellModel(
         edited = m.editedAtMs != null,
         deleted = m.isDeletedForEveryone,
         reactions = m.reactions.keys.sorted().joinToString(""),
+        // __DESKTOP_POLLS_2026_10_29__ Decoded on every publish; see [PollCardRow].
+        poll = if (m.isDeletedForEveryone) null else pollCard(m.content),
         videoNote = !m.isDeletedForEveryone && m.videoNote && m.mediaType == com.oshi.desktop.store.MediaType.VIDEO,
         mediaDurationMs = m.mediaDurationMs,
+        sentAtMs = m.sentAtMs,
     )
+    }
+
+    /**
+     * __DESKTOP_OFFLINE_ONLY_2026_10_29__ Take the open conversation off the relay, or put it
+     * back.
+     *
+     * The notice is deliberately specific about the asymmetry, because the switch behaves
+     * differently in each direction and a user who is not told will read the ON case as a
+     * failure: turning it ON cannot announce itself over the relay it just banned, so with no
+     * radio and no mesh peer the restriction holds here and the other side is simply never
+     * told. Turning it OFF travels, because the restriction is lifted before the request is
+     * sent.
+     */
+    fun setOfflineOnly(on: Boolean) {
+        val conv = synchronized(lock) { selectedId } ?: return
+        if (kindOf(conv) != ConversationKind.DIRECT) {
+            synchronized(lock) { notice = Notice("This is available in direct conversations.", Severity.ERROR) }
+            publish()
+            return
+        }
+        synchronized(lock) { busy = true; notice = null }
+        publish()
+        worker.execute {
+            val outcome = runCatching { client.setOfflineOnly(conv, on) }
+            synchronized(lock) {
+                busy = false
+                notice = when {
+                    outcome.isFailure ->
+                        Notice("Could not change this: ${outcome.exceptionOrNull()?.message ?: "network error"}", Severity.ERROR)
+                    outcome.getOrNull() == OshiClient.SendOutcome.SENT ->
+                        Notice(if (on) t("offline_only.summary.on") else t("offline_only.summary.off"), Severity.OK)
+                    on ->
+                        // Not a failure. See the note above.
+                        Notice(
+                            t("offline_only.summary.on") +
+                                " Your contact could not be told over the internet — that is what you just " +
+                                "switched off. They will hear when a radio or a nearby device can carry it.",
+                            Severity.OK,
+                        )
+                    else -> Notice(t("offline_only.summary.off") + " Your contact has not been told yet.", Severity.OK)
+                }
+            }
+            publish()
+        }
+    }
+
+    /**
+     * __DESKTOP_POLL_COMPOSER_2026_10_29__ Create a poll in the open 1:1 conversation.
+     *
+     * The validity question is NOT re-asked here. [OshiClient.sendPoll] returns null when
+     * `PollPayload.sanitize` refuses, and that null is reported as a refusal rather than as a
+     * network error — the two send a user to completely different places, and collapsing them
+     * is what makes a composer feel broken.
+     */
+    fun createPoll(question: String, options: List<String>, multi: Boolean, anon: Boolean) {
+        val conv = synchronized(lock) { selectedId } ?: return
+        if (kindOf(conv) != ConversationKind.DIRECT) {
+            synchronized(lock) { notice = Notice("Polls can be sent in direct conversations.", Severity.ERROR) }
+            publish()
+            return
+        }
+        synchronized(lock) { busy = true; notice = null }
+        publish()
+        worker.execute {
+            val outcome = runCatching {
+                client.sendPoll(conv, question, options, allowsMultipleAnswers = multi, isAnonymous = anon)
+            }
+            synchronized(lock) {
+                busy = false
+                notice = when {
+                    outcome.isFailure ->
+                        Notice("Could not send the poll: ${outcome.exceptionOrNull()?.message ?: "network error"}", Severity.ERROR)
+                    // null is sanitize refusing, NOT a transport failure.
+                    outcome.getOrNull() == null ->
+                        Notice("A poll needs a question and between 2 and 12 options.", Severity.ERROR)
+                    outcome.getOrNull() == OshiClient.SendOutcome.BLOCKED ->
+                        Notice("That contact is blocked; the poll was not sent.", Severity.ERROR)
+                    outcome.getOrNull() == OshiClient.SendOutcome.SENT -> Notice("Poll sent.", Severity.OK)
+                    else -> Notice("Poll created here; it has not been delivered yet.", Severity.OK)
+                }
+            }
+            publish()
+        }
+    }
+
+    /**
+     * Build the card for a row whose payload is a poll, or null.
+     *
+     * The tally is read from the client on every call, which is what makes a late ballot show
+     * up without the message row changing. A poll whose payload no longer decodes returns
+     * null and the bubble falls back to an ordinary (empty-bodied) row rather than throwing
+     * out of a draw.
+     */
+    private fun pollCard(content: String?): PollCardRow? {
+        val poll = com.oshi.desktop.msg.PollPayload.decodePoll(content) ?: return null
+        val r = client.pollBallots.results(poll, client.address)
+        return PollCardRow(
+            pollId = poll.id,
+            question = poll.question,
+            options = poll.options.mapIndexed { i, label ->
+                PollOptionRow(
+                    label = label,
+                    count = r.counts.getOrElse(i) { 0 },
+                    percent = r.percent(i),
+                    mine = i in r.myPicks,
+                )
+            },
+            voterCount = r.voterCount,
+            allowsMultipleAnswers = poll.allowsMultipleAnswers,
+            isAnonymous = poll.isAnonymous,
+            closed = poll.isClosed(System.currentTimeMillis() / 1000.0),
+        )
+    }
+
+    /**
+     * Vote on a poll in the open conversation, or retract by picking what we already picked.
+     *
+     * The toggle rule is the phones': in a single-answer poll a new pick REPLACES the old
+     * one; in a multiple-answer poll a pick is added, and picking it again removes it. An
+     * empty result is a retraction and is sent as one, because both platforms treat an empty
+     * ballot as a real ballot that has to beat the earlier one on time.
+     */
+    fun votePoll(messageId: String, optionIndex: Int) {
+        val conv = synchronized(lock) { selectedId } ?: return
+        if (kindOf(conv) != ConversationKind.DIRECT) {
+            synchronized(lock) { notice = Notice("Voting is available in direct conversations.", Severity.ERROR) }
+            publish()
+            return
+        }
+        val row = client.history(conv).firstOrNull { it.id == messageId } ?: return
+        val poll = com.oshi.desktop.msg.PollPayload.decodePoll(row.content) ?: return
+        if (poll.isClosed(System.currentTimeMillis() / 1000.0)) {
+            synchronized(lock) { notice = Notice("That poll is closed.", Severity.ERROR) }
+            publish()
+            return
+        }
+        if (!poll.isValidOptionIndex(optionIndex)) return
+        val current = client.pollBallots.results(poll, client.address).myPicks
+        val next = when {
+            !poll.allowsMultipleAnswers -> if (current == setOf(optionIndex)) emptySet() else setOf(optionIndex)
+            optionIndex in current -> current - optionIndex
+            else -> current + optionIndex
+        }
+        worker.execute {
+            val outcome = runCatching { client.votePoll(conv, poll.id, next.toList().sorted()) }
+            synchronized(lock) {
+                notice = when {
+                    outcome.isFailure ->
+                        Notice("Could not send your vote: ${outcome.exceptionOrNull()?.message ?: "network error"}", Severity.ERROR)
+                    outcome.getOrNull() == OshiClient.SendOutcome.BLOCKED ->
+                        Notice("That contact is blocked; your vote was not sent.", Severity.ERROR)
+                    outcome.getOrNull() == OshiClient.SendOutcome.SENT -> null
+                    // Counted here, not yet delivered — said plainly, as the pin does.
+                    else -> Notice("Your vote is recorded here; your contact has not been told yet.", Severity.OK)
+                }
+            }
+            publish()
+        }
     }
 
     private fun previewOf(m: Message?): String = when {
@@ -1658,7 +2038,15 @@ class ChatShellModel(
         // __VIDEO_NOTE_2026_09_24__ spec §4: the list says "Video message", not a filename.
         m.videoNote && m.mediaType == com.oshi.desktop.store.MediaType.VIDEO -> t("videonote.title")
         m.mediaRef != null -> "[${m.mediaType?.wire ?: "file"}] " + m.content.orEmpty()
-        else -> m.content.orEmpty()
+        // __DESKTOP_POLLS_2026_10_29__ The conversation list shows the QUESTION, never the
+        // payload — the same rule the video note follows two lines up.
+        com.oshi.desktop.msg.PollPayload.isPoll(m.content) ->
+            "\uD83D\uDCCA " + (com.oshi.desktop.msg.PollPayload.decodePoll(m.content)?.question ?: "")
+        // __DESKTOP_INLINE_MARKUP_2026_10_29__ The list cannot style, so it must not show the
+        // markers either — iOS's reason: the surfaces that draw a message without styling it
+        // are the one place the markers are guaranteed to be visible, which is exactly where
+        // the feature is supposed to hide them.
+        else -> com.oshi.desktop.msg.InlineMarkup.stripped(m.content.orEmpty())
     }.replace('\n', ' ').take(80)
 
     private fun labelFor(id: String, kind: ConversationKind): String = when (kind) {
@@ -1796,12 +2184,33 @@ class ChatShellModel(
         OshiClient.SendOutcome.SENT -> t("messages.sent_successfully")
         OshiClient.SendOutcome.BLOCKED ->
             "NOT SENT — that contact is blocked. The message was not written to the log either."
+        // __DESKTOP_SAY_WHICH_FAILURE_2026_10_29__ BLAME THE RIGHT PARTY.
+        //
+        // Both of these outcomes are ALSO what a client returns when the relay simply did not
+        // answer — a bundle fetch that timed out is indistinguishable, at this layer, from a
+        // peer who never published one. The old wording told the user that their contact had
+        // not set OSHI up, or that they were outside a rollout, and neither is actionable
+        // even when true. `V2ConfigGate.serverUnreachable` is the one bit that tells them
+        // apart, and it is checked FIRST.
         OshiClient.SendOutcome.NO_V2_PATH ->
-            "NOT DELIVERED — that peer has published no prekey bundle, so V2 cannot reach them. " +
-                "The message is in your log, marked failed."
+            if (client.config.serverUnreachable)
+                "NOT DELIVERED — the OSHI server is not answering right now, so your contact's " +
+                    "keys could not be fetched. This is not about them. The message is in your " +
+                    "log, marked failed; try again when the connection recovers."
+            else
+                "NOT DELIVERED — that peer has published no prekey bundle, so V2 cannot reach them. " +
+                    "The message is in your log, marked failed."
         OshiClient.SendOutcome.GATE_CLOSED ->
-            "NOT SENT — the V2 rollout gate is closed for this account. " +
-                "The message is in your log, marked failed."
+            if (client.config.serverUnreachable)
+                "NOT SENT — the OSHI server is not answering right now. This is a connection " +
+                    "problem, not a setting on your account. The message is in your log, marked failed."
+            else if (!client.config.everAnswered)
+                "NOT SENT — this client has not had an answer from the server yet, so V2 is still " +
+                    "closed by default. That is not a decision about your account; try again in a " +
+                    "moment. The message is in your log, marked failed."
+            else
+                "NOT SENT — the V2 rollout gate is closed for this account. " +
+                    "The message is in your log, marked failed."
         OshiClient.SendOutcome.REFUSED_CONTROL_PAYLOAD ->
             "REFUSED — that text is itself an OSHI control payload (a receipt, typing, reaction " +
                 "or edit sentinel). Sending it would hand a peer a message-editing primitive. " +
@@ -1848,7 +2257,7 @@ class ChatShellModel(
 enum class Destination { MESSAGES, AI, NEW, PLACES, MORE }
 
 /** DEVICES: __DEVSYNC_DIRECT_2026_09_22__ More → Linked devices (direct own-device sync). */
-enum class Pane { CONVERSATION, ACCOUNT, LIMITS, COVERT, MAIL, SCHEDULED, DEVICES }
+enum class Pane { CONVERSATION, ACCOUNT, LIMITS, COVERT, MAIL, SCHEDULED, DEVICES, LORA, PEERS, DELETE_ACCOUNT }
 
 enum class ConversationKind { DIRECT, GROUP, BOT, LORA }
 
@@ -1880,6 +2289,52 @@ data class ConversationRow(
     val pictureBase64: String? = null,
 )
 
+/**
+ * __DESKTOP_POLLS_2026_10_29__ A poll as the bubble draws it — the definition from the
+ * message payload, the numbers from [com.oshi.desktop.store.PollTally].
+ *
+ * Built fresh on every publish rather than stored, which is what keeps the definition
+ * immutable: a ballot arriving later changes these numbers without the message row being
+ * rewritten. iOS records the reason it matters — a bubble that mutates the payload it was
+ * parsed from can no longer be re-parsed.
+ */
+data class PollCardRow(
+    val pollId: String,
+    val question: String,
+    /** Option label, its vote count, and its rounded share. Index IS the option index. */
+    val options: List<PollOptionRow>,
+    /** Distinct people with a non-empty ballot — NOT the sum of the counts in a multi poll. */
+    val voterCount: Int,
+    val allowsMultipleAnswers: Boolean,
+    val isAnonymous: Boolean,
+    /** Closed polls still show their results; the options stop being clickable. */
+    val closed: Boolean,
+)
+
+data class PollOptionRow(
+    val label: String,
+    val count: Int,
+    val percent: Int,
+    /** This is one of OUR picks. */
+    val mine: Boolean,
+)
+
+/**
+ * __DESKTOP_MEDIA_GALLERY_2026_10_29__ One attachment in the conversation's gallery.
+ *
+ * Built from the same rows the thread draws, so there is no second source of truth about
+ * what a conversation contains. A SEALED view-once row is excluded at the source: the
+ * gallery must not become the surface that shows what the bubble is still hiding.
+ */
+data class MediaItemRow(
+    val messageId: String,
+    val path: String,
+    val kind: com.oshi.desktop.store.MediaType,
+    val fileName: String,
+    val stamp: String,
+    val fromMe: Boolean,
+)
+
 data class MessageRow(
     val id: String,
     val fromMe: Boolean,
@@ -1899,9 +2354,19 @@ data class MessageRow(
     /** __MENTIONS_2026_09_23__ `@name` targets, highlighted in the bubble (MentionWire). */
     val mentions: List<com.oshi.desktop.group.MentionWire.Mention> = emptyList(),
     /** __VIDEO_NOTE_2026_09_24__ draw [attachment] as a round video note (VIDEO_NOTE_SPEC §4). */
+    /** __DESKTOP_POLLS_2026_10_29__ non-null when this row's payload is a `📊POLL📊`. */
+    val poll: PollCardRow? = null,
     val videoNote: Boolean = false,
     /** The note's announced duration, when the sender stated one; else read from the file. */
     val mediaDurationMs: Long? = null,
+    /**
+     * __DESKTOP_THREAD_SEARCH_2026_10_29__ When this was sent, in epoch millis.
+     *
+     * The row already carries [stamp], but that is a FORMATTED string in the viewer's locale
+     * and a search must not parse it back: a date filter built on "14:05" or "2/3" would be
+     * comparing presentation, and would mean something different in another locale.
+     */
+    val sentAtMs: Long = 0L,
 )
 
 /** A reply's quote block, and the composer's "replying to" banner. */
@@ -1925,12 +2390,39 @@ data class ThreadView(
     val groupDescription: String? = null,
     /** Blocked on this device: composer closed behind a banner, no notifications. */
     val groupBlocked: Boolean = false,
-    /** The pinned message, when the definition names one we hold. */
-    val groupPinned: QuoteRow? = null,
+    /**
+     * The pinned message of this conversation, when we hold the row it names.
+     *
+     * __DESKTOP_DIRECT_PIN_2026_10_29__ This was `groupPinned` and read only a group
+     * definition's `pinnedMessageId`, so a 1:1 pin — which both phones send and apply over
+     * `🔧ACTION🔧` — had nowhere to appear even once the router stored it. One field for
+     * both kinds, because a pin is a property of a conversation, not of a group.
+     */
+    val pinned: QuoteRow? = null,
+    /** True when the open conversation lets THIS user pin and unpin. See [pinned]. */
+    val pinCanToggle: Boolean = false,
+    /**
+     * __DESKTOP_OFFLINE_ONLY_2026_10_29__ This conversation is restricted to the mesh and the
+     * radio. Nothing this device sends in it goes over the relay.
+     */
+    val offlineOnly: Boolean = false,
+    /**
+     * How many OTHER participants have confirmed the restriction, out of how many there are.
+     *
+     * Shown rather than assumed: nothing can make another client refuse the internet, so a
+     * confirmed count below the total is the honest state of the conversation. Null when the
+     * conversation is not restricted and there is nothing to report.
+     */
+    val offlineOnlyConfirmed: Pair<Int, Int>? = null,
     /** Group members typing right now (display names). */
     val typingNames: List<String> = emptyList(),
     /** __GROUP_PARITY_2026_09_23__ contacts a message may be forwarded to. */
     val forwardTargets: List<GroupCandidateRow> = emptyList(),
+    /**
+     * __DESKTOP_MEDIA_GALLERY_2026_10_29__ Every attachment in this conversation, newest
+     * first — iOS's `MediaGalleryView`, Android's "Media Gallery" menu item.
+     */
+    val media: List<MediaItemRow> = emptyList(),
     /** Empty for direct, bot and radio threads; roster data comes only from a stored definition. */
     val groupMembers: List<GroupMemberRow>,
     /** Known unblocked contacts not in this group; candidates are never inferred from messages. */
@@ -1986,12 +2478,40 @@ data class ScheduledRow(
     val group: Boolean,
 )
 
+/**
+ * __GATE_NOT_YET_IS_NOT_NO_2026_10_29__ What a surface should SAY about the V2 gate.
+ *
+ * Four places read `gateOpen` as a boolean and each one independently told a client that
+ * had not finished asking that its ACCOUNT was refused: the REPL's send outcome, the
+ * window's send notice, the chip under the user's own name, and the account pane someone
+ * opens precisely to find out. They were fixed one at a time, over two hours, because
+ * nothing named the three states in one place. This does.
+ *
+ * [ASKING] is not a failure and must not be painted as one: on this relay `/v2/config`
+ * has been measured at 9-25 s, so it is the state every launch passes through.
+ */
+enum class GateDisplay { OPEN, ASKING, CLOSED }
+
+/** Pure: the gate's verdict AND whether it has one yet. */
+fun gateDisplay(gateOpen: Boolean, gateAnswered: Boolean): GateDisplay = when {
+    gateOpen -> GateDisplay.OPEN
+    !gateAnswered -> GateDisplay.ASKING
+    else -> GateDisplay.CLOSED
+}
+
 data class ShellState(
     val selfAddress: String,
     val selfAddressShort: String,
     val displayName: String,
     val relayUrl: String,
     val gateOpen: Boolean,
+    /**
+     * __GATE_NOT_YET_IS_NOT_NO_2026_10_29__ Has the gate had an ANSWER yet? [gateOpen] is
+     * false before the first `/v2/config` reply and after one that said no, and the chip
+     * painted both of them red with "sends refused" — a verdict about the account, shown
+     * to someone whose client had simply not finished asking.
+     */
+    val gateAnswered: Boolean,
     val deliveryReceiptsEnabled: Boolean,
     val readReceiptsEnabled: Boolean,
     val syncNotice: Notice?,
@@ -2024,6 +2544,7 @@ data class ShellState(
             displayName = name,
             relayUrl = "",
             gateOpen = false,
+            gateAnswered = false,
             deliveryReceiptsEnabled = true,
             readReceiptsEnabled = true,
             syncNotice = null,

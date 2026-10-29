@@ -95,8 +95,33 @@ class MeshNode(
     private val connections = ConcurrentHashMap<String, Conn>()
     private val sentIdentityTo = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
     private val routingTable = ConcurrentHashMap<String, RouteInfo>()
+
+    /**
+     * __DESKTOP_MESH_CUSTODY_2026_10_29__ Messages this node is holding for a peer that was
+     * not reachable when they passed through. See [MeshCustody].
+     */
+    internal val custody = MeshCustody()
     private val peers = ConcurrentHashMap<String, Peer>()
     private val connecting = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+
+    /**
+     * __MESH_MULTIHOMED_DIAL_2026_10_29__ Every address a peer has been announced at,
+     * oldest first, per public key.
+     *
+     * A peer on a multi-homed machine advertises ONE instance per interface, and
+     * `Peer` only has room for the last one. Dialling was deduped per PEER, so the
+     * first address to arrive took the slot and every other address for the same peer
+     * was dropped for the whole 10 s of [CONNECT_TIMEOUT_MS] — and announcements
+     * arrive in interface order, so the same address won every round.
+     *
+     * Measured on this Mac with a VPN up (`MdnsDiscoveryTest`, 2026-10-29): both nodes
+     * announced on `utun4 (10.5.0.2)` and on `en0 (192.168.1.23)`, both dialled the
+     * TUNNEL address, both logged `connect 10.5.0.2:… failed: SocketTimeoutException`,
+     * and the peer was then "lost" — while the LAN address that would have worked had
+     * been discovered, logged, and never tried. With any VPN interface up, desktop LAN
+     * mesh simply did not connect.
+     */
+    private val peerAddresses = ConcurrentHashMap<String, MutableSet<Pair<String, Int>>>()
 
     /** Insertion-ordered so the overflow trim drops the OLDEST ids, not an arbitrary half. */
     private val seenMessageIds = Collections.synchronizedSet(LinkedHashSet<String>())
@@ -145,23 +170,80 @@ class MeshNode(
             ROUTE_CLEANUP_PERIOD_MS, ROUTE_CLEANUP_PERIOD_MS, TimeUnit.MILLISECONDS,
         )
 
-        if (enableDiscovery) {
-            val svc = MdnsService(
-                instanceLabel = instanceLabel(myPublicKey),
-                hostLabel = hostLabel(myPublicKey),
-                port = listenPort,
-                // TXT keys are `pk`, `name`, `platform` on both platforms — iOS reads them
-                // in netServiceDidResolveAddress, Android in its NSD resolve listener.
-                // `pk` carries the FULL base64 key; the instance name carries only 8
-                // characters of it and is not an identity.
-                txtEntries = listOf("pk=$myPublicKey", "name=$myDisplayName", "platform=${MeshProtocol.PLATFORM}"),
-                onServiceFound = { svc -> onDiscovered(svc) },
-                onServiceLost = { name -> log("mesh: lost $name") },
-                log = log,
-            )
-            mdns = svc
-            svc.start()
-        }
+        if (enableDiscovery) startDiscovery()
+    }
+
+    /** Announce on, and listen to, mDNS. Idempotent: a second call is a no-op. */
+    private fun startDiscovery() {
+        if (mdns != null) return
+        val svc = MdnsService(
+            instanceLabel = instanceLabel(myPublicKey),
+            hostLabel = hostLabel(myPublicKey),
+            port = listenPort,
+            // TXT keys are `pk`, `name`, `platform` on both platforms — iOS reads them
+            // in netServiceDidResolveAddress, Android in its NSD resolve listener.
+            // `pk` carries the FULL base64 key; the instance name carries only 8
+            // characters of it and is not an identity.
+            txtEntries = listOf("pk=$myPublicKey", "name=$myDisplayName", "platform=${MeshProtocol.PLATFORM}"),
+            onServiceFound = { found -> onDiscovered(found) },
+            onServiceLost = { name -> log("mesh: lost $name") },
+            log = log,
+        )
+        mdns = svc
+        svc.start()
+    }
+
+    /** __PEERS_ARE_A_SCREEN_2026_10_28__ Is this machine announcing and listening? */
+    val isDiscovering: Boolean get() = mdns != null
+
+    /**
+     * __PEERS_ARE_A_SCREEN_2026_10_28__ The scan toggle PARITY.md row 1.3 names.
+     *
+     * Turning it OFF stops this machine announcing itself AND stops it looking: mDNS is
+     * both halves, and a toggle that silenced only one would leave someone believing they
+     * were invisible while still broadcasting their display name and public key on the LAN.
+     *
+     * Existing CONNECTIONS are left alone, deliberately. Discovery is how peers are FOUND;
+     * dropping live sockets on top of that would make one switch mean two things, and the
+     * screen already has a per-peer disconnect for the other one.
+     *
+     * @return the state after the call, so a caller never has to assume it took.
+     */
+    /**
+     * __MESH_OFF_IS_A_SENTENCE_2026_10_29__ Is the node started at all?
+     *
+     * [setDiscoveryEnabled] returns false both when the mesh is OFF and when discovery
+     * simply failed to start, and the window could not tell those apart — so asking to
+     * turn scanning ON with `--mesh` absent came back "off" and read as a successful
+     * "off". PARITY.md row 1.2-a records that costing half an hour, diagnosed as broken
+     * mDNS. The pane needs this to say which it is.
+     */
+    val isRunning: Boolean get() = running.get()
+
+    fun setDiscoveryEnabled(enabled: Boolean): Boolean {
+        if (!running.get()) return false
+        if (enabled) startDiscovery() else { mdns?.stop(); mdns = null }
+        return isDiscovering
+    }
+
+    /**
+     * __PEERS_ARE_A_SCREEN_2026_10_28__ Drop the connection to one peer by hand.
+     *
+     * Closes the socket and forgets the connection, leaving the peer in the directory: it
+     * was discovered and still exists, we simply are not talking to it. The next discovery
+     * tick may reconnect, and that is honest rather than a defect — this is "hang up", not
+     * "block", and blocking is `BlockPolicy`, which is a different question with a
+     * different answer.
+     *
+     * @return true when a live connection was actually closed.
+     */
+    fun disconnectPeer(publicKey: String): Boolean {
+        val conn = findConn(publicKey) ?: return false
+        val key = connections.entries.firstOrNull { it.value === conn }?.key
+        if (key != null) connections.remove(key)
+        closeQuietly(conn)
+        log("mesh: disconnected ${publicKey.take(12)}… by hand")
+        return true
     }
 
     fun stop() {
@@ -206,7 +288,10 @@ class MeshNode(
             onPeersChanged(peers())
             log("mesh: discovered ${svc.displayName} (${svc.platform}) at ${svc.host}:${svc.port}")
         }
-        connectToPeer(svc.host, svc.port, pk)
+        // Remember EVERY address this key is announced at, then dial them in turn.
+        peerAddresses.computeIfAbsent(pk) { Collections.synchronizedSet(LinkedHashSet()) }
+            .add(svc.host to svc.port)
+        dialKnownAddresses(pk)
     }
 
     /**
@@ -220,6 +305,51 @@ class MeshNode(
      * connection speaks last and the other goes idle until its peer drops it — so this
      * copies the shipped behaviour rather than inventing a fourth one.
      */
+    /**
+     * __MESH_MULTIHOMED_DIAL_2026_10_29__ Try each address [pk] has been announced at,
+     * in the order they arrived, until one connects.
+     *
+     * Still ONE dial in flight per peer, so the duplicate-connection hole documented on
+     * [connectToPeer] is not widened: what changes is that a dead address no longer
+     * consumes the peer's only attempt. The loop re-reads [findConn] each time round, so
+     * an inbound connection that lands mid-sequence ends it.
+     */
+    private fun dialKnownAddresses(pk: String) {
+        if (findConn(pk) != null) return
+        if (!connecting.add(pk)) return
+        Thread({
+            try {
+                // Re-read the set every round rather than snapshotting it once: the
+                // other interfaces' announcements arrive milliseconds after the first,
+                // which is DURING this dial, and a snapshot taken at the start would
+                // hold only the address that lost. That was still a 20 s failure here —
+                // tunnel, timeout, tunnel again — with the LAN address discovered the
+                // whole time.
+                val tried = HashSet<Pair<String, Int>>()
+                while (true) {
+                    if (findConn(pk) != null) return@Thread
+                    val next = peerAddresses[pk]
+                        ?.let { synchronized(it) { it.toList() } }
+                        .orEmpty()
+                        .firstOrNull { it !in tried } ?: break
+                    tried += next
+                    val (host, port) = next
+                    try {
+                        val socket = Socket()
+                        socket.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
+                        log("mesh: connected to $host:$port")
+                        startConnection(socket, pk)
+                        return@Thread
+                    } catch (e: Exception) {
+                        log("mesh: connect $host:$port failed: ${e.javaClass.simpleName}: ${e.message}")
+                    }
+                }
+            } finally {
+                connecting.remove(pk)
+            }
+        }, "oshi-mesh-dial").apply { isDaemon = true }.start()
+    }
+
     fun connectToPeer(host: String, port: Int, expectedKey: String?) {
         if (expectedKey != null && findConn(expectedKey) != null) return
         val dialKey = expectedKey ?: "$host:$port"
@@ -244,6 +374,8 @@ class MeshNode(
         if (expectedKey != null) {
             conn.peerKey = expectedKey
             connections[expectedKey] = conn
+            // We dialled, so the key was known before the socket existed.
+            flushCustodyTo(expectedKey, conn)
             // We dialled, so we speak first — identity, then the 2-hop gossip announce,
             // in that order. Both platforms do exactly this on connect.
             sentIdentityTo.add(expectedKey)
@@ -319,6 +451,10 @@ class MeshNode(
         conn.peerKey = key
         connections[key] = conn
         routingTable[key] = RouteInfo(key, 1, System.currentTimeMillis())
+        // __DESKTOP_MESH_CUSTODY_2026_10_29__ A peer we now have a key for is a peer we can
+        // hand held messages to. Hooked HERE rather than at socket-accept because custody is
+        // addressed by identity, and until the identity exchange we do not have one.
+        flushCustodyTo(key, conn)
         // `conn.socket.port` IS THE PEER'S LISTEN PORT ONLY WHEN WE DIALLED.
         //
         // On a socket we ACCEPTED it is the remote end's EPHEMERAL SOURCE port — the port
@@ -522,11 +658,50 @@ class MeshNode(
             findConn(route.nextHop)?.let { send(it, relay); return }
         }
         val bytes = relay.toWireBytes()
+        var handedOn = false
         for ((peerKey, conn) in connections) {
             if (msg.seenBy.contains(peerKey)) continue
             if (peerKey == msg.senderPublicKey) continue
             sendBytes(conn, bytes)
+            handedOn = true
         }
+        // __DESKTOP_MESH_CUSTODY_2026_10_29__ NOBODY TO HAND IT TO, SO HOLD IT.
+        //
+        // This loop used to end here, and that was the whole of the store-and-forward gap:
+        // when no peer is eligible — none connected, or every one of them already in
+        // `seenBy`, or only the sender — nothing is sent and the message is discarded in
+        // silence. The chain therefore worked only while every hop was awake at the same
+        // moment; a courier who walked out of range for thirty seconds lost the message.
+        //
+        // `relay` is stored, not `msg`: its hop count is already incremented and this node is
+        // already in `seenBy`. Re-originating at hop 0 on release would hand a deferred
+        // packet a fresh hop budget and let it outlive the ceiling.
+        if (!handedOn) {
+            if (custody.take(relay, bytes, System.currentTimeMillis())) {
+                log("mesh: holding ${msg.id.take(8)} — no peer to pass it to (${custody.size} held)")
+            }
+        }
+    }
+
+    /**
+     * __DESKTOP_MESH_CUSTODY_2026_10_29__ A peer appeared: re-offer what this node is holding
+     * for it.
+     *
+     * Custody ends on HAND-OFF, not on an acknowledgement — there is no app-level ack on the
+     * mesh, and waiting for one would mean holding strangers' data indefinitely on the
+     * strength of a guess. A message that is re-offered and lost is one this node already
+     * tried its best with; a message held for ever is a storage leak with somebody else's
+     * data in it.
+     */
+    private fun flushCustodyTo(peerKey: String, conn: Conn) {
+        val offers = custody.offersFor(peerKey, System.currentTimeMillis())
+        if (offers.isEmpty()) return
+        for (h in offers) {
+            runCatching { sendBytes(conn, h.bytes) }
+                .onSuccess { custody.release(h.message.id) }
+                .onFailure { return }
+        }
+        log("mesh: handed ${offers.size} held message(s) to ${peerKey.take(8)}…")
     }
 
     private fun broadcastOwnIdentityAnnounce() {

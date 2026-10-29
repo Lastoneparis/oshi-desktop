@@ -187,7 +187,12 @@ class VideoNoteRecorder(
             }
             if (FfmpegVideo.encoderCandidates().isEmpty()) return "No H.264 encoder is available on this machine."
             val o = os.lowercase()
-            if (!o.contains("mac") && com.oshi.desktop.call.media.CallDevices.cameras(os).isEmpty()) {
+            // The `!o.contains("mac")` that used to be here existed only because
+            // `cameras()` ALWAYS returned an empty list on macOS, so the check would have
+            // told every Mac it had no camera. It enumerates there now, which makes the
+            // exemption the opposite of what it was for: it would tell a Mac with no camera
+            // at all to go ahead and record.
+            if (com.oshi.desktop.call.media.CallDevices.cameras(os).isEmpty()) {
                 return "No camera found on this computer."
             }
             return null

@@ -10,23 +10,41 @@ class LoRaNodeRosterTest {
     private fun myInfo(num: Long) =
         ProtoWriter().bytes(3, ProtoWriter().varint(1, num).data).data
 
+    /**
+     * A `FromRadio.node_info` (top-level field 4) carrying a `NodeInfo`.
+     *
+     * __LORA_NODEINFO_FIELDS_2026_10_28__ `last_heard` is NodeInfo field 5 and it is a
+     * `uint32`, so it is a VARINT on the wire. These fixtures wrote it as a fixed32 and the
+     * roster read it as a fixed32, so the two agreed with each other and with nothing a
+     * radio sends. The real layout was read off a ThinkNode M1.
+     */
     private fun nodeInfo(num: Long, lastHeardS: Long?) =
         ProtoWriter().bytes(
             4,
-            ProtoWriter().varint(1, num).let { w -> if (lastHeardS != null) w.fixed32(5, lastHeardS.toInt()) else w }.data,
+            ProtoWriter().varint(1, num).let { w -> if (lastHeardS != null) w.varint(5, lastHeardS) else w }.data,
         ).data
 
     private fun packetFrom(num: Long) =
         ProtoWriter().bytes(2, ProtoWriter().fixed32(1, num.toInt()).data).data
 
-    /** A `NodeInfo` that also carries `user` (field 4): long_name (2), short_name (3). */
+    /**
+     * A `NodeInfo` that also carries `user` — **field 2**, not 4: long_name (2),
+     * short_name (3).
+     *
+     * __LORA_NODEINFO_FIELDS_2026_10_28__ This wrote the User at field 4 and the roster
+     * read it from field 4, so every test here passed while every real radio produced a
+     * nameless list: in a real `NodeInfo`, field 4 is `snr`, a float. The bug and its test
+     * were built from one misreading and confirmed each other. What broke the tie was
+     * pointing the roster at a device — PARITY row 1.2-a's own "NOT verified: a real
+     * radio" — and watching 45 nodes arrive unnamed.
+     */
     private fun nodeInfoNamed(num: Long, lastHeardS: Long?, longName: String, shortName: String = "") =
         ProtoWriter().bytes(
             4,
             ProtoWriter().varint(1, num)
-                .let { w -> if (lastHeardS != null) w.fixed32(5, lastHeardS.toInt()) else w }
+                .let { w -> if (lastHeardS != null) w.varint(5, lastHeardS) else w }
                 .bytes(
-                    4,
+                    2,
                     ProtoWriter()
                         .let { u -> if (longName.isEmpty()) u else u.bytes(2, longName.toByteArray()) }
                         .let { u -> if (shortName.isEmpty()) u else u.bytes(3, shortName.toByteArray()) }

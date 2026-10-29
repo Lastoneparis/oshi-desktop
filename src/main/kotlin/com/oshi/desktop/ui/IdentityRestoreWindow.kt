@@ -38,7 +38,23 @@ import java.io.File
  */
 fun restoreIdentityWindow(vault: KeyVault): Boolean {
     var restored = false
-    application {
+    // __FIRST_RUN_EXITED_THE_PROCESS_2026_10_29__ `exitProcessOnExit = false`, and it is
+    // the difference between this window handing an answer back and this window being the
+    // last thing the app ever does.
+    //
+    // Compose's `application { }` defaults that flag to TRUE, so `exitApplication()` ends
+    // the composition and then calls `exitProcess(0)`. Both of these windows exist to
+    // RETURN something — a choice, or whether a restore happened — and `UiLauncher` reads
+    // it on the next line to build the client and open the real window. With the default,
+    // that next line was never reached: clicking "Create New Identity" on a fresh profile
+    // made the whole app vanish, exit status 0, nothing on stdout or stderr. A new user on
+    // macOS could not get past the first screen, and the silence is why it reads as a
+    // crash rather than a bug.
+    //
+    // Found by driving the ASSEMBLED app with a real mouse on a throwaway `OSHI_HOME`. No
+    // test and no fake-host harness could have caught it: the defect is in what the process
+    // does after the composition ends, which only exists when the real launcher is running.
+    application(exitProcessOnExit = false) {
         Window(
             onCloseRequest = { exitApplication() },
             // These are shared iOS keys, not desktop-only copy. Keeping the recovery path in
@@ -129,7 +145,23 @@ enum class FirstRunIdentityChoice { CREATE_NEW, RESTORED, CANCELLED }
  */
 fun firstRunIdentityWindow(vault: KeyVault): FirstRunIdentityChoice {
     var choice = FirstRunIdentityChoice.CANCELLED
-    application {
+    // __FIRST_RUN_EXITED_THE_PROCESS_2026_10_29__ `exitProcessOnExit = false`, and it is
+    // the difference between this window handing an answer back and this window being the
+    // last thing the app ever does.
+    //
+    // Compose's `application { }` defaults that flag to TRUE, so `exitApplication()` ends
+    // the composition and then calls `exitProcess(0)`. Both of these windows exist to
+    // RETURN something — a choice, or whether a restore happened — and `UiLauncher` reads
+    // it on the next line to build the client and open the real window. With the default,
+    // that next line was never reached: clicking "Create New Identity" on a fresh profile
+    // made the whole app vanish, exit status 0, nothing on stdout or stderr. A new user on
+    // macOS could not get past the first screen, and the silence is why it reads as a
+    // crash rather than a bug.
+    //
+    // Found by driving the ASSEMBLED app with a real mouse on a throwaway `OSHI_HOME`. No
+    // test and no fake-host harness could have caught it: the defect is in what the process
+    // does after the composition ends, which only exists when the real launcher is running.
+    application(exitProcessOnExit = false) {
         Window(
             onCloseRequest = { exitApplication() },
             title = t("identity.app_name"),

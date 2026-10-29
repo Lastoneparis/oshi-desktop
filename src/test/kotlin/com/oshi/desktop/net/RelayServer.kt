@@ -77,6 +77,25 @@ class RelayServer : AutoCloseable {
     fun remainingOpks(userKey: String): Int = bundles[userKey]?.opks?.size ?: 0
     fun hasBundle(userKey: String): Boolean = bundles.containsKey(userKey)
 
+    /**
+     * __DESKTOP_RATCHET_HEAL_2026_10_29__ Rewrite the `from` on every queued envelope in one
+     * mailbox, so a test can present a real, correctly-sealed envelope under somebody else's
+     * name.
+     *
+     * A HOSTILE RELAY, which is exactly the threat model: the `from` field sits outside the
+     * AEAD (every `OSHIRatchetV2` call passes empty associated data), so the server can
+     * rewrite it and the ciphertext still verifies — to the wrong party. That is what the
+     * responder-side TOFU in `establishResponder` refuses, and testing it needs a relay that
+     * will actually lie.
+     *
+     * Only in the fake. A real relay doing this is the attack.
+     */
+    fun relabelSender(from: String, to: String, inMailboxOf: String) {
+        mailboxes[inMailboxOf]?.forEach { stored ->
+            if (stored.envelope.optString("from") == from) stored.envelope.put("from", to)
+        }
+    }
+
     /** Drop a message into a mailbox directly — for forging what a client would never send. */
     fun inject(toUserKey: String, envelope: JSONObject) {
         val seq = seqCounter.getOrPut(toUserKey) { AtomicLong(0) }.incrementAndGet()

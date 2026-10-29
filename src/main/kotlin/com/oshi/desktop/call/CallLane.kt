@@ -218,6 +218,21 @@ class CallLane(
          * [com.oshi.desktop.call.media.CallAudioSession.consecutiveSilentFrames].
          */
         val micLooksBlocked: Boolean = false,
+        /**
+         * __CALL_QUALITY_TIERS_2026_10_28__ The three figures the quality badge is built
+         * from. Cumulative counters and a smoothed round trip; the UI takes per-second
+         * deltas of the first two, because a rough opening second must not mark a long
+         * call. See [com.oshi.desktop.ui.state.CallQualityStats].
+         *
+         * Note what is NOT here: a jitter figure. The playback queue is a fixed 60 ms
+         * de-jitter buffer with no measured arrival spread to report, and inventing one
+         * would be worse than admitting it — iOS's own measurement says raw jitter was
+         * what made a perfect call read "poor".
+         */
+        val framesRendered: Long = 0,
+        val framesSilenced: Long = 0,
+        /** Round trip on the path actually carrying the call; null before the first pong. */
+        val rttMs: Int? = null,
     )
 
     /**
@@ -301,6 +316,9 @@ class CallLane(
             framesRefused = live?.framesRefused?.get() ?: 0,
             framesSent = live?.audio?.framesSent?.get() ?: 0,
             micLooksBlocked = live?.audio?.micLooksBlocked ?: false,
+            framesRendered = live?.audio?.framesRendered?.get() ?: 0,
+            framesSilenced = live?.audio?.framesSilenced?.get() ?: 0,
+            rttMs = live?.socket?.selectedRttMs,
         )
     }
 
@@ -530,6 +548,29 @@ class CallLane(
     fun setMuted(value: Boolean) {
         muted = value
         leg?.audio?.muted = value
+    }
+
+    /**
+     * __CALL_VOICE_EFFECTS_2026_10_28__ The live voice effect on what we send — PARITY
+     * row 2.1-d's last unported item.
+     *
+     * Remembered on the lane as well as handed to the leg, for the same reason [muted] is:
+     * a choice made before a call connects (or between two calls) has no leg to land on,
+     * and an effect that silently reverted to None when the call started would look like
+     * the picker not working. The persisted default in `CallDevices.voiceEffect` is what a
+     * NEW session starts from; this is what the current one is using.
+     */
+    @Volatile
+    var voiceEffect: com.oshi.desktop.call.media.CallVoiceEffects.Effect =
+        com.oshi.desktop.call.media.CallDevices.defaultVoiceEffect()
+        private set
+
+    fun setVoiceEffect(effect: com.oshi.desktop.call.media.CallVoiceEffects.Effect) {
+        voiceEffect = effect
+        leg?.audio?.setVoiceEffect(effect)
+        // Persisted so the next call, and the next launch, start where the person left off
+        // — iOS's `defaultVoiceEffect` does exactly this.
+        com.oshi.desktop.call.media.CallDevices.voiceEffect = effect.wire
     }
 
     /** The live call's video half — PARITY.md row 2.1-v. Null outside a connected call. */
@@ -896,6 +937,25 @@ class CallLane(
             Thread({ runCatching { deliver(send, System.currentTimeMillis(), quiet = true) } }, "oshi-pli-signal")
                 .apply { isDaemon = true; start() }
         }
+        // __VIDEO_TOGGLE_SIGNAL_2026_10_29__ The camera on/off announcement goes out as a
+        // sealed call signal too. The desktop has READ this copy since 2026-09-23 and never
+        // sent one, which row 2.1-c half-recorded: a released iPhone reads pause/resume
+        // ONLY here, so our media-channel `0x0C`/`0x0D` reached it and was dropped. The
+        // sealed `0x0E`+`0x06`/`0x07` both phones read meant the indicator still arrived,
+        // so this closes an asymmetry rather than a silence. 9 B sealed = 37 B, under the
+        // server's 48-byte `control` ceiling, so it is budgeted and coalesced exactly like
+        // the keyframe copy above. Off the socket thread; a refusal is logged, never shown.
+        opened.video?.signalCameraToggle = { on ->
+            val send = CallAction.Send(
+                peer = action.peer,
+                type = if (on) CallPacket.Type.VIDEO_RESUMED else CallPacket.Type.VIDEO_PAUSED,
+                payload = ByteArray(0),
+                envelopeType = VIDEO_TOGGLE_ENVELOPE_TYPE,
+                callId = action.callId,
+            )
+            Thread({ runCatching { deliver(send, System.currentTimeMillis(), quiet = true) } }, "oshi-vtoggle-signal")
+                .apply { isDaemon = true; start() }
+        }
         synchronized(mediaLock) {
             leg = opened
             if (mediaProbeIntervalMs > 0) mediaTimer = startProbeTimer()
@@ -1080,6 +1140,17 @@ class CallLane(
     companion object {
         /** __CALL_VIDEO_SIGNAL_2026_09_23__ the envelope `type` of an in-call keyframe request. */
         const val KEYFRAME_REQUEST_ENVELOPE_TYPE = "keyframeRequest"
+
+        /**
+         * __VIDEO_TOGGLE_SIGNAL_2026_10_29__ The outer JSON hint on a camera on/off copy.
+         *
+         * Deliberately NOT one of the server's `CRITICAL_SIGNAL_TYPES` or
+         * `OFFER_SIGNAL_TYPES`: at 37 sealed bytes it falls under `CONTROL_MAX_SEALED_BYTES`
+         * (48) and is budgeted as `control` — burst 4, refill 2/s, coalesced per
+         * (sender, callId) — which is what a rare, idempotent announcement wants. The media
+         * channel carries the same toggle unbudgeted, so a coalesced copy costs nothing.
+         */
+        const val VIDEO_TOGGLE_ENVELOPE_TYPE = "videoToggle"
 
 
         /**

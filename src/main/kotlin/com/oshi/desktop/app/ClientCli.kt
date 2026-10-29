@@ -40,6 +40,22 @@ fun runClientCli(args: Array<String>) {
     val passphrase = System.getenv("OSHI_PASSPHRASE")?.toCharArray()
     val verbose = args.contains("--verbose")
 
+    // __DESKTOP_HOME_LOCK_2026_10_29__ The REPL takes the same lock as the window, and for the
+    // same reason. This entry point matters as much as the other: the likeliest way to get two
+    // writers on one profile is a developer running `--client` with the packaged app open —
+    // which is to say, us.
+    when (val lock = com.oshi.desktop.store.HomeLock.acquire(home)) {
+        is com.oshi.desktop.store.HomeLock.Outcome.Held -> Unit
+        com.oshi.desktop.store.HomeLock.Outcome.Busy -> {
+            println("OSHI is already running on this profile (${home.absolutePath}).")
+            println("Two copies cannot share it — they would corrupt each other's encryption sessions.")
+            println("Close the other one, or pass --home <dir> to use a separate profile.")
+            return
+        }
+        is com.oshi.desktop.store.HomeLock.Outcome.Unsupported ->
+            println("warning: cannot lock ${home.absolutePath} (${lock.reason}); a second copy could corrupt it.")
+    }
+
     val store = SecretStore.detect()
     val client = try {
         OshiClient(
@@ -295,7 +311,16 @@ object ClientCommands {
           /mailbox reset RESET-ALL-DEVICES   recovery only: every device must be linked again
           /nick [name|clear|pull|push]       your nickname: show, set (sent to contacts), remove, sync with your phone
           /lora attach <host> [port]         attach to a Meshtastic node over TCP (default 4403)
-          /lora status|detach                the radio link — receive only, see /lora status
+          /lora serial [device] [baud]       attach to a radio plugged into USB (macOS/Linux)
+          /lora devices                      list USB serial devices under /dev
+          /lora nodes                        radios heard, with position/distance when known
+          /lora region [code] [preset] [hop]  set the node's region — a new radio needs this
+          /lora channel <name> [key]         which mesh the node is on
+          /lora send <text>                  broadcast stock Meshtastic text — PLAINTEXT
+          /lora msg <address> <text>         send an OSHI message over the radio — ENCRYPTED
+          /lora link <node> <address>        file this radio's text in a contact's conversation
+          /lora unlink <node> | /lora links   undo one | list them
+          /lora status|detach                the radio link — see /lora status
           /ai <prompt>                       ask the OFFLINE model (nothing leaves this machine)
           /ai model <path>                   point at a .gguf; nothing is ever downloaded
           /ai status                         engine, model, and what a question would do now
@@ -417,7 +442,7 @@ object ClientCommands {
                     when {
                         target == null -> out("   no known address starts with '$prefix' (use the full address for a new contact)")
                         text.isEmpty() -> out("   nothing to send")
-                        else -> out("   " + outcomeText(client.send(target, text)))
+                        else -> out("   " + outcomeText(client.send(target, text), client.config))
                     }
                 }
 
@@ -429,7 +454,7 @@ object ClientCommands {
                     when {
                         target == null -> out("   unknown address")
                         path.isEmpty() || !file.isFile -> out("   no such file: $path")
-                        else -> out("   " + outcomeText(client.sendFile(target, file)))
+                        else -> out("   " + outcomeText(client.sendFile(target, file), client.config))
                     }
                 }
 
@@ -440,7 +465,7 @@ object ClientCommands {
                     when {
                         a == null -> out("   usage: /card <address> <contact address>")
                         target == null || card == null -> out("   unknown address")
-                        else -> out("   " + outcomeText(client.sendContactCard(target, card)))
+                        else -> out("   " + outcomeText(client.sendContactCard(target, card), client.config))
                     }
                 }
 
@@ -511,7 +536,7 @@ object ClientCommands {
                         when {
                             target == null -> out("   unknown address")
                             msg == null -> out("   no message in that conversation starts with '${a[2]}'")
-                            else -> out("   " + outcomeText(client.sendReaction(target, msg, a[3], adding)))
+                            else -> out("   " + outcomeText(client.sendReaction(target, msg, a[3], adding), client.config))
                         }
                     }
                 }
@@ -524,7 +549,7 @@ object ClientCommands {
                         when {
                             target == null -> out("   unknown address")
                             msg == null -> out("   no message in that conversation starts with '${a[2]}'")
-                            else -> out("   " + outcomeText(client.editMessage(target, msg, a[3])))
+                            else -> out("   " + outcomeText(client.editMessage(target, msg, a[3]), client.config))
                         }
                     }
                 }
@@ -537,7 +562,7 @@ object ClientCommands {
                         when {
                             target == null -> out("   unknown address")
                             msg == null -> out("   no message in that conversation starts with '${a[2]}'")
-                            else -> out("   " + outcomeText(client.deleteMessage(target, msg)))
+                            else -> out("   " + outcomeText(client.deleteMessage(target, msg), client.config))
                         }
                     }
                 }
@@ -548,12 +573,12 @@ object ClientCommands {
                     when {
                         a == null -> out("   usage: /typing <address> on|off")
                         target == null -> out("   unknown address")
-                        else -> out("   " + outcomeText(client.sendTyping(target, a[2] == "on")))
+                        else -> out("   " + outcomeText(client.sendTyping(target, a[2] == "on"), client.config))
                     }
                 }
 
                 input.startsWith("/read ") -> withPeer(client, input, "/read ", out) {
-                    out("   " + outcomeText(client.sendReadReceipt(it)))
+                    out("   " + outcomeText(client.sendReadReceipt(it), client.config))
                 }
 
                 input == "/qr" -> {
@@ -783,12 +808,12 @@ object ClientCommands {
                 if (parts.size < 3) { out("   usage: /group roster <groupId> <address>"); return }
                 val gid = resolveGroup(client, parts[1]) ?: run { out("   unknown group"); return }
                 val who = resolve(client, parts[2]) ?: run { out("   unknown address"); return }
-                out("   " + outcomeText(client.requestGroupRoster(gid, who)))
+                out("   " + outcomeText(client.requestGroupRoster(gid, who), client.config))
             }
             "sync" -> {
                 if (parts.size < 2) { out("   usage: /group sync <address>"); return }
                 val who = resolve(client, parts[1]) ?: run { out("   unknown address"); return }
-                out("   " + outcomeText(client.requestAllGroups(who)))
+                out("   " + outcomeText(client.requestAllGroups(who), client.config))
             }
             else -> out("   usage: /group new|send|add|remove|rename|roster|sync …")
         }
@@ -971,6 +996,26 @@ private fun callLog(client: OshiClient, out: (String) -> Unit) {
         )
     }
 
+/**
+ * A node number as a person writes it: `!766eb396`, `766eb396`, or `1986966422`.
+ *
+ * Meshtastic shows the hex form with a `!`, the CLI and the protobufs use the decimal, and
+ * both appear in this client's own output — so accepting one spelling would be a trap. Hex
+ * is tried FIRST and only for exactly 8 digits, because `1986966422` is a valid hex string
+ * too and would silently parse as a different node.
+ */
+private fun loraNodeArg(raw: String?): UInt? {
+    val a = raw?.trim()?.removePrefix("!") ?: return null
+    if (a.isEmpty()) return null
+    if (a.length == 8 && a.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }) {
+        return a.toUIntOrNull(16)
+    }
+    return a.toUIntOrNull()
+}
+
+/** Both spellings, so a person can match this against whichever one they were reading. */
+private fun loraNodeLabel(node: UInt): String = "!%08x ($node)".format(node.toLong())
+
 private fun lora(client: OshiClient, rest: String, out: (String) -> Unit) {
         val parts = rest.split(' ').filter { it.isNotEmpty() }
         when (parts.firstOrNull()) {
@@ -994,9 +1039,169 @@ private fun lora(client: OshiClient, rest: String, out: (String) -> Unit) {
                 out("   flagged UNVERIFIED; an OSHI envelope is sealed with the LEGACY ratchet")
                 out("   this client does not implement, so it is reported and never opened.")
             }
+            "serial" -> {
+                val device = parts.getOrNull(1)
+                if (device == null) {
+                    // No argument is the common case, not an error: a person does not know
+                    // the device name by heart. Offer what is plugged in.
+                    val found = client.loraSerialDevices()
+                    if (found.isEmpty()) {
+                        out("   usage: /lora serial <device> [baud]")
+                        out("   no USB serial device found under /dev")
+                    } else {
+                        out("   usage: /lora serial <device> [baud] — plugged in now:")
+                        found.forEach { out("     ${it.path}") }
+                    }
+                    return
+                }
+                val baudArg = parts.getOrNull(2)
+                val baud = baudArg?.toIntOrNull()
+                    ?: if (baudArg == null) com.oshi.desktop.lora.LoRaSerial.DEFAULT_BAUD else run {
+                        out("   baud must be an integer")
+                        return
+                    }
+                if (!client.loraAttachSerial(device, baud)) {
+                    out("   could not attach: the device must be a path directly under /dev")
+                    return
+                }
+                out("   attaching to $device at $baud …")
+                out("   RECEIVE + stock-Meshtastic SEND. An OSHI envelope is still sealed with")
+                out("   the LEGACY ratchet this client does not implement (rows 0.16 / 0.27).")
+            }
+            "nodes" -> {
+                val nodes = client.loraOnlineNodeList()
+                if (nodes.isEmpty()) { out("   no node heard yet"); return }
+                nodes.forEach { n ->
+                    val id = "!%08x".format(n.num.toLong())
+                    val where = when {
+                        n.distanceKm != null -> " · %.1f km away".format(n.distanceKm)
+                        n.latitude != null -> " · %.5f, %.5f".format(n.latitude, n.longitude)
+                        else -> ""
+                    }
+                    out("   $id ${n.name.ifEmpty { "(unnamed)" }}$where")
+                }
+            }
+            "devices" -> {
+                val found = client.loraSerialDevices()
+                if (found.isEmpty()) out("   no USB serial device found under /dev")
+                else found.forEach { out("   ${it.path}") }
+            }
+            "send" -> {
+                // Everything after the subcommand is the text, so it may contain spaces.
+                val text = rest.removePrefix(parts[0]).trim()
+                if (text.isEmpty()) { out("   usage: /lora send <text>   (broadcast, PLAINTEXT)"); return }
+                if (!client.loraSendInteropText(text)) { out("   not sent"); return }
+                out("   handed to the radio — PLAINTEXT on the public channel, every")
+                out("   Meshtastic client in range can read it.")
+            }
+            "link" -> {
+                val node = loraNodeArg(parts.getOrNull(1))
+                val address = parts.getOrNull(2)
+                if (node == null || address == null) {
+                    out("   usage: /lora link <!nodehex|nodehex|nodenum> <address>")
+                    out("   files raw Meshtastic text from that radio in that contact's conversation")
+                    return
+                }
+                when (client.loraLinkNode(node, address)) {
+                    com.oshi.desktop.lora.LoRaNodeBindings.LearnResult.BOUND -> {
+                        out("   linked ${loraNodeLabel(node)} -> ${address.take(12)}…")
+                        out("   its stock Meshtastic text now lands in that conversation. That text is")
+                        out("   NOT authenticated: the node number is all that vouches for it.")
+                    }
+                    com.oshi.desktop.lora.LoRaNodeBindings.LearnResult.UNCHANGED ->
+                        out("   already linked to that contact")
+                    com.oshi.desktop.lora.LoRaNodeBindings.LearnResult.CONFLICT ->
+                        out("   refused: the ratchet already proved this node is someone else")
+                    com.oshi.desktop.lora.LoRaNodeBindings.LearnResult.IGNORED_AMBIGUOUS ->
+                        out("   refused: this node's evidence contradicted itself; vouching cannot fix that")
+                    com.oshi.desktop.lora.LoRaNodeBindings.LearnResult.REJECTED ->
+                        out("   refused: that is not an OSHI identity key")
+                }
+            }
+            "unlink" -> {
+                val node = loraNodeArg(parts.getOrNull(1))
+                if (node == null) { out("   usage: /lora unlink <!nodehex|nodehex|nodenum>"); return }
+                if (client.loraUnlinkNode(node)) out("   unlinked ${loraNodeLabel(node)} — back to its own lora! thread")
+                else out("   nothing to undo: no manual link on that node (a PROVED binding is not removed here)")
+            }
+            "links" -> {
+                val links = client.loraManualLinks()
+                if (links.isEmpty()) out("   no manual links")
+                else links.forEach { (nodeKey, address) -> out("   !$nodeKey -> ${address.take(12)}…") }
+            }
+            "msg" -> {
+                // "<address> <text…>" — the text may contain spaces, the address may not.
+                val rest2 = rest.removePrefix(parts[0]).trim()
+                val addr = rest2.substringBefore(' ').trim()
+                val text = rest2.substringAfter(' ', "").trim()
+                if (addr.isEmpty() || text.isEmpty()) {
+                    out("   usage: /lora msg <address> <text>   (ENCRYPTED, broadcast, no ack)")
+                    return
+                }
+                // An address prefix is enough, as it is for /send and /history.
+                val full = client.contacts.all().map { it.address }
+                    .firstOrNull { it.startsWith(addr) } ?: addr
+                if (!client.loraSendOshiMessage(full, text)) { out("   not sent"); return }
+                out("   encrypted and handed to the radio. Every OSHI radio in range holds the")
+                out("   ciphertext; only ${full.take(12)}… can open it. Broadcasts are not acknowledged,")
+                out("   so this says SENT and will not say delivered.")
+            }
+            "region" -> {
+                val want = parts.getOrNull(1)
+                if (want == null) {
+                    out("   usage: /lora region <code> [longfast|longslow] [hoplimit]")
+                    out("   a node from the flasher is region=UNSET: it pairs, reports connected,")
+                    out("   and transmits NOTHING until this is written. Codes:")
+                    com.oshi.desktop.lora.LoRaAdmin.Region.selectable
+                        .chunked(3)
+                        .forEach { row -> out("     " + row.joinToString("  ") { "${it.name}=${it.wire}" }) }
+                    return
+                }
+                val region = com.oshi.desktop.lora.LoRaAdmin.Region.entries
+                    .firstOrNull { it.name.equals(want, ignoreCase = true) || it.wire.toString() == want }
+                if (region == null || region == com.oshi.desktop.lora.LoRaAdmin.Region.UNSET) {
+                    out("   unknown region — /lora region lists them")
+                    return
+                }
+                val preset = when (parts.getOrNull(2)?.lowercase()) {
+                    null, "longfast" -> com.oshi.desktop.lora.LoRaAdmin.ModemPreset.LONG_FAST
+                    "longslow" -> com.oshi.desktop.lora.LoRaAdmin.ModemPreset.LONG_SLOW
+                    else -> { out("   preset must be longfast or longslow"); return }
+                }
+                val hop = parts.getOrNull(3)?.toLongOrNull()
+                    ?: com.oshi.desktop.lora.LoRaAdmin.DEFAULT_HOP_LIMIT
+                if (!client.loraSetRegion(region, preset, hop)) { out("   not written"); return }
+                out("   asked the radio to set ${region.label}. It replaces the WHOLE LoRa config,")
+                out("   so preset, hop limit and tx_enabled are written with it.")
+            }
+            "channel" -> {
+                val name = parts.getOrNull(1) ?: ""
+                val key = parts.getOrNull(2) ?: ""
+                if (parts.size == 1) {
+                    out("   usage: /lora channel <name|\"\"> [base64 key]")
+                    out("   an empty name with no key is the stock LongFast channel —")
+                    out("   that is how you get back onto the normal mesh.")
+                    return
+                }
+                val clean = if (name == "\"\"") "" else name
+                if (!client.loraSetChannel(clean, key)) { out("   not written"); return }
+                out("   asked the radio to move channel. It replaces the channel WHOLESALE:")
+                out("   a key left out means the public default, never \"keep what you had\".")
+            }
             "detach" -> { client.loraDetach(); out("   detached") }
-            "status" -> out(if (client.loraAttached) "   attached" else "   not attached")
-            else -> out("   usage: /lora attach <host> [port] | status | detach")
+            "status" -> {
+                out(if (client.loraAttached) "   attached" else "   not attached")
+                val links = client.loraManualLinks()
+                if (links.isNotEmpty()) {
+                    out("   manual links:")
+                    links.forEach { (nodeKey, address) -> out("     !$nodeKey -> ${address.take(12)}…") }
+                }
+            }
+            else -> out(
+                "   usage: /lora attach <host> [port] | serial [device] [baud] | devices | " +
+                    "send <text> | msg <address> <text> | link <node> <address> | unlink <node> | " +
+                    "links | status | detach"
+            )
         }
     }
 
@@ -1089,11 +1294,11 @@ private fun sync(client: OshiClient, rest: String, out: (String) -> Unit) {
                 )
             }
             "legacy" -> when (parts.getOrNull(1)) {
-                "push" -> client.legacySyncPushAliases().fold(
+                "push" -> client.legacySyncPush().fold(
                     { out("   legacy alias map uploaded (aliases only — this route carries NO block state)") },
                     { out("   legacy push failed: ${it.message}") },
                 )
-                "pull" -> client.legacySyncPullAliases().fold(
+                "pull" -> client.legacySyncPull().fold(
                     { out("   legacy alias map merged: $it contact(s) added (gap-fill only)") },
                     { out("   legacy pull failed: ${it.message}") },
                 )
@@ -1152,12 +1357,24 @@ private fun sync(client: OshiClient, rest: String, out: (String) -> Unit) {
         "   ${m.id.take(8)}  ${stamp(m.scheduledAtMs)}  ${m.status}  ${short(m.recipient)}: ${m.content.take(50)}" +
             if (m.attempts > 0) "  (${m.attempts} attempt(s))" else ""
 
-    private fun outcomeText(o: OshiClient.SendOutcome): String = when (o) {
+    private fun outcomeText(o: OshiClient.SendOutcome, gate: com.oshi.desktop.net.V2ConfigGate): String = when (o) {
         OshiClient.SendOutcome.SENT -> t("messages.sent_successfully")
         OshiClient.SendOutcome.BLOCKED -> "NOT SENT — that contact is blocked"
         OshiClient.SendOutcome.NO_V2_PATH ->
             "NOT DELIVERED — that peer has published no prekey bundle, so V2 cannot reach them"
-        OshiClient.SendOutcome.GATE_CLOSED -> "NOT SENT — the V2 rollout gate is closed for this account"
+        // __GATE_NOT_YET_IS_NOT_NO_2026_10_29__ Three different things closed this gate and
+        // they want three different responses. This said "rollout" for all of them.
+        OshiClient.SendOutcome.GATE_CLOSED -> when {
+            gate.serverUnreachable ->
+                "NOT SENT — the OSHI server is not answering. A connection problem, not a setting " +
+                    "on your account (${gate.lastDecision})"
+            !gate.everAnswered ->
+                "NOT SENT — this client has not had an answer from the server yet, so V2 is still " +
+                    "closed by default. Not a decision about your account: try again in a moment " +
+                    "(${gate.lastDecision})"
+            else ->
+                "NOT SENT — the V2 rollout gate is closed for this account (${gate.lastDecision})"
+        }
         OshiClient.SendOutcome.REFUSED_CONTROL_PAYLOAD ->
             "REFUSED — that is a control payload or a message this account did not send"
     }

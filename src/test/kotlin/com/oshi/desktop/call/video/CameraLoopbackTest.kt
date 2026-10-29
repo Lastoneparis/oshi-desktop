@@ -39,16 +39,48 @@ class CameraLoopbackTest {
                 "size=${b.remoteFrame?.width}x${b.remoteFrame?.height}")
             assumeTrue("camera did not open: ${a.cameraProblem}", a.cameraProblem == null && a.sender.framesSent > 0)
             assertTrue("pictures decoded on the far side", b.remoteFrameCount >= 10)
-            val img = b.remoteFrame!!
-            // A real camera picture is not one flat colour.
-            val distinct = img.argb.asSequence().take(20_000).map { it and 0xF0F0F0 }.toSet().size
-            assertTrue("distinct colours $distinct", distinct > 20)
             b.remoteFrame?.let { savePng(it, "build/camera-loopback-remote.png") }
             a.localFrame?.let { savePng(it, "build/camera-loopback-selfview.png") }
+            val img = b.remoteFrame!!
+            // A real camera picture is not one flat colour.
+            val distinct = colours(img)
+            // …but neither is a BLACK one, and this test could not tell the two apart.
+            // It compared only the far side, so a camera that opens and hands out black
+            // frames — a covered lens, or macOS withholding the picture from whatever
+            // app launched the JVM while still allowing the device — failed it with
+            // "distinct colours 1", blaming the pipeline for the room. Measured on
+            // 2026-10-29: the pipeline was intact (camera open, 30 frames encoded by
+            // h264_videotoolbox, 30 datagrams, 30 pictures decoded at 640x360) and
+            // `ffmpeg -f avfoundation -i 0` from the same shell returned an equally black
+            // frame, which is the control that settles it.
+            //
+            // So the question is asked of the SELF-VIEW first: what did the camera give
+            // us BEFORE any of our code touched it? Flat in, nothing to preserve, and the
+            // run cannot conclude — that is a skip with the reason named. Colour in and
+            // flat out is the regression this test exists to catch, and still fails.
+            val localDistinct = a.localFrame?.let { colours(it) } ?: 0
+            assumeTrue(
+                "the camera opened but handed us a FLAT picture ($localDistinct distinct " +
+                    "colours in the self-view), so this run cannot prove the pipeline keeps " +
+                    "one. On a Mac that is a covered lens, or Camera permission for whatever " +
+                    "app launched the JVM — which a test cannot grant itself. Control: " +
+                    "`ffmpeg -f avfoundation -pixel_format nv12 -i 0 -frames:v 1` from the " +
+                    "same shell returns black too when this is the cause. A skip is NOT a pass.",
+                localDistinct > 20,
+            )
+            assertTrue(
+                "the camera's own picture had $localDistinct distinct colours and only " +
+                    "$distinct survived to the far side — the pipeline lost it",
+                distinct > 20,
+            )
         } finally {
             a.close(); b.close()
         }
     }
+
+    /** Coarse colour count: a real picture has many, a black or flat frame has one. */
+    private fun colours(img: VideoImage): Int =
+        img.argb.asSequence().take(20_000).map { it and 0xF0F0F0 }.toSet().size
 
     private fun savePng(img: VideoImage, path: String) {
         val bi = java.awt.image.BufferedImage(img.width, img.height, java.awt.image.BufferedImage.TYPE_INT_ARGB)

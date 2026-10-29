@@ -1,5 +1,8 @@
 package com.oshi.desktop.ui.state
 
+import com.oshi.desktop.call.media.CallDevices
+import com.oshi.desktop.call.media.CallVoiceEffects
+
 import com.oshi.desktop.i18n.catalogKey
 import com.oshi.desktop.call.CallEndReason
 import com.oshi.desktop.call.CallLane
@@ -99,6 +102,25 @@ class CallScreenModel(
         val carrier: CallCarrier? = null,
         /** The call screen is collapsed to a bar so the app can be used (iOS `call.minimize`). */
         val minimized: Boolean = false,
+        /**
+         * __CALL_QUALITY_TIERS_2026_10_28__ The quality tier for the last second, or null
+         * when nothing has been measured yet — PARITY row 2.1-d listed these tiers as not
+         * ported.
+         *
+         * Null is not "unknown so assume fine". The classifier maps no-data to EXCELLENT,
+         * because every threshold is an upper bound and zero clears them all, so a badge
+         * rendered from an unmeasured call would state **Excellent** on no evidence. The
+         * UI shows nothing instead. [reconnecting] stays a separate flag, exactly as iOS
+         * keeps `.reconnecting` out of what the stats can produce.
+         */
+        val quality: CallQuality? = null,
+        /** Round trip to show beside [quality]; null before the first pong returns. */
+        val latencyMs: Int? = null,
+        /**
+         * __CALL_VOICE_EFFECTS_2026_10_28__ The live voice effect on what we send, so the
+         * picker can show which one is on. Defaults to the persisted choice, not to NONE.
+         */
+        val voiceEffect: CallVoiceEffects.Effect = CallDevices.defaultVoiceEffect(),
     ) {
         fun durationSeconds(nowMs: Long): Long = connectedAtMs?.let { ((nowMs - it) / 1000).coerceAtLeast(0) } ?: 0
     }
@@ -108,6 +130,8 @@ class CallScreenModel(
     private val liveness = CallLiveness()
     private var lastRelaySent = 0L
     private var lastWsSent = 0L
+    private var lastRendered = 0L
+    private var lastSilenced = 0L
     private var live = false
 
     @Volatile var onChange: (CallScreen?) -> Unit = {}
@@ -166,6 +190,18 @@ class CallScreenModel(
     fun toggleMute() {
         val muted = update { it.copy(muted = !it.muted) }?.muted ?: return
         lane.setMuted(muted)
+    }
+
+    /**
+     * Pick the live voice effect (iOS's `VoiceEffectPickerView`, desktop-shaped).
+     *
+     * Allowed before the call connects as well as during it: the lane remembers the choice
+     * and hands it to the leg when one exists, so a person who sets "Deep" while it is
+     * still ringing is not quietly reverted to None the moment it answers.
+     */
+    fun setVoiceEffect(effect: CallVoiceEffects.Effect) {
+        lane.setVoiceEffect(effect)
+        update { it.copy(voiceEffect = effect) }
     }
 
     /** Close the ended screen now (it also closes itself — see [tick]). */
@@ -228,12 +264,26 @@ class CallScreenModel(
         val wsSent = leg?.wsSent?.get() ?: 0L
         val carrier = CallCarrier.of(leg?.selected?.type, relaySent - lastRelaySent, wsSent - lastWsSent)
         lastRelaySent = relaySent; lastWsSent = wsSent
+        // __CALL_QUALITY_TIERS_2026_10_28__ One SECOND of call, not the whole call: a rough
+        // opening second must not mark a half-hour conversation, which is what reading the
+        // cumulative counters would do. Same shape as the relay/ws deltas just above.
+        val stats = CallQualityStats.of(
+            renderedDelta = d.framesRendered - lastRendered,
+            silencedDelta = d.framesSilenced - lastSilenced,
+            latencyMs = d.rttMs ?: 0,
+        )
+        lastRendered = d.framesRendered; lastSilenced = d.framesSilenced
         update {
             if (it.phase != Phase.CONNECTED) it else it.copy(
                 reconnecting = status.reconnecting,
                 videoStalled = status.videoStalled,
                 audioFlowing = status.audioFlowing,
                 carrier = carrier ?: it.carrier,
+                // Keep the last tier through a second with nothing to judge rather than
+                // blinking the badge out: silence between two sentences is not a loss of
+                // knowledge about the line. It only clears when the call does.
+                quality = stats.displayQuality ?: it.quality,
+                latencyMs = stats.displayLatencyMs ?: it.latencyMs,
             )
         }
     }
@@ -360,7 +410,16 @@ class CallScreenModel(
         val nowLive = s?.phase == Phase.CONNECTED
         if (nowLive != live) {
             live = nowLive
-            if (nowLive) { liveness.reset(); lastRelaySent = 0L; lastWsSent = 0L }
+            // __CALL_QUALITY_TIERS_2026_10_28__ The render counters join the existing
+            // per-call resets. Without this, a SECOND call in the same session subtracts
+            // the first call's totals: `rendered - lastRendered` goes negative, and
+            // `CallQualityStats.of` clamps it to a zero-sample window — the badge would
+            // then sit on the previous call's tier for as long as the new call lasted.
+            if (nowLive) {
+                liveness.reset()
+                lastRelaySent = 0L; lastWsSent = 0L
+                lastRendered = 0L; lastSilenced = 0L
+            }
             runCatching { onCallLive(nowLive) }
         }
         onChange(s)

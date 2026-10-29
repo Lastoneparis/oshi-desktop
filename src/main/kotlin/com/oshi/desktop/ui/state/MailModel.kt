@@ -2,6 +2,7 @@ package com.oshi.desktop.ui.state
 
 import com.oshi.desktop.app.OshiClient
 import com.oshi.desktop.mail.MailClient
+import com.oshi.desktop.mail.WebSessionWatch
 import com.oshi.desktop.mail.MailCrypto
 import com.oshi.desktop.mail.MailMime
 import com.oshi.desktop.pairing.QrImageDecoder
@@ -41,8 +42,23 @@ import java.util.concurrent.Executors
 class MailModel(
     private val mail: MailClient,
     private val worker: Executor = defaultWorker(),
+    /**
+     * __DESKTOP_WEB_SESSION_WATCH_2026_10_29__ Where the remembered browser-session baseline
+     * lives. Null disables the watch — which is what the existing unit tests get, so adding a
+     * security check did not quietly change what they exercise. The real client always passes
+     * one; see [com.oshi.desktop.mail.WebSessionWatch] for the attack it answers.
+     */
+    private val webSessionBaseline: com.oshi.desktop.mail.WebSessionWatch.Baseline? = null,
 ) {
-    constructor(client: OshiClient) : this(MailClient(client.identity, client.vault, client.serverUrl))
+    constructor(client: OshiClient) : this(
+        MailClient(client.identity, client.vault, client.serverUrl),
+        baseline = com.oshi.desktop.mail.WebSessionWatch.Baseline(
+            java.io.File(client.mediaDir.parentFile, com.oshi.desktop.mail.WebSessionWatch.FILE_NAME),
+        ),
+    )
+
+    private constructor(mail: MailClient, baseline: com.oshi.desktop.mail.WebSessionWatch.Baseline) :
+        this(mail, defaultWorker(), baseline)
 
     data class OpenMail(
         val id: String,
@@ -78,6 +94,15 @@ class MailModel(
         val editingDraft: DraftContent? = null,
         val drive: List<MailClient.DriveFile> = emptyList(),
         val webSessions: List<MailClient.WebSession> = emptyList(),
+        /**
+         * __DESKTOP_WEB_SESSION_WATCH_2026_10_29__ Browser sessions that appeared since the
+         * last check and that this machine did not authorise.
+         *
+         * Held in the state rather than raised as a transient toast on purpose: an alert the
+         * user was not looking at when it fired is an alert that did not happen, which is the
+         * entire failure `WebSessionWatch` exists to end. It stays until acknowledged.
+         */
+        val newWebSessions: List<String> = emptyList(),
         val contacts: List<Pair<String, String>> = emptyList(),
         /** id -> "subject\nfrom\nbody", for messages decrypted this session — deep search only. */
         val bodyCache: Map<String, String> = emptyMap(),
@@ -565,11 +590,36 @@ class MailModel(
     fun loadBrowserSessions() {
         worker.execute {
             mail.webSessions().fold(
-                onSuccess = { sessions -> mutate { copy(webSessions = sessions) } },
+                onSuccess = { sessions ->
+                    // __DESKTOP_WEB_SESSION_WATCH_2026_10_29__ Compare BEFORE storing the new
+                    // baseline, and only on a successful fetch: a failed request must never
+                    // overwrite what we remember, or one network error would reseed the
+                    // baseline and hide the next appearance.
+                    val appeared = webSessionBaseline?.let { baseline ->
+                        val ids = sessions.map { it.id }
+                        val outcome = WebSessionWatch.classify(ids, baseline.load())
+                        baseline.save(ids)
+                        (outcome as? WebSessionWatch.Outcome.Linked)?.sessionIds ?: emptyList()
+                    }.orEmpty()
+                    mutate {
+                        copy(
+                            webSessions = sessions,
+                            // Accumulated, not replaced: a second appearance must not erase an
+                            // unacknowledged first one.
+                            newWebSessions = (newWebSessions + appeared).distinct(),
+                        )
+                    }
+                },
                 onFailure = { e -> mutate { copy(error = e.message ?: "Could not load browser sessions") } },
             )
         }
     }
+
+    /**
+     * Dismiss the browser-session alert. The user has seen it; the baseline already holds
+     * these ids, so they will not be reported again.
+     */
+    fun acknowledgeNewWebSessions() = mutate { copy(newWebSessions = emptyList()) }
 
     fun revokeBrowserSession(id: String, onDone: (String?) -> Unit = {}) {
         worker.execute {

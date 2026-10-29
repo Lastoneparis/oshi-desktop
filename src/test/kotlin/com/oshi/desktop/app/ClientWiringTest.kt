@@ -13,6 +13,7 @@ import java.nio.file.Files
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -598,28 +599,332 @@ class ClientWiringTest {
     }
 
     /**
-     * The one that matters for what a UI may claim: an OSHI envelope over LoRa is sealed
-     * with the LEGACY ratchet this client does not implement, so it must be REPORTED and
-     * never stored as a message. A row here would be indistinguishable from one the
-     * ratchet vouched for.
+     * __RATCHET_IS_SHARED_SOURCE_2026_10_28__ PARITY.md row 0.16 — the capability this
+     * test used to assert the ABSENCE of.
+     *
+     * It read: *"an OSHI envelope over LoRa is sealed with the LEGACY ratchet this client
+     * does not implement, so it must be REPORTED and never stored as a message."* That was
+     * the honest assertion while it was true. It is not true any more: this build compiles
+     * the phones' own `DoubleRatchet.kt`, so the envelope opens.
+     *
+     * This is the whole lane through the real wiring — a peer seals, the bytes are chunked
+     * into actual `"OM"` frames, pushed through a `FakeMeshtasticNode`, reassembled, routed
+     * by portnum, filtered by recipient, decrypted, and filed. Nothing is stubbed between
+     * the radio and the conversation.
      */
     @Test
-    fun `an OSHI envelope over LoRa is reported unreadable and never stored`() {
+    fun `an OSHI envelope over LoRa is decrypted and filed under the sender`() {
+        val me = fx.client("me")
+        val them = fx.client("them")
+        com.oshi.desktop.lora.FakeMeshtasticNode().use { node ->
+            val decrypted = java.util.concurrent.CountDownLatch(1)
+            me.onLoRa = { if (it.contains("decrypted")) decrypted.countDown() }
+
+            fx.repl(me, "/lora attach ${node.host} ${node.port}")
+            assertTrue(node.handshake.await(10, java.util.concurrent.TimeUnit.SECONDS))
+
+            // The peer seals exactly as a phone does: ratchet inside, static-static
+            // HKDF + AES-GCM outside.
+            val theirEnvelope = com.oshi.desktop.crypto.LegacyRatchetEnvelope(
+                ourPrivateKey = them.identity.identity.priv,
+                ourPublicKeyBase64 = them.address,
+            )
+            val sealed = theirEnvelope.seal("off-grid and readable", me.address)
+
+            val env = com.oshi.desktop.lora.LoRaSecureMessage(
+                id = "11111111-2222-3333-4444-555555555555",
+                senderAddress = them.address,
+                recipientAddress = me.address,
+                encryptedContent = com.oshi.desktop.lora.LoRaEncryptedContent(
+                    sealed.getString("ciphertext"), "", them.address, LORA_T0,
+                ),
+                unixMillis = LORA_T0,
+                isRead = false,
+                deliveryStatus = com.oshi.desktop.lora.LoRaSecureMessage.STATUS_SENT,
+                senderPublicKey = them.address,
+                recipientPublicKey = me.address,
+            )
+            com.oshi.desktop.lora.LoRaFrame.frames(0xCAFEBABEu, env.toWireJson())!!
+                .forEach { node.push(fromRadioWith(oshiPacket(0x99u, it))) }
+
+            assertTrue(
+                "the envelope never decrypted",
+                decrypted.await(10, java.util.concurrent.TimeUnit.SECONDS),
+            )
+
+            // Filed under the SENDER, not under `lora!<nodehex>`: this one is
+            // authenticated, so it belongs beside everything else they have sent.
+            val convos = me.conversationsIncludingBlocked().map { it.conversationId }
+            assertTrue(
+                "a decrypted envelope must land in the sender's conversation: $convos",
+                convos.any { it == com.oshi.desktop.crypto.LegacyRatchetEnvelope.canonicalKey(them.address) },
+            )
+            assertTrue(
+                "a decrypted envelope must NOT be quarantined: $convos",
+                convos.none { it.startsWith("lora!") },
+            )
+
+            // And THIS is where a node number becomes evidence — only the holder of the
+            // sender's identity key could have produced ciphertext this session opened.
+            assertEquals(
+                "the node should be bound to the identity the ratchet just proved",
+                com.oshi.desktop.crypto.LegacyRatchetEnvelope.canonicalKey(them.address),
+                me.loraProvedBinding(0x99u),
+            )
+            me.loraDetach()
+        }
+    }
+
+    /**
+     * __DESKTOP_LORA_OSHI_SEND_2026_10_28__ The loop closed: one desktop SEALS and puts
+     * frames on the wire, another reads those exact bytes off the wire and opens them.
+     *
+     * Nothing is handed between the two in memory. The frames asserted here are the ones
+     * the sender actually wrote to its radio socket — pulled back out of
+     * `FakeMeshtasticNode.received`, unwrapped from `ToRadio` → `MeshPacket` → `Data` the
+     * way a real node would, and re-emitted to the receiver as `FromRadio`. So this
+     * exercises the chunking, the `"OM"` header, the portnum, the recipient filter and the
+     * ratchet in both directions, over the real wire format.
+     */
+    @Test
+    fun `one desktop seals an OSHI message onto the radio and another opens it`() {
+        val me = fx.client("me")
+        val them = fx.client("them")
+        com.oshi.desktop.lora.FakeMeshtasticNode().use { myNode ->
+            com.oshi.desktop.lora.FakeMeshtasticNode().use { theirNode ->
+                val theyRead = java.util.concurrent.CountDownLatch(1)
+                them.onLoRa = { if (it.contains("decrypted")) theyRead.countDown() }
+
+                fx.repl(me, "/lora attach ${myNode.host} ${myNode.port}")
+                fx.repl(them, "/lora attach ${theirNode.host} ${theirNode.port}")
+                assertTrue(myNode.handshake.await(10, java.util.concurrent.TimeUnit.SECONDS))
+                assertTrue(theirNode.handshake.await(10, java.util.concurrent.TimeUnit.SECONDS))
+
+                assertTrue(
+                    "the sender refused to put the envelope on the air",
+                    me.loraSendOshiMessage(them.address, "no internet out here"),
+                )
+
+                // Pull the OM frames back out of what the sender WROTE. A ToRadio carries a
+                // MeshPacket in field 1; its `decoded` Data is field 4; the payload is
+                // field 2 of that. Anything else in the stream (the want_config handshake)
+                // has no packet and is skipped.
+                val frames = myNode.received.mapNotNull { toRadio ->
+                    val pkt = com.oshi.desktop.lora.LoRaProto.field(toRadio, 1, wire = 2) ?: return@mapNotNull null
+                    val data = com.oshi.desktop.lora.LoRaProto.field(pkt.payload, 4, wire = 2) ?: return@mapNotNull null
+                    com.oshi.desktop.lora.LoRaProto.field(data.payload, 2, wire = 2)?.payload
+                }
+                assertTrue("the sender wrote no frames at all", frames.isNotEmpty())
+
+                frames.forEach { theirNode.push(fromRadioWith(oshiPacket(0x77u, it))) }
+
+                assertTrue(
+                    "the receiver never opened the envelope the sender put on the air",
+                    theyRead.await(10, java.util.concurrent.TimeUnit.SECONDS),
+                )
+                val convos = them.conversationsIncludingBlocked().map { it.conversationId }
+                assertTrue(
+                    "it must land in the sender's conversation: $convos",
+                    convos.any { it == com.oshi.desktop.crypto.LegacyRatchetEnvelope.canonicalKey(me.address) },
+                )
+                me.loraDetach()
+                them.loraDetach()
+            }
+        }
+    }
+
+    /**
+     * __DESKTOP_RADIO_LANE_2026_10_28__ The ordinary composer — `send`, the one the chat
+     * window calls — puts the message on the RADIO when the person asked for that.
+     *
+     * This is the difference between a radio that is a screen and a radio that is a
+     * transport, and it is the whole claim behind "OSHI works with no internet" being true
+     * of the app rather than of a feature inside it. Asserted on the stored row's
+     * `transport`, not on a log line, because the row is what the UI reads.
+     */
+    @Test
+    fun `with prefer-radio on, an ordinary send goes over the radio`() {
+        val me = fx.client("me")
+        val them = fx.client("them")
+        com.oshi.desktop.lora.FakeMeshtasticNode().use { node ->
+            me.setTransportPrefs(
+                com.oshi.desktop.store.TransportPreferences.Values(preferRadio = true)
+            )
+            fx.repl(me, "/lora attach ${node.host} ${node.port}")
+            assertTrue(node.handshake.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            val before = node.received.size
+
+            me.send(them.address, "no internet out here")
+
+            assertTrue("nothing reached the radio", node.received.size > before)
+            val row = me.messages.messages(them.address).lastOrNull { it.fromMe }
+            assertEquals("the row must record the lane it actually used", "lora", row?.transport)
+        }
+        me.loraDetach()
+    }
+
+    /**
+     * And the BAN, which is not a stronger version of the preference: with the internet
+     * forbidden and no radio attached, a message has nowhere to go and must WAIT. It must
+     * NOT quietly leave over the relay, which is the exact re-routing the switch exists to
+     * prevent — and nothing anywhere would report it if it did.
+     */
+    @Test
+    fun `with the internet banned and no radio, a message does not leave over the relay`() {
+        val me = fx.client("me")
+        val them = fx.client("them")
+        me.setTransportPrefs(
+            com.oshi.desktop.store.TransportPreferences.Values(neverOverInternet = true)
+        )
+        val outcome = me.send(them.address, "this must wait")
+        assertNotEquals("a banned relay carried the message anyway", OshiClient.SendOutcome.SENT, outcome)
+        val row = me.messages.messages(them.address).lastOrNull { it.fromMe }
+        assertNotEquals("and it must not be recorded as having gone over the relay", "relay-v2", row?.transport)
+    }
+
+    /**
+     * Over the radio budget is REFUSED, never truncated. Twelve frames of 180 bytes is
+     * 2 160 bytes of ENVELOPE, and iOS's reason is physical rather than protocol: the TX
+     * queue is shallow and LongFast airtime is 1-2 s a frame, so a larger send overflows
+     * the queue and dies in reassembly. A truncated message would decrypt to nothing on
+     * the far side with no error anywhere.
+     */
+    @Test
+    fun `a message too large for the radio is refused rather than truncated`() {
+        val me = fx.client("me")
+        val them = fx.client("them")
+        com.oshi.desktop.lora.FakeMeshtasticNode().use { node ->
+            fx.repl(me, "/lora attach ${node.host} ${node.port}")
+            assertTrue(node.handshake.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            val before = node.received.size
+
+            val refused = java.util.concurrent.CountDownLatch(1)
+            me.onLoRa = { if (it.contains("refused, not truncated")) refused.countDown() }
+
+            assertFalse(
+                "an oversize message must not be sent",
+                me.loraSendOshiMessage(them.address, "x".repeat(4_000)),
+            )
+            assertTrue("the refusal was not reported", refused.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            assertEquals("not one frame may reach the air", before, node.received.size)
+            me.loraDetach()
+        }
+    }
+
+    /**
+     * __MESH_IS_NO_LONGER_OPAQUE_2026_10_28__ PARITY.md row 0.16's closing sentence: "the
+     * desktop mesh moves OPAQUE payloads and the CLI says so where someone would be tempted
+     * to type a real message into it."
+     *
+     * True while this client had no legacy ratchet. It now compiles the phones' own, and
+     * the LAN mesh carries the SAME `SecureMessage` JSON as the radio — Android builds it
+     * in `crossPlatformMeshSecureMessage`, iOS in `meshWireSafe()`. The payload was never
+     * opaque in its FORMAT; only in this client's ability to open it.
+     *
+     * Driven through `mesh.onMessage`, the real callback, with the real envelope a phone
+     * would put on the wire.
+     */
+    @Test
+    fun `an OSHI envelope over the LAN mesh is decrypted and filed under the sender`() {
+        val me = fx.client("me")
+        val them = fx.client("them")
+
+        val theirEnvelope = com.oshi.desktop.crypto.LegacyRatchetEnvelope(
+            ourPrivateKey = them.identity.identity.priv,
+            ourPublicKeyBase64 = them.address,
+        )
+        val sealed = theirEnvelope.seal("over the LAN, no internet", me.address)
+
+        val wire = com.oshi.desktop.lora.LoRaSecureMessage(
+            id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            senderAddress = them.address,
+            recipientAddress = me.address,
+            encryptedContent = com.oshi.desktop.lora.LoRaEncryptedContent(
+                sealed.getString("ciphertext"), "", them.address, LORA_T0,
+            ),
+            unixMillis = LORA_T0,
+            isRead = false,
+            deliveryStatus = com.oshi.desktop.lora.LoRaSecureMessage.STATUS_DELIVERED,
+            senderPublicKey = them.address,
+            recipientPublicKey = me.address,
+        ).toJsonString()
+
+        me.mesh.onMessage?.invoke(
+            com.oshi.desktop.mesh.MeshMessage(
+                id = "mesh-1",
+                type = "TEXT_MESSAGE",
+                senderPublicKey = them.address,
+                senderName = "them",
+                recipientPublicKey = me.address,
+                payload = wire,
+                timestamp = LORA_T0.toDouble(),
+                hopCount = 0,
+                maxHops = 3,
+                seenBy = listOf(them.address),
+                platform = "android",
+            )
+        )
+
+        val convos = me.conversationsIncludingBlocked().map { it.conversationId }
+        assertTrue(
+            "a LAN-mesh envelope must land in the sender's conversation: $convos",
+            convos.any { it == com.oshi.desktop.crypto.LegacyRatchetEnvelope.canonicalKey(them.address) },
+        )
+        val row = me.messages.messages(
+            com.oshi.desktop.crypto.LegacyRatchetEnvelope.canonicalKey(them.address)
+        ).lastOrNull()
+        assertEquals("over the LAN, no internet", row?.content)
+        assertEquals("the row must record the lane it arrived on", "mesh", row?.transport)
+    }
+
+    /**
+     * A mesh payload that is NOT an envelope — a control frame, an identity exchange, a
+     * reaction — must fall through exactly as before. Opening envelopes must not cost the
+     * traffic log its other entries.
+     */
+    @Test
+    fun `a non-envelope mesh payload is left alone`() {
+        val me = fx.client("me")
+        val before = me.conversationsIncludingBlocked().size
+        me.mesh.onMessage?.invoke(
+            com.oshi.desktop.mesh.MeshMessage(
+                id = "mesh-2",
+                type = "IDENTITY_EXCHANGE",
+                senderPublicKey = "them",
+                senderName = "them",
+                recipientPublicKey = me.address,
+                payload = """{"hello":"not an envelope"}""",
+                timestamp = LORA_T0.toDouble(),
+                hopCount = 0,
+                maxHops = 3,
+                seenBy = emptyList(),
+                platform = "android",
+            )
+        )
+        assertEquals("a control frame must not become a conversation", before, me.conversationsIncludingBlocked().size)
+    }
+
+    /**
+     * The safety half, which has not changed: an envelope that does NOT decrypt is not
+     * stored. A row here would be indistinguishable from one the ratchet vouched for — and
+     * now that the client CAN open envelopes, that distinction is the whole point.
+     */
+    @Test
+    fun `an OSHI envelope that does not decrypt is never stored`() {
         val me = fx.client("me")
         com.oshi.desktop.lora.FakeMeshtasticNode().use { node ->
             val reported = java.util.concurrent.CountDownLatch(1)
-            me.onLoRa = { if (it.contains("UNREADABLE")) reported.countDown() }
+            me.onLoRa = { if (it.contains("did not decrypt")) reported.countDown() }
 
             fx.repl(me, "/lora attach ${node.host} ${node.port}")
             assertTrue(node.handshake.await(10, java.util.concurrent.TimeUnit.SECONDS))
             val before = me.conversationsIncludingBlocked().size
 
-            // A complete "OM" envelope addressed to this client, built the way
-            // LoRaInboundTest builds one, and chunked into real frames.
             val env = com.oshi.desktop.lora.LoRaSecureMessage(
                 id = "11111111-2222-3333-4444-555555555555",
                 senderAddress = "them",
                 recipientAddress = me.address,
+                // Not ciphertext of anything: "cipher", base64'd.
                 encryptedContent = com.oshi.desktop.lora.LoRaEncryptedContent("Y2lwaGVy", "", "them", LORA_T0),
                 unixMillis = LORA_T0,
                 isRead = false,
@@ -630,11 +935,13 @@ class ClientWiringTest {
             com.oshi.desktop.lora.LoRaFrame.frames(0xCAFEBABEu, env.toWireJson())!!
                 .forEach { node.push(fromRadioWith(oshiPacket(0x99u, it))) }
 
-            assertTrue("an unreadable envelope was not reported", reported.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            assertTrue("a failed decrypt was not reported", reported.await(10, java.util.concurrent.TimeUnit.SECONDS))
             assertEquals(
-                "an envelope this client cannot open was stored as if it were a message",
+                "an envelope this client could not open was stored as if it were a message",
                 before, me.conversationsIncludingBlocked().size,
             )
+            // And nothing was proved, so nothing may be bound.
+            assertEquals(null, me.loraProvedBinding(0x99u))
             me.loraDetach()
         }
     }

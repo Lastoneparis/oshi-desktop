@@ -116,10 +116,19 @@ fun AccountPane(
                 Hairline()
                 FieldRow(t("portal.app.relay"), state.relayUrl, mono = true)
                 Hairline()
+                // __GATE_NOT_YET_IS_NOT_NO_2026_10_29__ The fourth surface that read this
+                // gate as a boolean. This is the pane someone opens TO FIND OUT about their
+                // account, so "CLOSED — sends are refused before they reach the network" is
+                // the worst place of the four to say it while the client is still asking.
+                // `connection.connecting` is the shared catalog's own word, so the honest
+                // third state is translated in 33 of 33 locales already.
                 FieldRow(
                     dt("desktop.account.gate.label"),
-                    if (state.gateOpen) dt("desktop.account.gate.open.value")
-                    else dt("desktop.account.gate.closed.value"),
+                    when (com.oshi.desktop.ui.state.gateDisplay(state.gateOpen, state.gateAnswered)) {
+                        com.oshi.desktop.ui.state.GateDisplay.OPEN -> dt("desktop.account.gate.open.value")
+                        com.oshi.desktop.ui.state.GateDisplay.ASKING -> t("connection.connecting")
+                        com.oshi.desktop.ui.state.GateDisplay.CLOSED -> dt("desktop.account.gate.closed.value")
+                    },
                 )
             }
 

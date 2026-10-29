@@ -38,6 +38,26 @@ class V2ConfigGate(
     @Volatile private var cachedAt = 0L
 
     /**
+     * __DESKTOP_SAY_WHICH_FAILURE_2026_10_29__ True when the last attempt never reached the
+     * server at all, as opposed to the server answering no.
+     *
+     * Exposed because the WINDOW was blaming the wrong party. A send that fails while the
+     * relay is unreachable came back as `GATE_CLOSED` — drawn as *"the V2 rollout gate is
+     * closed for this account"* — or as `NO_V2_PATH`, drawn as *"that peer has published no
+     * prekey bundle"*. Both tell the user something false about themselves or their contact
+     * when the truth is that a server did not answer, and both are unactionable: there is
+     * nothing to do about a rollout you are not in, and nothing to do about a contact who
+     * has in fact set OSHI up perfectly well.
+     *
+     * Measured 2026-10-29 against production, which is what made this visible: `/v2/config`
+     * answered in 9-25 s while `/` answered in 0 s, so the timeouts were constant and every
+     * one of them was reported to the user as somebody else's fault.
+     */
+    @Volatile
+    var serverUnreachable: Boolean = false
+        private set
+
+    /**
      * Why the gate last answered what it did — in words, for a human.
      *
      * A gate that fails closed and says nothing is undiagnosable from the outside: "V2 is
@@ -47,6 +67,20 @@ class V2ConfigGate(
      * place that knows which one happened.
      */
     @Volatile var lastDecision: String = "not checked yet"
+        private set
+
+    /**
+     * __GATE_NOT_YET_IS_NOT_NO_2026_10_29__ Has the gate ever had an ANSWER?
+     *
+     * [isEnabledCached] is false both before the first `/v2/config` reply and after one
+     * that said no, and the send path told the user the same sentence either way: "the V2
+     * rollout gate is closed for this account". On this relay `/v2/config` has been
+     * measured at 9-25 s, so "I have not heard back yet" is a state a user meets simply by
+     * starting the app and typing — and being told their ACCOUNT is gated sends them to
+     * the wrong place entirely. The comment on [lastDecision] already lists the four
+     * causes this conflates; this is the flag that separates the first of them.
+     */
+    @Volatile var everAnswered: Boolean = false
         private set
     @Volatile private var localOverride = System.getenv("OSHI_V2_FORCE")?.equals("1") == true
 
@@ -104,8 +138,25 @@ class V2ConfigGate(
         if (clock() - cachedAt < ttlMillis) return
         synchronized(this) {
             if (clock() - cachedAt < ttlMillis) return
-            cachedEnabled = fetch(userKey)
-            cachedAt = clock()
+            // __DESKTOP_GATE_DOES_NOT_CACHE_A_TIMEOUT_2026_10_29__ A SERVER DECISION IS
+            // CACHED; A FAILURE TO REACH THE SERVER IS NOT.
+            //
+            // `cachedAt` used to be stamped unconditionally, so one unreachable moment
+            // disabled the whole V2 lane for the full TTL — and `fetch` returns false for
+            // both cases, which made a slow network indistinguishable from "the server
+            // rolled you out to 0%". Measured against production on 2026-10-29:
+            // `GET /v2/config` answered in 9, 22, 25 and 25 s on four consecutive attempts
+            // while `GET /` answered in 0 s, so a 15 s timeout missed roughly half of them
+            // and a live bench reported "v2 gate closed" — a rollout decision — when the
+            // truth was a slow server.
+            //
+            // Caching a decision is right: the server said something and it will keep saying
+            // it. Caching a timeout is not: nothing was learned, and the only effect is to
+            // guarantee the next 60 s cannot learn anything either.
+            val answered = fetch(userKey)
+            cachedEnabled = answered.open
+            serverUnreachable = !answered.reachedServer
+            if (answered.reachedServer) cachedAt = clock()
         }
     }
 
@@ -114,13 +165,21 @@ class V2ConfigGate(
         return isEnabledCached()
     }
 
-    private fun fetch(userKey: String): Boolean = try {
+    /** Whether the gate is open, AND whether the server actually answered. See [refresh]. */
+    private data class Answer(val open: Boolean, val reachedServer: Boolean)
+
+    private fun fetch(userKey: String): Answer = try {
         val url = "$baseUrl/v2/config"
         val req = HttpRequest.newBuilder(URI.create(url))
-            .timeout(Duration.ofSeconds(15)).GET().build()
+            // 30 s, and this is NOT a fix for the server. Measured 2026-10-29: this endpoint
+            // answered in 9-25 s while `/` answered instantly, so 15 s cut off about half of
+            // its own successful responses. A timeout below the server's real response time
+            // turns a slow lane into a closed one. The latency itself is a server defect and
+            // is recorded as such; this only stops the client lying about it.
+            .timeout(Duration.ofSeconds(30)).GET().build()
         val resp = http.send(req, HttpResponse.BodyHandlers.ofString())
         if (resp.statusCode() !in 200..299) {
-            decide(false, "HTTP ${resp.statusCode()} from $url")
+            Answer(decide(false, "HTTP ${resp.statusCode()} from $url"), reachedServer = true)
         } else {
             val json = JSONObject(resp.body())
             if (System.getenv("OSHI_DEVICE_MAILBOX_FORCE") != "1") {
@@ -132,21 +191,24 @@ class V2ConfigGate(
             val minBuild = json.optInt("min_build", Int.MAX_VALUE)
             val rollout = json.optInt("rollout_percent", 0)
             val bucket = bucket(userKey)
-            when {
+            val open = when {
                 !enabled -> decide(false, "the server has v2_enabled=false")
                 buildNumber < minBuild -> decide(false, "this build ($buildNumber) is below the server's min_build ($minBuild)")
                 bucket >= rollout -> decide(false, "this identity is in bucket $bucket, outside the ${rollout}% rollout")
                 else -> decide(true, "bucket $bucket is inside the ${rollout}% rollout")
             }
+            Answer(open, reachedServer = true)
         }
     } catch (e: Exception) {
         // Never reached the server. Distinct from "the server said no", and the two want
         // different reactions from whoever is reading.
-        decide(false, "could not reach $baseUrl/v2/config: ${e.javaClass.simpleName}: ${e.message}")
+        // reachedServer = false: NOT cached. See the note in [refresh].
+        Answer(decide(false, "could not reach $baseUrl/v2/config: ${e.javaClass.simpleName}: ${e.message}"), reachedServer = false)
     }
 
     private fun decide(open: Boolean, why: String): Boolean {
         lastDecision = (if (open) "OPEN — " else "CLOSED — ") + why
+        everAnswered = true
         log("v2 gate: $lastDecision")
         return open
     }

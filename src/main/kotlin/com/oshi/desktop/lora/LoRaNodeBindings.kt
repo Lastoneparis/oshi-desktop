@@ -104,7 +104,24 @@ class LoRaNodeBindings {
         REJECTED,
     }
 
-    data class Binding(val publicKey: String, val learnedAtMillis: Long, val ambiguous: Boolean)
+    /**
+     * @param manual null means PROVED, not "not asserted".
+     *
+     * __DESKTOP_LORA_MANUAL_LINK_2026_10_28__ The default is what makes a binding persisted
+     * before manual links existed decode as proof, which is what it was. A `false` default
+     * would read identically and mean the opposite; a non-null `false` is reserved for a
+     * binding explicitly recorded as proved, and nothing writes one, so the two spellings
+     * are treated alike by [isManual].
+     */
+    data class Binding(
+        val publicKey: String,
+        val learnedAtMillis: Long,
+        val ambiguous: Boolean,
+        val manual: Boolean? = null,
+    ) {
+        /** A person said so. Everything else is the ratchet having said so. */
+        val isManual: Boolean get() = manual == true
+    }
 
     private val bindings = LinkedHashMap<String, Binding>()
 
@@ -164,9 +181,27 @@ class LoRaNodeBindings {
      *
      * Null for an ambiguous binding as well as for an absent one — that is the point of the
      * ambiguous flag, and collapsing the two would route a contested node.
+     *
+     * __DESKTOP_LORA_MANUAL_LINK_2026_10_28__ Also null for a MANUAL link, which is the
+     * word PROVED being meant. Returning an asserted key here would have been wrong in two
+     * places at once: [conversationKey] would route it a second time under the adopt
+     * switch, which is the switch's whole subject; and [LoRaInbound]'s `boundKey` is the
+     * diagnostic for "an OSHI peer just sent me RAW text, so the envelope lane failed",
+     * which would then fire for every manually linked radio that has never run OSHI at all.
+     * Use [manualKey] for what a person asserted.
      */
     fun boundKey(node: UInt): String? =
-        bindings[nodeKey(node)]?.takeIf { !it.ambiguous }?.publicKey
+        bindings[nodeKey(node)]?.takeIf { !it.ambiguous && !it.isManual }?.publicKey
+
+    /**
+     * The raw record, ambiguity and provenance included — for diagnostics, the UI and tests.
+     *
+     * Everything else here answers a routing question and deliberately collapses cases
+     * (`boundKey` returns null for both "unknown" and "contested"). A UI row has to tell
+     * those apart, and so does a test asserting that a restored binding is PROOF rather
+     * than an assertion.
+     */
+    fun binding(node: UInt): Binding? = bindings[nodeKey(node)]
 
     /** True when this node is bound but contested. Distinct from "unknown", for the UI. */
     fun isAmbiguous(node: UInt): Boolean = bindings[nodeKey(node)]?.ambiguous == true
@@ -180,6 +215,88 @@ class LoRaNodeBindings {
     }
 
     /**
+     * __DESKTOP_LORA_MANUAL_LINK_2026_10_28__ The USER says this radio is this contact.
+     * Not a proof, and never called from a packet path. Port of
+     * `OSHI/LoRaNodeIdentityMap.swift`'s `link(node:toIdentity:)`.
+     *
+     * This is the answer to "I have one person and two conversations": a radio that only
+     * ever sends stock Meshtastic text can never PROVE an OSHI identity, because proof
+     * means an OSHI envelope that decrypted and there is no envelope on that lane. Without
+     * this, such a thread stays separate for ever — correct for a stranger's radio, useless
+     * for your own.
+     *
+     * **What the person is taking on, and the UI must say it:** a raw text packet's `from`
+     * field is an unsigned integer on a channel whose key is public. The firmware does
+     * encrypt a unicast to a node whose public key it holds — observed on the air,
+     * `pkiEncrypted: true` — but no OSHI client can SEE that flag, so none of them can tell
+     * such a packet from one sent with the public channel key. Linking means text claiming
+     * this node number appears in that contact's conversation without the ratchet having
+     * vouched for it. A reasonable trade for your own radio, a bad one for someone else's,
+     * which is why it is per-node, explicit and reversible.
+     *
+     * Refuses the same two things [bind] refuses, for the same reasons: a key that is not an
+     * identity key, and a node whose evidence already contradicted itself. Overwrites a
+     * previous MANUAL link — a person may correct themselves — and never a PROVED one,
+     * because the ratchet outranks a recollection and replacing proof with assertion is how
+     * a conversation acquires the wrong name.
+     *
+     * **Deliberately does NOT apply [bind]'s rule 2** (two nodes, one identity). That rule
+     * resolves contradictory EVIDENCE, and two manual links to one contact are not a
+     * contradiction — they are a person who owns two radios.
+     */
+    fun link(node: UInt, publicKey: String, nowMillis: Long): LearnResult {
+        val trimmed = publicKey.trim()
+        if (!looksLikeIdentityKey(trimmed)) return LearnResult.REJECTED
+
+        val key = nodeKey(node)
+        val existing = bindings[key]
+        if (existing != null) {
+            if (existing.ambiguous) return LearnResult.IGNORED_AMBIGUOUS
+            if (!existing.isManual) {
+                // Proved already. To the same identity: nothing to do. To another: refuse.
+                return if (normalizeKey(existing.publicKey) == normalizeKey(trimmed)) {
+                    LearnResult.UNCHANGED
+                } else {
+                    LearnResult.CONFLICT
+                }
+            }
+            if (normalizeKey(existing.publicKey) == normalizeKey(trimmed)) return LearnResult.UNCHANGED
+        }
+        bindings[key] = Binding(trimmed, nowMillis, ambiguous = false, manual = true)
+        return LearnResult.BOUND
+    }
+
+    /**
+     * Undo a manual link — the thread goes back to `lora!<nodehex>`.
+     *
+     * Only ever removes a MANUAL binding. A proved one is evidence, and a button that
+     * quietly discarded evidence would make the map depend on who pressed what last; use
+     * [forget] for that, which is explicit about dropping everything.
+     *
+     * @return true when a manual link was removed.
+     */
+    fun unlink(node: UInt): Boolean {
+        val key = nodeKey(node)
+        val existing = bindings[key] ?: return false
+        if (!existing.isManual) return false
+        bindings.remove(key)
+        return true
+    }
+
+    /**
+     * The identity a PERSON attached to this node, or null.
+     *
+     * Ambiguity still wins: a node whose evidence contradicted itself routes nowhere, even
+     * if someone later vouched for it.
+     */
+    fun manualKey(node: UInt): String? =
+        bindings[nodeKey(node)]?.takeIf { it.isManual && !it.ambiguous && it.publicKey.isNotEmpty() }?.publicKey
+
+    /** Every manual link, for the UI and for `/lora links`. Node key → identity. */
+    fun manualLinks(): Map<String, String> =
+        bindings.filterValues { it.isManual && !it.ambiguous }.mapValues { it.value.publicKey }
+
+    /**
      * The conversation a RAW Meshtastic text from this node belongs in.
      *
      * Returns the bound identity only when [adoptRawTextIntoContactThread] is on — which it
@@ -191,6 +308,16 @@ class LoRaNodeBindings {
      * will be forgotten at one.
      */
     fun conversationKey(node: UInt): String {
+        // __DESKTOP_LORA_MANUAL_LINK_2026_10_28__ A link the PERSON made is honoured even
+        // while [adoptRawTextIntoContactThread] is off, and that is not a hole in the switch
+        // — it is the difference the switch is about. The flag governs whether the APP may
+        // infer an identity from a learned binding and file unauthenticated text under it. A
+        // manual link is not an inference: someone named this radio, for one node, by hand,
+        // after being told what it does.
+        //
+        // The inverse still holds absolutely: with no binding of either kind, the fallback
+        // thread is used, and nothing is ever guessed.
+        manualKey(node)?.let { return it }
         if (adoptRawTextIntoContactThread) {
             boundKey(node)?.let { return it }
         }

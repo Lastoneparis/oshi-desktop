@@ -168,6 +168,9 @@ object LoRaProto {
     const val PORT_TEXT = 1L
 
     /** `PortNum.ROUTING_APP` — what became of a `want_ack` packet (`:558`). */
+    /** `PortNum.POSITION_APP` — a node broadcasting where it is. */
+    const val PORT_POSITION = 3L
+
     const val PORT_ROUTING = 5L
 
     /** `PortNum.ADMIN_APP` — config writes. **This client never encodes one.** (`:575`) */
@@ -210,6 +213,48 @@ object LoRaProto {
 
         return ProtoWriter().bytes(1, pkt.data).data   // ToRadio.packet
     }
+
+    /**
+     * UTF-8 bytes of PLAIN text that fit one interop frame — iOS's `interopTextLimit`
+     * (`OSHI/MeshtasticManager.swift:230`), the same number for the same reason.
+     *
+     * Larger than the 180-byte OSHI chunk payload because portnum-1 text carries none of
+     * the 8-byte `"OM"` header, and still inside the ~237-byte frame budget with margin.
+     * Interop text is NEVER chunked: a stock Meshtastic client has no reassembler for
+     * OSHI's header, so a longer message would arrive as fragments nobody joins. Over the
+     * limit is refused with a count, never truncated.
+     */
+    const val INTEROP_TEXT_LIMIT = 200
+
+    /**
+     * __DESKTOP_LORA_BEACON_2026_10_28__ A `Position` payload for POSITION_APP — the
+     * SEND half of the position lane this client could only receive.
+     *
+     * Byte-for-byte the phones' encoder (`LoRaPacketParser.positionPayload` on Android,
+     * `MeshtasticManager.positionPayload` on iOS): `latitude_i`/`longitude_i` are
+     * **sfixed32 scaled by 1e-7**, little-endian and read SIGNED, and the time is a
+     * varint in field 4. `LoRaPositionWireTest` pins the bytes against the figures
+     * captured from a real radio rather than against this function's own arithmetic — a
+     * test that re-derives `round(lat * 1e7)` agrees with itself whatever the sender does.
+     *
+     * Getting the sign wrong does not corrupt the frame. It moves this node to the other
+     * side of the planet on somebody else's map, with nothing red anywhere.
+     */
+    fun positionPayload(latitude: Double, longitude: Double, timeSec: Long): ByteArray =
+        ProtoWriter()
+            .fixed32(1, Math.round(latitude * 1e7).toInt())
+            .fixed32(2, Math.round(longitude * 1e7).toInt())
+            .varint(4, timeSec)
+            .data
+
+    /**
+     * A `MeshPacket.id`.
+     *
+     * Meshtastic uses it to deduplicate a packet that arrives by two routes, so it only has
+     * to be unlikely to collide; iOS generates it the same way (`enqueuePacket`). Zero is
+     * avoided because the firmware treats an absent id and a zero id alike.
+     */
+    fun randomPacketId(): UInt = (java.security.SecureRandom().nextInt().toUInt() or 1u)
 
     /** `ToRadio.want_config_id`, field 3 varint (`MeshtasticManager.swift:410-412`). */
     fun wantConfig(configId: UInt): ByteArray = ProtoWriter().varint(3, configId.toLong()).data

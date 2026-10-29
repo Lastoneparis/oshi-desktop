@@ -240,6 +240,64 @@ class ChatShellModelTest {
     }
 
     /**
+     * __HIDDEN_WINDOW_NOTIFY_2026_10_29__ The window hidden to the tray is a state no
+     * phone has, and "the conversation is selected, therefore the user has seen it" is
+     * false in it. The close button hides rather than quits, so this is the ordinary way
+     * to put OSHI away — and it used to mean the ONE chat the user was most likely waiting
+     * on was the one chat that could neither notify nor grow a badge.
+     */
+    @Test
+    fun `a message in the open conversation still notifies while the window is hidden`() {
+        val alice = fx.client("alice")
+        val bob = fx.client("bob")
+        val notifications = AtomicInteger()
+        var visible = true
+        // Seed one message so the conversation ROW exists; the badge assertions below read it.
+        fx.seedIncoming(alice, bob.address, "m0", "earlier")
+        val m = ChatShellModel(
+            alice, direct,
+            { _, _ -> notifications.incrementAndGet() },
+            windowVisible = { visible },
+        ).also { models += it; it.attach() }
+
+        m.refresh()
+        m.select(bob.address)
+
+        // On screen, the open conversation is genuinely seen: no toast, no badge.
+        m.onInbound(inbound(alice.address, bob.address, "v1", "while watching"))
+        assertEquals(0, notifications.get())
+        assertEquals(0, m.state.conversations.first { it.id == bob.address }.unread)
+
+        // Hidden to the tray with the same conversation still selected.
+        visible = false
+        m.onInbound(inbound(alice.address, bob.address, "h1", "while away"))
+        assertEquals("a hidden window must still be told", 1, notifications.get())
+        assertEquals(1, m.state.conversations.first { it.id == bob.address }.unread)
+
+        m.onInbound(inbound(alice.address, bob.address, "h2", "and again"))
+        assertEquals(2, notifications.get())
+        assertEquals(2, m.state.conversations.first { it.id == bob.address }.unread)
+
+        // Back on screen: what arrived while away has now been seen.
+        visible = true
+        m.onWindowShown()
+        assertEquals(0, m.state.conversations.first { it.id == bob.address }.unread)
+        assertEquals("showing the window is not a notification", 2, notifications.get())
+    }
+
+    /** Reopening the window must not eat a half-typed message — [ChatShellModel.select] would. */
+    @Test
+    fun `showing the window keeps the draft`() {
+        val alice = fx.client("alice")
+        val bob = fx.client("bob")
+        val m = model(alice)
+        m.select(bob.address)
+        m.draft("half a sentence")
+        m.onWindowShown()
+        assertEquals("half a sentence", m.state.draft)
+    }
+
+    /**
      * PARITY.md row 0.21: a blocked peer is WITHHELD from the conversation list, never
      * deleted. `OshiClient` exposes both readers and only one of them applies the block;
      * `conversationsIncludingBlocked` exists for `/blocked`, which announces what it is
@@ -369,11 +427,418 @@ class ChatShellModelTest {
                 it.why.contains("PARITY.md") || it.why.contains("VIEWS.md"),
             )
         }
-        // The one the task brief singles out: a UI implying a working call is the worst
-        // thing this slice could ship, so calls must be in MISSING and never in the
-        // "not yet wired" bucket, which reads as a schedule.
-        assertTrue(DesktopLimits.MISSING.any { it.what.contains("calls", ignoreCase = true) })
+        // __DESKTOP_CALLS_ARE_NOT_MISSING_2026_10_29__ This used to read:
+        //
+        //     assertTrue(MISSING.any { it.what.contains("calls") })
+        //     assertFalse(NOT_IN_THIS_WINDOW.any { it.what.contains("call") })
+        //
+        // with the reason that "a UI implying a working call is the worst thing this slice
+        // could ship". That was right when the window had no call controls. The window now
+        // has all of them and row 2.1 is "voice + video both ways, desktop<->desktop
+        // measured live" — so the assertion had stopped protecting the user and started
+        // PINNING A FALSE CLAIM: the limits list could not be corrected while this test
+        // demanded the stale entry, which is the one way a stale doc outlives everything
+        // else in this repository. A test is a claim too, and it goes stale the same way.
+        //
+        // The intent is kept and re-aimed at what is actually still unproven. Calls must
+        // still be named in MISSING — not because the feature is absent, but because two
+        // things about it are unverified (no phone has ever been called, and no test has
+        // opened a real microphone or speaker), and a window that implied either would be
+        // making the same promise the original assertion existed to prevent.
+        val callLimit = DesktopLimits.MISSING.singleOrNull { it.what.contains("call", ignoreCase = true) }
+        assertNotNull("calls must stay named in MISSING while a phone has never been called", callLimit)
+        assertTrue(
+            "the call limit must name what is unproven, not deny the feature: ${callLimit!!.what}",
+            callLimit.why.contains("PHONE", ignoreCase = true) ||
+                callLimit.why.contains("microphone", ignoreCase = true),
+        )
+        // And it must NOT deny the controls, which this window draws.
+        assertFalse(
+            "the call limit claims this window renders no call controls; it renders all of them",
+            callLimit.why.contains("does not yet render call controls"),
+        )
         assertFalse(DesktopLimits.NOT_IN_THIS_WINDOW.any { it.what.contains("call", ignoreCase = true) })
+    }
+
+    /**
+     * __DESKTOP_RADIO_LIMIT_IS_THE_CABLE_2026_10_29__ A declared limit must not contradict a
+     * capability this client demonstrably has.
+     *
+     * `every declared limit names a reason and a ledger row` passed for months beside an
+     * entry that told the user, in the window, that nothing a LoRa radio or the LAN mesh
+     * carries can be read — on a build that reads both. It passed because it only ever
+     * checked SHAPE: a reason longer than 40 characters, citing a ledger file. A false claim
+     * satisfies all of that.
+     *
+     * This checks the claim against the behaviour instead. The capability half is measured
+     * here and not assumed: an inbound radio row is filed and classified as
+     * `ConversationKind.LORA`, which is only reachable through the `lora!` conversation key
+     * the client writes. If that holds, no limit may say radio traffic is unreadable.
+     *
+     * Deliberately narrow. It does not try to parse English — it pins the ONE sentence that
+     * was wrong, in the one place it was drawn, so that re-introducing it fails here instead
+     * of in front of a user.
+     */
+    @Test
+    fun `no declared limit may deny reading what the radio lane demonstrably stores`() {
+        val me = fx.client("me")
+        // The capability, measured: a row under a `lora!` key is a LORA conversation.
+        val radioKey = com.oshi.desktop.lora.LoRaNodeBindings.fallbackConversationKey(0x4b88a86du)
+        fx.seedIncoming(me, radioKey, "r1", "INBOUND-TEST-4412")
+        val m = model(me)
+        val row = m.state.conversations.single { it.id == radioKey }
+        assertEquals(
+            "a lora! conversation must classify as LORA, or this guard is measuring nothing",
+            ConversationKind.LORA, row.kind,
+        )
+        m.select(radioKey)
+        assertEquals("INBOUND-TEST-4412", m.state.thread!!.messages.single().body)
+
+        // Therefore no limit may deny it. Both buckets: moving the sentence from MISSING to
+        // NOT_IN_THIS_WINDOW would have been just as untrue.
+        val all = DesktopLimits.MISSING + DesktopLimits.NOT_IN_THIS_WINDOW
+        all.forEach { limit ->
+            val claim = (limit.what + " " + limit.why).lowercase()
+            val deniesReading = limit.what.lowercase().let {
+                it.contains("reading") && (it.contains("lora") || it.contains("mesh") || it.contains("radio"))
+            }
+            assertFalse(
+                "a declared limit denies reading radio/mesh traffic that this client stores " +
+                    "and shows as a ${ConversationKind.LORA} thread: '${limit.what}'",
+                deniesReading,
+            )
+            // __LORA_IS_NOT_REPL_ONLY_2026_10_29__ The check above reads the TITLE and only
+            // rejects the word "reading", so an entry titled "LoRa attach, account deletion
+            // and sync checkpointing" whose body ended "The others are REPL-only: /sync
+            // checkpoint, /lora, /deleteaccount." passed it for days while telling the user
+            // something stronger than what it rejected. A guard that inspects the shape of a
+            // sentence does not constrain what the sentence SAYS.
+            //
+            // More → Radio attaches, detaches, broadcasts, links a node to a contact, sets a
+            // fixed position, beacons it, names the radio, and writes the region and channel.
+            // So no limit may send the user to the console FOR THE RADIO, in either bucket
+            // and under any wording.
+            assertFalse(
+                "'${limit.what}' sends the user to the REPL for the radio, which has had its " +
+                    "own pane under More since 2026-10-28 (attach, send, link, beacon, owner) " +
+                    "and its region and channel since 2026-10-29",
+                Regex("(repl|console|slash command)[^.]*/lora|/lora[^.]*(repl|console|only)")
+                    .containsMatchIn(claim),
+            )
+            // __DESKTOP_DELETE_ACCOUNT_UI_2026_10_29__ Same rule, same reason: deleting the
+            // account has its own screen under More, so no limit may send the user to the
+            // console for it either. Written the moment the screen landed rather than after
+            // a twelfth stale line is found — the gap this list exists to describe closed,
+            // and a list that keeps describing it would be wrong in the other direction.
+            assertFalse(
+                "'${limit.what}' sends the user to the REPL to delete the account, which has " +
+                    "had its own screen under More since 2026-10-29",
+                Regex("(repl|console|slash command)[^.]*/deleteaccount|/deleteaccount[^.]*(repl|console|only)")
+                    .containsMatchIn(claim),
+            )
+            assertFalse(
+                "'${limit.what}' claims the legacy ratchet is not implemented; " +
+                    "LegacyRatchetEnvelope is compiled and live (PARITY row 0.16, UNBLOCKED)",
+                claim.contains("legacy ratchet, which this client does " + "not implement") ||
+                    claim.contains("never stored as conversations"),
+            )
+        }
+    }
+
+    /**
+     * __DESKTOP_POLLS_2026_10_29__ A poll arriving from a peer becomes a CARD, not a body.
+     *
+     * Both halves are asserted because they fail independently: the card can be built while
+     * the raw payload still prints underneath it (the model's `body` would fall through its
+     * `when` to `content`, which is exactly how a poll used to render as JSON), and the body
+     * can be blanked while nothing draws, leaving an empty bubble.
+     */
+    @Test
+    fun `an inbound poll becomes a card and never prints its payload`() {
+        val me = fx.client("me")
+        val peer = fx.client("peer")
+        val poll = com.oshi.desktop.msg.PollPayload.Poll(
+            id = "P-ui", question = "Pizza or sushi?", options = listOf("Pizza", "Sushi"),
+            allowsMultipleAnswers = false, isAnonymous = false,
+            createdAtUnix = 1_770_000_000.0, closesAtUnix = null, creatorPublicKey = peer.address,
+        )
+        fx.seedIncoming(me, peer.address, "p-row", poll.encode())
+        val m = model(me)
+        m.select(peer.address)
+
+        val row = m.state.thread!!.messages.single()
+        assertEquals("the payload must not print under the card", "", row.body)
+        val card = row.poll
+        assertNotNull("no card was built, so the bubble would be empty", card)
+        assertEquals("Pizza or sushi?", card!!.question)
+        assertEquals(listOf("Pizza", "Sushi"), card.options.map { it.label })
+        assertEquals(0, card.voterCount)
+        assertFalse(card.closed)
+        // And the conversation list says the question, not the JSON.
+        val listed = m.state.conversations.single { it.id == peer.address }
+        assertTrue("got: ${listed.preview}", listed.preview.contains("Pizza or sushi?"))
+        assertFalse(listed.preview.contains("opts"))
+    }
+
+    /**
+     * Voting is a TOGGLE in a single-answer poll: a new pick replaces the old one, and
+     * picking the current one again retracts it. Retraction is the half that is easy to drop,
+     * and it must leave zero voters rather than a phantom one.
+     */
+    @Test
+    fun `voting picks, moves and retracts`() {
+        val me = fx.client("me")
+        val peer = fx.client("peer")
+        val poll = com.oshi.desktop.msg.PollPayload.Poll(
+            id = "P-vote", question = "Q", options = listOf("x", "y"),
+            allowsMultipleAnswers = false, isAnonymous = false,
+            createdAtUnix = 1.0, closesAtUnix = null, creatorPublicKey = peer.address,
+        )
+        fx.seedIncoming(me, peer.address, "p-row", poll.encode())
+        val m = model(me)
+        m.select(peer.address)
+
+        m.votePoll("p-row", 0)
+        var card = m.state.thread!!.messages.single().poll!!
+        assertTrue("our pick is not marked", card.options[0].mine)
+        assertEquals(1, card.voterCount)
+        assertEquals(100, card.options[0].percent)
+
+        m.votePoll("p-row", 1)
+        card = m.state.thread!!.messages.single().poll!!
+        assertFalse(card.options[0].mine)
+        assertTrue(card.options[1].mine)
+        assertEquals("one voter who moved, never two", 1, card.voterCount)
+
+        m.votePoll("p-row", 1)
+        card = m.state.thread!!.messages.single().poll!!
+        assertFalse("picking our own choice again must retract it", card.options[1].mine)
+        assertEquals(0, card.voterCount)
+    }
+
+    /** A closed poll shows its numbers and refuses a ballot, with a reason. */
+    @Test
+    fun `a closed poll refuses a vote and says so`() {
+        val me = fx.client("me")
+        val peer = fx.client("peer")
+        val poll = com.oshi.desktop.msg.PollPayload.Poll(
+            id = "P-closed", question = "Q", options = listOf("x", "y"),
+            allowsMultipleAnswers = false, isAnonymous = false,
+            createdAtUnix = 1.0, closesAtUnix = 2.0, creatorPublicKey = peer.address,
+        )
+        fx.seedIncoming(me, peer.address, "p-row", poll.encode())
+        val m = model(me)
+        m.select(peer.address)
+        assertTrue(m.state.thread!!.messages.single().poll!!.closed)
+
+        m.votePoll("p-row", 0)
+        assertEquals(Severity.ERROR, m.state.notice!!.severity)
+        assertEquals(0, m.state.thread!!.messages.single().poll!!.voterCount)
+        assertTrue(me.pollBallots.ballotsFor("P-closed").isEmpty())
+    }
+
+    /** A multiple-answer poll accumulates picks instead of replacing them. */
+    @Test
+    fun `a multiple answer poll adds picks and counts one voter`() {
+        val me = fx.client("me")
+        val peer = fx.client("peer")
+        val poll = com.oshi.desktop.msg.PollPayload.Poll(
+            id = "P-multi", question = "Q", options = listOf("x", "y", "z"),
+            allowsMultipleAnswers = true, isAnonymous = false,
+            createdAtUnix = 1.0, closesAtUnix = null, creatorPublicKey = peer.address,
+        )
+        fx.seedIncoming(me, peer.address, "p-row", poll.encode())
+        val m = model(me)
+        m.select(peer.address)
+        m.votePoll("p-row", 0)
+        m.votePoll("p-row", 2)
+        val card = m.state.thread!!.messages.single().poll!!
+        assertTrue(card.options[0].mine)
+        assertTrue(card.options[2].mine)
+        assertEquals("one person with two picks", 1, card.voterCount)
+        assertTrue("picks mark the label, not the person", card.allowsMultipleAnswers)
+    }
+
+    /**
+     * __DESKTOP_POLL_COMPOSER_2026_10_29__ Creating a poll from the window, and the refusal
+     * being told apart from a network failure.
+     *
+     * The second half is the point: `sendPoll` returns null for an unsendable poll and a
+     * `SendOutcome` for everything else, so a composer that treated null as "failed" would
+     * tell someone the network was down when their poll had one option.
+     */
+    @Test
+    fun `creating a poll sends it and an unsendable one says why`() {
+        val me = fx.client("me")
+        val peer = fx.client("peer")
+        val m = model(me)
+        m.select(peer.address)
+
+        m.createPoll("Pizza or sushi?", listOf("Pizza", "Sushi", ""), multi = false, anon = false)
+        assertEquals(Severity.OK, m.state.notice!!.severity)
+        val row = m.state.thread!!.messages.single()
+        val card = row.poll
+        assertNotNull("our own poll must draw as a card", card)
+        assertEquals("Pizza or sushi?", card!!.question)
+        assertEquals("the trailing blank option must be dropped", listOf("Pizza", "Sushi"), card.options.map { it.label })
+        assertEquals("", row.body)
+
+        // It arrives at the peer as a poll, not as text.
+        assertEquals(1, peer.router.poll())
+        assertNotNull(com.oshi.desktop.msg.PollPayload.decodePoll(peer.messages.messages(me.address).last().content))
+
+        // A refusal is a refusal, and says so.
+        m.createPoll("Only one", listOf("a"), multi = false, anon = false)
+        assertEquals(Severity.ERROR, m.state.notice!!.severity)
+        assertTrue("got: ${m.state.notice!!.text}", m.state.notice!!.text.contains("2 and 12"))
+        assertFalse("a refused poll must not mention the network", m.state.notice!!.text.contains("network"))
+        assertEquals("nothing was stored for the refused poll", 1, m.state.thread!!.messages.size)
+    }
+
+    /** The anonymous flag survives the composer and reaches the card. */
+    @Test
+    fun `an anonymous multi poll keeps both flags through the wire`() {
+        val me = fx.client("me")
+        val peer = fx.client("peer")
+        val m = model(me)
+        m.select(peer.address)
+        m.createPoll("Q", listOf("x", "y"), multi = true, anon = true)
+        peer.router.poll()
+        val onPeer = com.oshi.desktop.msg.PollPayload.decodePoll(peer.messages.messages(me.address).last().content)!!
+        assertTrue(onPeer.allowsMultipleAnswers)
+        assertTrue(onPeer.isAnonymous)
+        val card = m.state.thread!!.messages.single().poll!!
+        assertTrue(card.isAnonymous)
+        assertTrue(card.allowsMultipleAnswers)
+    }
+
+    /**
+     * __DESKTOP_OFFLINE_ONLY_2026_10_29__ The switch, and the notice that explains the
+     * asymmetry rather than letting it read as a failure.
+     *
+     * Turning it ON cannot announce itself over the relay it just banned, so over a
+     * relay-only pair the send does not succeed — and the window must say that the
+     * restriction HELD and the contact was not told, not that something broke.
+     */
+    @Test
+    fun `the offline-only switch restricts at once and explains why the peer was not told`() {
+        val me = fx.client("me")
+        val peer = fx.client("peer")
+        val m = model(me)
+        m.select(peer.address)
+        assertFalse(m.state.thread!!.offlineOnly)
+        assertNull(m.state.thread!!.offlineOnlyConfirmed)
+
+        m.setOfflineOnly(true)
+        assertTrue("the restriction must hold whatever the send did", m.state.thread!!.offlineOnly)
+        assertEquals("nobody has confirmed", 0 to 1, m.state.thread!!.offlineOnlyConfirmed)
+        // Not an error: the restriction worked, which is the half that protects anything.
+        assertEquals(Severity.OK, m.state.notice!!.severity)
+        assertTrue("got: ${m.state.notice!!.text}", m.state.notice!!.text.contains("radio or a nearby device"))
+
+        // Lifting it travels, because the restriction is gone before the request is sent.
+        m.setOfflineOnly(false)
+        assertFalse(m.state.thread!!.offlineOnly)
+        assertNull(m.state.thread!!.offlineOnlyConfirmed)
+        assertEquals(Severity.OK, m.state.notice!!.severity)
+    }
+
+    /** An inbound request restricts the thread and shows as a readable row, never a payload. */
+    @Test
+    fun `a peer's request shows in the thread and flips the switch`() {
+        val me = fx.client("me")
+        val peer = fx.client("peer")
+        val m = model(me)
+        m.select(peer.address)
+        fx.inbound(
+            me, peer.address,
+            com.oshi.desktop.msg.OfflineOnlyPayload.Request(
+                on = true, atUnix = System.currentTimeMillis() / 1000.0,
+            ).encode(),
+        )
+        assertTrue(m.state.thread!!.offlineOnly)
+        val row = m.state.thread!!.messages.single()
+        assertTrue("got: ${row.body}", row.body.contains("offline only"))
+        assertFalse("the payload must never print", row.body.contains("\"on\""))
+    }
+
+    /**
+     * __DESKTOP_MEDIA_GALLERY_2026_10_29__ The gallery lists the conversation's attachments,
+     * newest first, and is built from the same rows the thread draws.
+     */
+    @Test
+    fun `the gallery lists attachments newest first`() {
+        val me = fx.client("me")
+        val peer = fx.client("peer")
+        val dir = java.nio.file.Files.createTempDirectory("oshi-gal").toFile()
+        try {
+            repeat(3) { i ->
+                val f = java.io.File(dir, "pic$i.jpg").apply { writeBytes(ByteArray(256) { it.toByte() }) }
+                assertEquals(
+                    com.oshi.desktop.app.OshiClient.SendOutcome.SENT,
+                    peer.sendFile(me.address, f, com.oshi.desktop.store.MediaType.IMAGE),
+                )
+                assertEquals(1, me.router.poll())
+            }
+            val m = model(me)
+            m.select(peer.address)
+            val gallery = m.state.thread!!.media
+            assertEquals(3, gallery.size)
+            assertEquals("newest first", listOf("pic2.jpg", "pic1.jpg", "pic0.jpg"), gallery.map { it.fileName })
+            gallery.forEach {
+                assertEquals(com.oshi.desktop.store.MediaType.IMAGE, it.kind)
+                assertTrue(it.path.isNotEmpty())
+                assertFalse(it.fromMe)
+            }
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    /** A text-only conversation offers no gallery, so no control is drawn for an empty grid. */
+    @Test
+    fun `a conversation with no attachments has an empty gallery`() {
+        val me = fx.client("me")
+        val peer = fx.client("peer")
+        fx.seedIncoming(me, peer.address, "t1", "just talking")
+        val m = model(me)
+        m.select(peer.address)
+        assertTrue(m.state.thread!!.media.isEmpty())
+    }
+
+    /**
+     * A VIEW-ONCE ATTACHMENT IS NEVER IN THE GALLERY. "View once" means once, and a grid
+     * that lists it afterwards is a second look by another route — the gallery must not be
+     * the back door to what the bubble spent effort sealing.
+     */
+    @Test
+    fun `a view-once attachment never appears in the gallery`() {
+        val me = fx.client("me")
+        val peer = fx.client("peer")
+        // `sendFile` has no viewOnce parameter — the SENDER sets the flag on the file key —
+        // so the key is built here, with a real uploaded blob, exactly as a phone would.
+        val bytes = ByteArray(128) { it.toByte() }
+        val enc = com.oshi.messenger.network.v2.OSHICryptoV2.encryptFile(bytes, "secret.jpg", "image/jpeg")
+        val blobId = peer.blobs.uploadBlob(me.address, enc.chunks)
+        assertNotNull("the fixture relay refused the blob", blobId)
+        val key = com.oshi.messenger.network.v2.V2FileKeyMessage(
+            blobId = blobId!!,
+            fileKey = enc.fileKey,
+            fileNonce = enc.fileNonce,
+            chunkCount = enc.chunks.size,
+            manifest = enc.manifest,
+            filename = "secret.jpg",
+            mime = "image/jpeg",
+            mediaType = "image",
+            isViewOnce = true,
+        )
+        fx.inbound(me, peer.address, String(key.toBytes(), Charsets.UTF_8))
+
+        val m = model(me)
+        m.select(peer.address)
+        assertTrue("a view-once photo was browsable in the gallery", m.state.thread!!.media.isEmpty())
+        // ...while the thread still has the row.
+        assertEquals(1, m.state.thread!!.messages.size)
     }
 
     // ------------------------------------------------------------------ helpers
@@ -659,6 +1124,65 @@ class ChatShellModelTest {
 
         assertTrue(m.state.thread!!.messages.single().reactions.contains("👍"))
         assertEquals(Severity.OK, m.state.notice!!.severity)
+    }
+
+    /**
+     * __DESKTOP_DIRECT_PIN_2026_10_29__ Pin in a 1:1 — where the gap actually lived.
+     *
+     * `pinMessage` opened with `groupSelected() ?: return`, so this press was a no-op in a
+     * direct thread. The pane was NOT lying about it (it offered the item only in groups,
+     * correctly), which is why the window looked right and the feature was simply absent.
+     * The view state is asserted as well as the store: `pinned` was `groupPinned` and read
+     * a group definition, so even a stored pin had nowhere to show.
+     */
+    @Test
+    fun `pinning in a direct thread writes the pin and shows it in the thread state`() {
+        val me = fx.client("me")
+        val peer = fx.client("peer")
+        fx.seedIncoming(me, peer.address, "p1", "trailhead at 8")
+        val m = model(me)
+        m.select(peer.address)
+        assertTrue("the pane must offer Pin in a 1:1", m.state.thread!!.pinCanToggle)
+        assertNull(m.state.thread!!.pinned)
+
+        m.pinMessage("p1")
+
+        assertEquals("p1", me.pinnedMessages.get(peer.address))
+        val shown = m.state.thread!!.pinned
+        assertNotNull("the pinned bar had nothing to draw", shown)
+        assertEquals("p1", shown!!.messageId)
+        assertEquals("trailhead at 8", shown.text)
+        assertEquals(Severity.OK, m.state.notice!!.severity)
+
+        m.pinMessage(null)
+        assertNull(me.pinnedMessages.get(peer.address))
+        assertNull(m.state.thread!!.pinned)
+    }
+
+    /**
+     * The notice is its own assertion because reusing `runDirectMessageAction` would have
+     * produced "Message pined" — its wording is built by appending "ed" to the verb. A
+     * feature nobody can read the confirmation of is half-shipped.
+     */
+    @Test
+    fun `the pin notice is spelled correctly and names the right outcome`() {
+        val me = fx.client("me")
+        val peer = fx.client("peer")
+        fx.seedIncoming(me, peer.address, "p2", "bring the map")
+        val m = model(me)
+        m.select(peer.address)
+
+        m.pinMessage("p2")
+        assertTrue("got: ${m.state.notice?.text}", m.state.notice!!.text.contains("pinned"))
+        assertFalse(m.state.notice!!.text.contains("pined"))
+
+        m.pinMessage(null)
+        assertTrue("got: ${m.state.notice?.text}", m.state.notice!!.text.contains("unpinned"))
+
+        // A message this device does not hold is refused, not announced as a pin.
+        m.pinMessage("never-stored")
+        assertEquals(Severity.ERROR, m.state.notice!!.severity)
+        assertNull(me.pinnedMessages.get(peer.address))
     }
 
     @Test

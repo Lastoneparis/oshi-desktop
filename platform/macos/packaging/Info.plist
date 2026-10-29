@@ -4,10 +4,46 @@
   with ONE addition, NSCameraUsageDescription, and a readable microphone string. Without the
   camera key, macOS TCC refuses (or kills) the packaged app the first time a video call opens
   the camera. The DEPLOY_* tokens are substituted by jpackage exactly as in its built-in template.
+
+  THE ENGLISH STRINGS LIVE HERE AND NOWHERE ELSE. The other 33 languages are in
+  ../lproj/<lang>.lproj/InfoPlist.strings, installed into the bundle's Resources by the
+  `localiseMacBundle` step in build.gradle.kts, because jpackage's --resource-dir matches
+  overrides by exact FILENAME and ignores a directory like fr.lproj entirely (measured, not
+  assumed: a probe file placed there never reached the bundle). macOS falls back to the
+  values in this file when no .lproj matches, which is why there is deliberately no
+  en.lproj — two English sources would drift.
+
+  The camera string names THREE uses because the Mac app has three: video calls, video
+  notes, and scanning a contact's QR code. The last one arrived on 2026-10-28 and this
+  string did not mention it until the same day; a usage description that under-describes
+  what the camera is for is the kind of thing a privacy reviewer reads as a lie.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
  <dict>
+  <!-- __MAC_DEEP_LINK_2026_10_29__ macOS has to be TOLD which app answers `oshi://`.
+       The desktop has parsed these links since pairing landed — `ContactQr.parse` and
+       `GroupInvite.parse` read `oshi://add?key=…` and `oshi://group/join?gid=…` — but only
+       when a user PASTED one into the New pane. Clicking the same link in Mail or Safari
+       did nothing at all, because nothing in the bundle claimed the scheme. On the phones
+       tapping it opens the app and offers to add the contact, so this was the one half of
+       pairing the Mac could not do, and it is a line in a plist.
+       CFBundleURLName is the bundle id rather than a display string: macOS uses it to tell
+       competing claimants apart, and a human-readable name there is how two builds of the
+       same app end up fighting over the scheme. -->
+  <key>CFBundleURLTypes</key>
+  <array>
+   <dict>
+    <key>CFBundleURLName</key>
+    <string>DEPLOY_BUNDLE_IDENTIFIER</string>
+    <key>CFBundleTypeRole</key>
+    <string>Viewer</string>
+    <key>CFBundleURLSchemes</key>
+    <array>
+     <string>oshi</string>
+    </array>
+   </dict>
+  </array>
   <key>LSMinimumSystemVersion</key>
   <string>10.11</string>
   <key>CFBundleDevelopmentRegion</key>
@@ -42,6 +78,6 @@
   <key>NSMicrophoneUsageDescription</key>
   <string>OSHI uses the microphone for end-to-end encrypted voice and video calls.</string>
   <key>NSCameraUsageDescription</key>
-  <string>OSHI uses the camera for end-to-end encrypted video calls.</string>
+  <string>OSHI uses the camera for end-to-end encrypted video calls and video notes, and to scan a contact's QR code.</string>
  </dict>
 </plist>

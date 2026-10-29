@@ -45,6 +45,25 @@ object OpusWire {
     /** Longest hole the decoder fills with Opus PLC; longer outages are the jitter buffer's. */
     const val MAX_CONCEAL = 5
 
+    /**
+     * __OPUS_RESYNC_2026_10_29__ How far behind the high-water mark a packet may be and
+     * still be read as "already played" rather than "the mark is wrong".
+     *
+     * WHY: both marks here — the decoder's [OpusCallDecoder.last] and the caller's
+     * `opusRxLastKey` — only ever move FORWARD, and everything at or behind them is
+     * discarded. That is right for a duplicate or a packet a few slots late. It is wrong
+     * for a packet that OVERTOOK the stream: one frame delivered early (UDP reordering,
+     * the relay's WS mirror of an unproven endpoint, a burst drained from the /audio
+     * buffer) pushes the mark far ahead, and every packet that follows then reads as
+     * "late" until the stream grinds back up to it. Nothing recovered, nothing logged:
+     * the call simply goes silent in one direction while the counters stay perfect.
+     * Measured on the shipped code: one packet 800 slots early cost 834 of 1500 frames.
+     *
+     * 100 frames = 2 s, past the jitter buffer's reach — a packet that far behind could
+     * not be played anyway, so reading it as a resync costs nothing and buys recovery.
+     */
+    const val RESYNC_FRAMES = 100
+
     class Parsed(val seq: Int, val frames: List<ByteArray>)
 
     fun pack(seq: Int, frames: List<ByteArray>): ByteArray {
@@ -170,7 +189,10 @@ class OpusCallDecoder {
         fun keyed(frames: List<Frame>, outerSeq: Long, lastKey: Long): List<Pair<Long, ShortArray>> {
             val n = frames.size
             if (n == 0) return emptyList()
-            val free = if (lastKey < 0) n.toLong() else outerSeq - lastKey
+            // __OPUS_RESYNC_2026_10_29__ a key far BEHIND the mark means the mark was set
+            // by a packet that overtook the stream, not that this packet is late.
+            val behind = if (lastKey < 0) 0L else outerSeq - lastKey
+            val free = if (lastKey < 0 || behind < -OpusWire.RESYNC_FRAMES) n.toLong() else behind
             if (free <= 0) return emptyList()
             if (free >= n) return frames.mapIndexed { i, f -> (outerSeq - (n - 1 - i)) to f.pcm }
             val k = free.toInt()
@@ -189,7 +211,11 @@ class OpusCallDecoder {
     private var last = -1
     private val buf = ShortArray(5760)
 
-    fun reset() { last = -1 }
+    /** __OPUS_RESYNC_2026_10_29__ How often the stream had to be picked up again. */
+    var resyncs: Int = 0
+        private set
+
+    fun reset() { last = -1; resyncs = 0 }
 
     fun decode(payload: ByteArray): List<Frame> {
         val p = OpusWire.unpack(payload) ?: return emptyList()
@@ -201,7 +227,19 @@ class OpusCallDecoder {
             last = p.seq
             return out
         }
-        if (OpusWire.dist(p.seq, last) <= 0) return out                     // duplicate / late
+        val ahead = OpusWire.dist(p.seq, last)
+        if (ahead <= 0) {
+            // __OPUS_RESYNC_2026_10_29__ Far behind the mark is not a late packet — it is
+            // the live stream, and the mark belongs to one that overtook it. Start again
+            // from here (newest frame only, as on the first packet) instead of discarding
+            // the rest of the call.
+            if (ahead < -OpusWire.RESYNC_FRAMES) {
+                decodeInto(p.frames[n - 1], 0, out)
+                last = p.seq
+                resyncs++
+            }
+            return out                                                     // duplicate / late
+        }
         for (i in 0 until n) {
             val fs = (p.seq - (n - 1 - i)) and 0xFFFF
             val rel = OpusWire.dist(fs, last)

@@ -42,6 +42,8 @@ import com.oshi.desktop.i18n.dt
 import com.oshi.desktop.i18n.t
 import com.oshi.desktop.msg.CallSummary
 import com.oshi.desktop.ui.OshiTheme
+import com.oshi.desktop.call.media.CallVoiceEffects
+import com.oshi.desktop.ui.state.CallQuality
 import com.oshi.desktop.ui.state.CallScreenModel.Audio
 import com.oshi.desktop.ui.state.CallScreenModel.CallScreen
 import com.oshi.desktop.ui.state.CallScreenModel.Phase
@@ -74,6 +76,12 @@ fun CallOverlay(
     onMinimize: () -> Unit = {},
     /** A camera was picked in the devices menu: reopen it now. */
     onSwitchCamera: () -> Unit = {},
+    /**
+     * __CALL_VOICE_EFFECTS_2026_10_28__ The live voice effect was picked — iOS's
+     * `VoiceEffectPickerView`, desktop-shaped. Defaulted so every existing call site and
+     * every render test keeps compiling without claiming the feature.
+     */
+    onPickVoiceEffect: (CallVoiceEffects.Effect) -> Unit = {},
 ) {
     if (screen.video && screen.phase == Phase.CONNECTED) {
         VideoStage(screen, onHangUp, onToggleMute, onToggleCamera, onAnswerVideoRequest, nowMs, modifier, video, onMinimize, onSwitchCamera)
@@ -106,7 +114,7 @@ fun CallOverlay(
                 maxLines = 2,
             )
             Spacer(Modifier.height(OshiTheme.sm))
-            StatusLine(screen, nowMs)
+            StatusLine(screen, nowMs, onPickVoiceEffect)
             screen.problem?.takeIf { screen.phase == Phase.ENDED }?.let {
                 Spacer(Modifier.height(OshiTheme.sm))
                 Text(
@@ -169,7 +177,7 @@ private fun CallDevicesMenu(onSwitchCamera: () -> Unit) {
     var cameras by remember { mutableStateOf(emptyList<Pair<String, String>>()) }
     var tick by remember { mutableStateOf(0) }
     Box {
-        PillButton(dt("desktop.call.devices")) {
+        PillButton(t("peers.section.devices")) {
             // Enumerated on open, off the UI thread's hot path only in the sense that it
             // is on demand: device lists change when a headset is plugged in.
             mics = devices.microphones(); speakers = devices.speakers(); cameras = devices.cameras()
@@ -185,10 +193,10 @@ private fun CallDevicesMenu(onSwitchCamera: () -> Unit) {
                 }
                 MenuNote(dt("desktop.call.devices.next_call"))
                 if (cameras.isEmpty() && System.getProperty("os.name").orEmpty().lowercase().contains("mac")) {
-                    MenuHeader(dt("desktop.call.devices.camera"))
+                    MenuHeader(t("ai_attach_camera"))
                     MenuNote(dt("desktop.call.devices.camera_default_only"))
                 } else {
-                    DeviceSection(dt("desktop.call.devices.camera"), cameras, devices.camera) {
+                    DeviceSection(t("ai_attach_camera"), cameras, devices.camera) {
                         devices.camera = it; tick++; onSwitchCamera()
                     }
                 }
@@ -274,7 +282,11 @@ private fun MicBlockedHint(screen: CallScreen) {
 }
 
 @Composable
-private fun StatusLine(screen: CallScreen, nowMs: () -> Long) {
+private fun StatusLine(
+    screen: CallScreen,
+    nowMs: () -> Long,
+    onPickVoiceEffect: ((CallVoiceEffects.Effect) -> Unit)? = null,
+) {
     val text = when (screen.phase) {
         Phase.INCOMING -> if (screen.video) t("call.incoming.video") else t("call.incoming.voice")
         Phase.OUTGOING -> if (screen.ringingBack) t("call.state.ringing") else t("call.state.connecting")
@@ -311,7 +323,107 @@ private fun StatusLine(screen: CallScreen, nowMs: () -> Long) {
                 modifier = Modifier.semantics { contentDescription = "${t("accessibility.call.transport")}: ${c.label}" },
             )
         }
+        // __CALL_QUALITY_TIERS_2026_10_28__ iOS's quality badge: the tier and the round
+        // trip (PARITY row 2.1-d listed this as not ported). Beneath the transport badge,
+        // because the two answer different questions — what carries the call, and how well.
+        //
+        // Suppressed while RECONNECTING: the status line above is already showing
+        // `call.quality.reconnecting`, and a tier beside it would be a second, staler
+        // opinion of the same line. iOS keeps `.reconnecting` out of what the stats can
+        // produce for exactly this reason.
+        //
+        // Absent, not optimistic, until something has been measured — see
+        // `CallQualityStats.measured`.
+        screen.quality?.takeIf { !screen.reconnecting }?.let { q ->
+            val label = t(q.key)
+            val shown = screen.latencyMs?.let { "$label · $it ms" } ?: label
+            Spacer(Modifier.height(2.dp))
+            Text(
+                shown, fontSize = 11.sp, color = callQualityColor(q),
+                modifier = Modifier.semantics {
+                    contentDescription = "${t("accessibility.call.quality")}: $shown"
+                },
+            )
+        }
+        // AFTER the quality badge, not before it. Rendered first and the order read
+        // transport -> chips -> quality: a control wedged between two lines of connection
+        // status. Both badges describe the line; the picker acts on it.
+        onPickVoiceEffect?.let { VoiceEffectRow(screen, it) }
     }
+}
+
+/**
+ * __CALL_VOICE_EFFECTS_2026_10_28__ The live voice-effect picker — iOS's
+ * `VoiceEffectPickerView`, desktop-shaped and clickable with a mouse.
+ *
+ * Eight short chips rather than a dropdown, because the set is fixed, small, and the
+ * whole point is to try one and hear it: a menu that has to be opened, read and dismissed
+ * for each attempt is the wrong shape for that. The current one is filled in, so the state
+ * is visible without hovering.
+ *
+ * Shown only while CONNECTED. Before that there is no audio to colour, and offering the
+ * control over a ringing call invites exactly the "I set it and it reverted" confusion the
+ * lane's remembered choice exists to prevent.
+ *
+ * Names come from the catalog (`call.voice_effect.*`, and `common.off` for none) — all
+ * eight were already translated 34/34, extracted from iOS when row 1.5 was done.
+ */
+@Composable
+private fun VoiceEffectRow(screen: CallScreen, onPick: (CallVoiceEffects.Effect) -> Unit) {
+    if (screen.phase != Phase.CONNECTED) return
+    Spacer(Modifier.height(OshiTheme.xs))
+    // TWO ROWS OF FOUR, not one row of eight, and the journey there is the comment.
+    // One row wrapped "Anonymous" to "Anony/mous" and made that chip taller than the rest;
+    // `softWrap = false` turned the wrap into a TRUNCATION ("Anonyr…"), which looks
+    // deliberate and is worse; widening the row to 760.dp changed nothing, because the
+    // parent column is what constrains the width, not this Row. Two rows fit at any width
+    // this screen has and need no experimental FlowRow. Each defect was found by rendering
+    // the screen and looking at it — none of them is visible to a test of behaviour.
+    val chips = CallVoiceEffects.Effect.entries.toList()
+    for (row in chips.chunked(4)) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            for (e in row) {
+                val on = e == screen.voiceEffect
+                Text(
+                    t(e.key),
+                    fontSize = 10.sp,
+                    maxLines = 1,
+                    softWrap = false,
+                    color = if (on) Color.Black else Color.White.copy(alpha = 0.75f),
+                    modifier = Modifier
+                        .background(
+                            if (on) Color.White.copy(alpha = 0.85f) else Color.White.copy(alpha = 0.12f),
+                            androidx.compose.foundation.shape.RoundedCornerShape(8.dp),
+                        )
+                        .clickable { onPick(e) }
+                        .padding(horizontal = 7.dp, vertical = 3.dp)
+                        // `audio.voice_effect` ("Voice Effect" / "Effet vocal" / …) rather
+                        // than a new `accessibility.call.voice_effect`: the words are already
+                        // right and already translated 34/34 for the voice-message picker.
+                        .semantics { contentDescription = "${t("audio.voice_effect")}: ${t(e.key)}" },
+                )
+            }
+        }
+        Spacer(Modifier.height(3.dp))
+    }
+}
+
+/**
+ * __CALL_QUALITY_TIERS_2026_10_28__ iOS's own colours for the tier
+ * (`ConnectionQuality.color`): green, green, yellow, orange, red. Kept as one mapping so
+ * the badge cannot disagree with the tier it is naming.
+ */
+private fun callQualityColor(q: CallQuality): Color = when (q) {
+    CallQuality.EXCELLENT, CallQuality.GOOD -> Color(0xFF7BE38B)
+    CallQuality.FAIR -> Color(0xFFFFD166)
+    CallQuality.POOR -> Color(0xFFFFA14A)
+    CallQuality.VERY_POOR, CallQuality.DISCONNECTED -> Color(0xFFFF6B6B)
+    // Never reached from the badge — the status line owns this state — but a `when` that
+    // cannot be exhaustive by accident is one less way for a new tier to render invisibly.
+    CallQuality.RECONNECTING -> Color(0xFFFFD166)
 }
 
 @Composable

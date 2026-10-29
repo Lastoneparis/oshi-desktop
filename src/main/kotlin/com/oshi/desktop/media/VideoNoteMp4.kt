@@ -363,7 +363,26 @@ class VideoNoteReader(
     file: File,
     private val targetSide: Int = 240,
     private val maxDurationMs: Long = VideoNoteFormat.MAX_DURATION_MS + 1_000,
+    /** How a picture that is not square becomes one. See [Fit]. */
+    private val fit: Fit = Fit.SQUARE_CROP,
 ) : AutoCloseable {
+
+    /**
+     * What to do with a frame whose shape is not the output's.
+     *
+     * A ROUND video note is always drawn in a circle, so a 16:9 source is centre-cropped:
+     * squashing it would be worse than losing its edges, and that is [SQUARE_CROP], the
+     * behaviour this class had when it only ever served notes.
+     *
+     * An ORDINARY video attachment is a rectangle somebody filmed, and cropping it to a
+     * square would throw away a third of the picture for no reason at all. [CONTAIN] keeps
+     * every pixel and the source's aspect ratio, scaling the LONGEST edge down to
+     * [targetSide] — and never UP: a 320×240 clip is decoded at 320×240 and enlarged by the
+     * window if it wants to, because upscaling in the decoder spends time to produce a
+     * blurrier picture than the compositor would.
+     */
+    enum class Fit { SQUARE_CROP, CONTAIN }
+
     sealed class Item(val ptsMs: Long) {
         class Picture(ptsMs: Long, val image: VideoImage) : Item(ptsMs)
         class Sound(ptsMs: Long, val pcm16Mono: ByteArray) : Item(ptsMs)
@@ -465,21 +484,34 @@ class VideoNoteReader(
 
     private fun picture(f: AVFrame): VideoImage {
         // Centre-crop to a square before scaling: a note from a client that sent 16:9 is
-        // still drawn round without being squashed.
+        // still drawn round without being squashed. CONTAIN never crops.
         val w = f.width(); val h = f.height()
-        if (w != h) {
+        if (fit == Fit.SQUARE_CROP && w != h) {
             val d = kotlin.math.abs(w - h) / 2
             if (w > h) { f.crop_left(d.toLong()); f.crop_right((w - h - d).toLong()) }
             else { f.crop_top(d.toLong()); f.crop_bottom((h - w - d).toLong()) }
             avutil.av_frame_apply_cropping(f, avutil.AV_FRAME_CROP_UNALIGNED)
         }
-        val s = scaler?.takeIf { it.matches(f.width(), f.height(), f.format()) } ?: run {
+        val (tw, th) = outputSize(f.width(), f.height())
+        // The scaler is cached across frames, and its OUTPUT size is part of what it has to
+        // match: under CONTAIN the output is derived from the source, so a file whose frames
+        // change shape mid-stream would otherwise keep a scaler sized for the old one.
+        val s = scaler?.takeIf { it.matches(f.width(), f.height(), f.format()) && it.dstW == tw && it.dstH == th } ?: run {
             scaler?.close()
-            Scaler(f.width(), f.height(), f.format(), targetSide, targetSide, avutil.AV_PIX_FMT_BGRA).also { scaler = it }
+            Scaler(f.width(), f.height(), f.format(), tw, th, avutil.AV_PIX_FMT_BGRA).also { scaler = it }
         }
         s.scale(f)
         return s.toImage()
     }
+
+    /**
+     * The decoded size for a source frame, by [fit].
+     *
+     * Both edges are forced EVEN and at least 2: an odd dimension is legal for BGRA but a
+     * source in a chroma-subsampled format (every phone's output is YUV420P) has half-sized
+     * chroma planes, and odd sizes there are where swscale reads a row that does not exist.
+     */
+    internal fun outputSize(w: Int, h: Int): Pair<Int, Int> = outputSizeFor(w, h, targetSide, fit)
 
     /**
      * Decoded audio → s16 mono at [VideoNoteFormat.SAMPLE_RATE], in Kotlin. The formats an AAC
@@ -544,5 +576,24 @@ class VideoNoteReader(
     companion object {
         /** A note is ≤ 480 px; anything past 1920 is not a note, whatever it is. */
         const val MAX_SOURCE_SIDE = 1920
+
+        /**
+         * The decoded size for a source frame — pure arithmetic, so it can be checked
+         * without a file, a decoder or a display.
+         *
+         * Both edges are forced EVEN and at least 2. An odd dimension is legal for BGRA,
+         * but the SOURCE is chroma-subsampled (every phone writes YUV420P) and odd sizes
+         * there are where swscale reads a row that does not exist.
+         */
+        fun outputSizeFor(w: Int, h: Int, targetSide: Int, fit: Fit): Pair<Int, Int> {
+            if (fit == Fit.SQUARE_CROP) return targetSide to targetSide
+            val longest = maxOf(w, h)
+            // No upscaling: see [Fit.CONTAIN].
+            if (longest <= targetSide) return even(w) to even(h)
+            val scale = targetSide.toDouble() / longest
+            return even((w * scale).toInt()) to even((h * scale).toInt())
+        }
+
+        private fun even(v: Int): Int = maxOf(2, v - (v % 2))
     }
 }

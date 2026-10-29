@@ -236,6 +236,16 @@ class MediaSocket(
     /** The remote this socket is currently sending audio to, or null. */
     val selectedRemote: IceCandidate? get() = selectedKey?.let { key -> pairs.pair(key)?.candidate }
 
+    /**
+     * __CALL_QUALITY_TIERS_2026_10_28__ Round trip on the path actually carrying the call,
+     * for the quality badge. Null until a pong returns on the selected pair.
+     *
+     * The SELECTED pair, not the best-scoring one: the badge must describe what the
+     * listener is hearing, and a faster pair that lost the selection is not carrying
+     * anything.
+     */
+    val selectedRttMs: Int? get() = selectedKey?.let { pairs.rttMs(it) }
+
     /** Remote candidates known so far — signalled plus peer-reflexive. */
     fun remoteCandidates(): List<IceCandidate> = pairs.remoteCandidates()
 

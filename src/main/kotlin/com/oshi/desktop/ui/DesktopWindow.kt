@@ -25,6 +25,8 @@ import androidx.compose.ui.graphics.painter.BitmapPainter
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyShortcut
 import androidx.compose.ui.window.MenuBar
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
@@ -137,10 +139,15 @@ fun runDesktopUi(client: OshiClient, startHidden: Boolean = false) {
     val notificationPrefs = com.oshi.desktop.store.NotificationPreferences(
         java.io.File(com.oshi.desktop.store.DesktopPaths.dataDir, com.oshi.desktop.store.NotificationPreferences.FILE_NAME)
     )
+    // __HIDDEN_WINDOW_NOTIFY_2026_10_29__ The model is built here, outside composition, so
+    // it cannot read the window's `remember`ed visibility directly. This holder is the
+    // bridge: the composable writes it, `onInbound` reads it on the poll thread.
+    val windowShowing = java.util.concurrent.atomic.AtomicBoolean(!startHidden)
     val model = ChatShellModel(
         client,
         onIncomingNotification = notifier::notifyIncomingMessage,
         notificationPreviewEnabled = { notificationPrefs.load().preview },
+        windowVisible = windowShowing::get,
     )
     model.attach()
 
@@ -195,7 +202,7 @@ fun runDesktopUi(client: OshiClient, startHidden: Boolean = false) {
         // and the machine held awake for exactly as long as a call is connected.
         onMissedCall = { _, _ ->
             if (java.awt.KeyboardFocusManager.getCurrentKeyboardFocusManager().activeWindow == null) {
-                notifier.notifyMissedCall(dt("desktop.call.missed.notification"))
+                notifier.notifyMissedCall(t("call.missed"))
             }
         },
         onCallLive = { live -> if (live) sleepInhibitor.hold() else sleepInhibitor.release() },
@@ -229,7 +236,7 @@ fun runDesktopUi(client: OshiClient, startHidden: Boolean = false) {
                 mailState = it
             }
             keepsRunning = notifier.install(
-                openLabel = dt("desktop.background.open"),
+                openLabel = t("share.open_oshi"),
                 quitLabel = dt("desktop.background.quit"),
                 onOpen = { windowVisible = true },
                 onQuit = quit,
@@ -238,6 +245,28 @@ fun runDesktopUi(client: OshiClient, startHidden: Boolean = false) {
             // macOS: clicking the Dock icon of a hidden OSHI brings the window back.
             runCatching {
                 java.awt.Desktop.getDesktop().addAppEventListener(java.awt.desktop.AppReopenedListener { windowVisible = true })
+            }
+            // __MAC_DEEP_LINK_2026_10_29__ An `oshi://` link CLICKED in Mail or Safari.
+            //
+            // The parsing has been here since pairing landed — `ContactQr.parse` reads
+            // `oshi://add?key=…` and `GroupInvite.parse` reads `oshi://group/join?gid=…` —
+            // but only for a string the user PASTED into the New pane. Nothing claimed the
+            // scheme in the bundle and nothing listened for it at runtime, so clicking the
+            // same link did nothing at all while the phones open the app on it. The plist
+            // half is `CFBundleURLTypes` in `platform/macos/packaging/Info.plist`.
+            //
+            // It goes through `startConversation`, the SAME entry the paste uses, so a
+            // clicked link and a pasted one cannot drift apart: one parser, one set of
+            // refusals, one notice. The window is shown first — a link that silently added
+            // a contact to a hidden app would be the worse behaviour of the two.
+            runCatching {
+                java.awt.Desktop.getDesktop().setOpenURIHandler { event ->
+                    val uri = event.uri?.toString().orEmpty()
+                    if (uri.isNotBlank()) {
+                        windowVisible = true
+                        model.startConversation(uri)
+                    }
+                }
             }
             model.refresh()
             // Match iOS's ChatsTabView launch task: warm the sealed mailbox before the
@@ -280,6 +309,24 @@ fun runDesktopUi(client: OshiClient, startHidden: Boolean = false) {
             state = rememberWindowState(width = 1180.dp, height = 780.dp),
         ) {
             MenuBar {
+                // THE MENU ITEMS CARRY THEIR SHORTCUTS, and the modifier is the host's own.
+                // `meta` is Command on macOS and the Windows key everywhere else, so binding
+                // it unconditionally would put a menu item on Win+R, a chord the OS owns.
+                // [menuShortcut] picks Command on a Mac and Control elsewhere.
+                //
+                // QUIT IS BOUND ONLY OFF macOS, and that is measured rather than stylistic.
+                // On macOS the application menu belongs to the system, not to this window,
+                // and it already holds `About OSHI, Services, Hide OSHI, Hide Others, Show
+                // All, Quit OSHI, Quit and Keep Windows` — with Command-Q on its Quit.
+                // Clicking it through System Events ended the process, so that path works.
+                // Binding Command-Q here as well would put the same chord on two different
+                // shutdown paths in one process. Off macOS there is no such menu and the
+                // app's own Quit is the only one, so it takes Control-Q.
+                //
+                // Cmd+W is deliberately NOT used for "close conversation": on macOS it closes
+                // the WINDOW, and this window's close button hides to the tray, so taking that
+                // chord would make the one key people press to put an app away do something
+                // they did not ask for.
                 // `identity.app_name` rather than the literal "OSHI": the brand is the same
                 // word in all 34 catalogs today, and reading it from the catalog is what makes
                 // a future script-specific spelling (it is a key the phones already own) reach
@@ -291,10 +338,10 @@ fun runDesktopUi(client: OshiClient, startHidden: Boolean = false) {
                     Item(dt("desktop.nav.account"), onClick = { model.show(Pane.ACCOUNT) })
                     Item(dt("desktop.nav.limits"), onClick = { model.show(Pane.LIMITS) })
                     Separator()
-                    Item(dt("desktop.menu.quit"), onClick = quit)
+                    Item(dt("desktop.menu.quit"), shortcut = quitShortcut(), onClick = quit)
                 }
                 Menu(dt("desktop.menu.conversation")) {
-                    Item(dt("desktop.menu.refreshFromDisk"), onClick = { model.refresh() })
+                    Item(dt("desktop.menu.refreshFromDisk"), shortcut = menuShortcut(Key.R), onClick = { model.refresh() })
                     Item(dt("desktop.menu.closeConversation"), onClick = { model.select(null) })
                 }
             }
@@ -313,6 +360,14 @@ fun runDesktopUi(client: OshiClient, startHidden: Boolean = false) {
             LaunchedEffect(calls) {
                 while (true) { calls.tick(); delay(1_000) }
             }
+            // __HIDDEN_WINDOW_NOTIFY_2026_10_29__ Keep the model's view of the window in
+            // step, and clear the open conversation's badge when the window comes back.
+            LaunchedEffect(windowVisible) {
+                windowShowing.set(windowVisible)
+                if (windowVisible) model.onWindowShown()
+            }
+            // Row 1.2-b: real-window frame times, off unless OSHI_FRAME_BENCH=1.
+            FrameSampler.Install()
             MaterialTheme(colorScheme = OshiTheme.colors, typography = OshiTheme.typography) {
                 Box(Modifier.fillMaxSize()) {
                 Surface(Modifier.fillMaxSize(), color = OshiTheme.background) {
@@ -353,6 +408,7 @@ fun runDesktopUi(client: OshiClient, startHidden: Boolean = false) {
                         onAnswerVideoRequest = calls::answerVideoRequest,
                         onMinimize = { calls.setMinimized(true) },
                         onSwitchCamera = calls::switchCamera,
+                        onPickVoiceEffect = calls::setVoiceEffect,
                     )
                 }
                 if (callScreen.value == null) ratingAsk.value?.let { pending ->
@@ -575,6 +631,34 @@ private fun MessagesDestination(
                     onSyncPull = model::syncPull,
                 )
                 Pane.LIMITS -> LimitsPane()
+                // __DESKTOP_DELETE_ACCOUNT_UI_2026_10_29__ Takes a one-call host rather than
+                // the client, so the screen renders and is looked at without an account.
+                Pane.DELETE_ACCOUNT -> com.oshi.desktop.ui.components.DeleteAccountPane(
+                    remember(client) {
+                        object : com.oshi.desktop.ui.components.DeleteAccountHost {
+                            override fun delete() = client.deleteAccount()
+                        }
+                    },
+                )
+                // __DESKTOP_LORA_UI_2026_10_28__ The radio, with a mouse. Takes the client
+                // directly, as LinkedDevicesPane does: the roster is folded on the radio's
+                // read thread, so there is no shell state to thread through.
+                // __PEERS_ARE_A_SCREEN_2026_10_28__ PARITY row 1.3.
+                Pane.PEERS -> com.oshi.desktop.ui.components.PeersPane(
+                    peers = client.meshPeerRows(),
+                    onConnect = { h, p -> client.meshConnectByHand(h, p) },
+                    onCopy = { copyToClipboard(it) },
+                    refresh = { client.meshPeerRows() },
+                    onDisconnect = { client.meshDisconnect(it) },
+                    discovering = { client.meshIsDiscovering },
+                    onSetDiscovery = { client.meshSetDiscovery(it) },
+                    meshRunning = { client.meshRunning },
+                )
+                Pane.LORA -> com.oshi.desktop.ui.components.LoRaPane(
+                    radio = remember(client) { com.oshi.desktop.ui.components.loRaPaneHost(client) },
+                    contacts = state.contacts,
+                    onCopy = { copyToClipboard(it) },
+                )
                 // __DEVSYNC_DIRECT_2026_09_22__
                 Pane.DEVICES -> com.oshi.desktop.ui.components.LinkedDevicesPane(client.devSync, client.deviceMailbox)
                 // `remember(client)` and not a fresh instance per recomposition: CovertText
@@ -653,6 +737,12 @@ private fun MessagesDestination(
                             onPin = model::pinMessage,
                             onDeleteForMe = model::deleteMessageForMe,
                             onForward = model::forwardMessage,
+                            onVote = model::votePoll,   // __DESKTOP_POLLS_2026_10_29__
+                            onCreatePoll = model::createPoll,
+                            // __DESKTOP_CONTACT_CARD_COMPOSER_2026_10_29__
+                            onSendContact = model::sendContactCard,
+                            contacts = state.contacts,
+                            onSetOfflineOnly = model::setOfflineOnly,
                             onCopy = { copyToClipboard(it) },
                             onPickMention = model::pickMention,   // __MENTIONS_2026_09_23__
                             // __DESKTOP_REPORT_2026_09_23__ contacts and groups only (not bots / radio).
@@ -760,3 +850,26 @@ private fun pickFile(owner: java.awt.Frame): File? {
     val dir = dialog.directory ?: return null
     return File(dir, name).takeIf { it.isFile }
 }
+
+/**
+ * A menu shortcut on the modifier this platform actually uses.
+ *
+ * `meta` is Command on macOS; on Windows it is the Windows key and on most Linux desktops
+ * the Super key, both of which belong to the window manager. `ctrl` is the menu modifier
+ * there. Getting this wrong is not a compile error and not a crash — it is a menu item
+ * with a chord printed beside it that either does nothing or fights the OS.
+ */
+internal fun menuShortcut(key: Key, isMac: Boolean = MacDesktopIntegration.isMac): KeyShortcut =
+    if (isMac) KeyShortcut(key, meta = true)
+    else KeyShortcut(key, ctrl = true)
+
+/**
+ * The Quit item's shortcut, or NONE on macOS.
+ *
+ * macOS puts `Quit OSHI` in the system application menu with Command-Q already bound, and
+ * that path was measured ending this process. A second Command-Q inside the same app is a
+ * duplicate binding on a chord that already works. Off macOS nothing provides a Quit but
+ * this menu, so it takes Control-Q. See [MacDesktopIntegration].
+ */
+internal fun quitShortcut(isMac: Boolean = MacDesktopIntegration.isMac): KeyShortcut? =
+    if (isMac) null else KeyShortcut(Key.Q, ctrl = true)

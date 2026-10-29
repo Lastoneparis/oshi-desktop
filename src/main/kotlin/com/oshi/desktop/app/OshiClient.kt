@@ -60,6 +60,11 @@ import com.oshi.desktop.store.MediaType
 import com.oshi.desktop.store.Message
 import com.oshi.desktop.store.ReceiptPreferences
 import com.oshi.desktop.store.MessageStore
+import com.oshi.desktop.store.PinnedMessageStore
+import com.oshi.desktop.store.OfflineOnlyStore
+import com.oshi.desktop.store.ProfileLinksStore
+import com.oshi.desktop.msg.PollPayload
+import com.oshi.desktop.store.PollTally
 import com.oshi.desktop.store.PrekeyStore
 import com.oshi.desktop.store.SecretStore
 import com.oshi.desktop.store.SessionStore
@@ -196,6 +201,36 @@ class OshiClient(
     }
     val messages = MessageStore(File(home, "messages"), messageHistoryKey)
 
+    /**
+     * __DESKTOP_DIRECT_PIN_2026_10_29__ The pinned message of each 1:1 conversation.
+     *
+     * A small JSON map beside `messages/`, not a row in the log: a pin is one mutable fact
+     * per conversation, and both phones persist it exactly this way (iOS in `UserDefaults`
+     * under `"pinnedMessages"`, Android in the `pinned_messages` SharedPreferences). It is
+     * NOT a local preference — see [PinnedMessageStore] for why that distinction matters.
+     */
+    val pinnedMessages = PinnedMessageStore(File(home, PinnedMessageStore.FILE_NAME))
+
+    /**
+     * __DESKTOP_POLLS_2026_10_29__ Ballots, keyed by poll id. See [PollTally] — they live
+     * here and never inside the poll message, which is what both phones do and for the
+     * reason iOS records: the payload is the thing both devices re-render from.
+     */
+    val pollBallots = PollTally(File(home, PollTally.FILE_NAME))
+
+    /**
+     * __DESKTOP_OFFLINE_ONLY_2026_10_29__ Conversations restricted to the mesh and the radio.
+     * See [OfflineOnlyStore]; the routing rule itself is [OfflineOnlyPayload.internetAllowed].
+     */
+    val offlineOnly = OfflineOnlyStore(File(home, OfflineOnlyStore.FILE_NAME))
+
+    /**
+     * __DESKTOP_PROFILE_LINKS_2026_10_29__ Each contact's shared profile links. See
+     * [ProfileLinksStore]; every string in it was chosen by a peer, so nothing is fetched,
+     * previewed or opened on its own.
+     */
+    val contactLinks = ProfileLinksStore(File(home, ProfileLinksStore.FILE_NAME))
+
     private val prekeys = PrekeyStore(vault)
     private val sessions = SessionStore(vault)
     private val http = V2Http(DesktopV2Signer(identity), serverUrl)
@@ -243,8 +278,12 @@ class OshiClient(
 
     // ------------------------------------------------------------- the wired rows
 
-    /** Row 0.18: receipts, typing, reactions, edit/delete — applied to [messages]. */
-    private val control = ControlPayloadRouter(messages)
+    /**
+     * Row 0.18: receipts, typing, reactions, edit/delete — applied to [messages]; and the
+     * 1:1 pin, applied to [pinnedMessages] since 2026-10-29. Before that the router decoded
+     * an inbound pin and reported `PIN_NOT_APPLIED` because nothing was passed here.
+     */
+    private val control = ControlPayloadRouter(messages, pinnedMessages)
 
     /** Row 0.19: location shares and check-ins. Receive-only, and holds the live-share state. */
     val places = PlaceRouter()
@@ -541,6 +580,50 @@ class OshiClient(
     /** Called for mesh traffic, which is NOT a conversation — see the class note. */
     var onMeshTraffic: (String) -> Unit = {}
 
+    /**
+     * __DESKTOP_LORA_TRAFFIC_2026_10_29__ What the RADIO just sent and received — iOS's
+     * `MeshtasticManager.traffic`, which this client had no equivalent of.
+     *
+     * Not [onMeshTraffic], which is the LAN mesh and a different thing entirely. This
+     * records frame SHAPES only — direction, portnum, byte count, node — never payloads.
+     * See [com.oshi.desktop.lora.LoRaTrafficLog] for why that is a rule.
+     */
+    val loraTraffic = com.oshi.desktop.lora.LoRaTrafficLog()
+
+    /**
+     * __DESKTOP_LORA_RADIO_STATE_2026_10_29__ What the node says about ITSELF — the region
+     * it is actually on and whether it will transmit. iOS reads both; this client read
+     * neither, so the pane could call a radio "attached" when it was never going to put a
+     * byte on the air.
+     */
+    val loraRadioState = com.oshi.desktop.lora.LoRaRadioState()
+
+    /**
+     * __DESKTOP_LORA_REFUSAL_2026_10_29__ Why the last radio send did not happen, or null.
+     * Android's `lastRefusal`; the pane shows it and the next send clears it.
+     */
+    @Volatile
+    var loraLastRefusal: com.oshi.desktop.lora.LoRaSendRefusal? = null
+        private set
+
+    /**
+     * The one gate every TRANSMITTING send passes through.
+     *
+     * Not admin: [RADIO_MUTED][com.oshi.desktop.lora.LoRaSendRefusal.RADIO_MUTED] and
+     * [NO_REGION][com.oshi.desktop.lora.LoRaSendRefusal.NO_REGION] are precisely the two
+     * states an owner repairs BY sending an admin frame, so refusing admin on those grounds
+     * would make an unconfigured radio unconfigurable from the app that spotted it.
+     */
+    private fun loraRefuseSend(): com.oshi.desktop.lora.LoRaSendRefusal? {
+        val why = com.oshi.desktop.lora.LoRaSendRefusal.forSend(
+            attached = lora?.isConnected == true,
+            state = loraRadioState,
+        )
+        loraLastRefusal = why
+        if (why != null) onLoRa("lora: ${why.reason}")
+        return why
+    }
+
     /** A row-0.18 control payload was recognised. Nothing was appended to the log. */
     var onControl: (String, ControlEvent, ControlPayloadRouter.Outcome) -> Unit = { _, _, _ -> }
 
@@ -601,6 +684,26 @@ class OshiClient(
                 log("client: dropped mesh ${m.type} from a blocked contact ${m.senderPublicKey.take(12)}…")
             } else {
                 onMeshTraffic("${m.type} from ${m.senderName} (${m.platform}): ${m.payload.take(200)}")
+                // __MESH_IS_NO_LONGER_OPAQUE_2026_10_28__ PARITY.md row 0.16's last
+                // sentence — "the desktop mesh moves OPAQUE payloads and the CLI says so
+                // where someone would be tempted to type a real message into it".
+                //
+                // That was true while this client had no legacy ratchet. It now compiles
+                // the phones' own, and the LAN mesh carries the SAME `SecureMessage` JSON
+                // as the radio does: Android builds it in `crossPlatformMeshSecureMessage`
+                // (`MessageRepository.kt:383`), iOS in `meshWireSafe()`. So the payload was
+                // never opaque in its format — only in this client's ability to open it.
+                //
+                // A payload that is not an envelope (a control frame, an identity exchange,
+                // a reaction) simply fails to parse and falls through to the log above, as
+                // before. Nothing that used to be visible stops being visible.
+                com.oshi.desktop.lora.LoRaSecureMessage
+                    .fromWireJson(m.payload.toByteArray(Charsets.UTF_8))
+                    ?.let { envelope ->
+                        openOshiEnvelope(envelope, transport = "mesh", nodeNum = null) {
+                            onMeshTraffic(it)
+                        }
+                    }
             }
         }
         mesh.onPeersChanged = { peers ->
@@ -831,7 +934,14 @@ class OshiClient(
         if (ControlPrefix.isControl(text)) return SendOutcome.REFUSED_CONTROL_PAYLOAD
         // __GROUP_PARITY_2026_09_23__ a reply travels in the iOS `💬REPLY💬` envelope, wrapped
         // AFTER the user text was checked (the envelope itself is a sentinel by design).
-        val wire = replyTo?.let { com.oshi.desktop.msg.ReplyEnvelope.wrap(text, it) } ?: text
+        // __DESKTOP_LINE_BREAKS_2026_10_29__ Both phones normalise prose before sending and
+        // this client did not, so text pasted from Word or a classic-Mac document went out
+        // with CR / VT / NEL / U+2028 / U+2029 in it and arrived on Android as one run-on
+        // block — while the sender's own window showed the paragraphs. BEFORE the envelope
+        // wrap, as on the phones: rewriting raw characters inside JSON is how one stops
+        // decoding.
+        val body = com.oshi.desktop.msg.MessageText.normalizedForSend(text)
+        val wire = replyTo?.let { com.oshi.desktop.msg.ReplyEnvelope.wrap(body, it) } ?: body
         // __SHARED_NICKNAME_2026_09_22__ Read BEFORE the row is appended: "first reply".
         val firstReply = !hasSentUserMessage(peerAddress)
         val outcome = sendPlaintext(peerAddress, wire, storeRow = true)
@@ -1009,11 +1119,53 @@ class OshiClient(
 
         val msgId = UUID.randomUUID().toString()
         val now = System.currentTimeMillis()
-        val outcome = when {
-            !config.isEnabledCached() -> SendOutcome.GATE_CLOSED
-            // A stored row is a user message: its other devices get a sent-copy (§3.6).
-            router.sendText(peerAddress, text.toByteArray(Charsets.UTF_8), msgId, selfCopy = storeRow) -> SendOutcome.SENT
-            else -> SendOutcome.NO_V2_PATH
+
+        // __DESKTOP_RADIO_LANE_2026_10_28__ THE RADIO IS A LANE, NOT A SCREEN.
+        //
+        // Until now this client's only transport was the relay, so "OSHI works with no
+        // internet" was true of a feature inside it and false of the app. The order comes
+        // from DesktopTransportPolicy rather than from branches here, so what a diagnostics
+        // view lists and what the sender actually does cannot drift — iOS records that
+        // drift as the whole reason its version exists.
+        //
+        // A control payload (profile, receipts, typing) is deliberately NOT given the
+        // radio: it is silent traffic that no one is waiting for, and LongFast airtime is
+        // 1-2 s a frame. Spending the mesh on a typing ping is how a radio becomes useless
+        // for the message behind it.
+        val prefs = transportPreferences.load()
+        // __DESKTOP_OFFLINE_ONLY_2026_10_29__ The app-wide ban AND this conversation's own
+        // switch. Either saying no means no — a per-conversation switch may restrict and
+        // never widen, so a conversation set back to normal cannot re-enable a relay the
+        // person banned app-wide.
+        val internetAllowed = com.oshi.desktop.msg.OfflineOnlyPayload.internetAllowed(
+            globalInternetAllowed = !prefs.neverOverInternet,
+            conversationIsOfflineOnly = offlineOnly.isOfflineOnly(peerAddress),
+        )
+        val mayUseRadio = storeRow && loraAttached
+        val lanes = com.oshi.desktop.lora.DesktopTransportPolicy.order(
+            radioAttached = mayUseRadio,
+            relayPossible = config.isEnabledCached(),
+            preferRadio = prefs.preferRadio,
+            internetAllowed = internetAllowed,
+        )
+
+        var usedLane: com.oshi.desktop.lora.DesktopTransportPolicy.Lane? = null
+        var outcome = if (lanes.isEmpty()) {
+            // Nowhere to go. WAITS — never "failed", and never quietly re-routed onto a
+            // relay the person banned.
+            if (!internetAllowed && !mayUseRadio) SendOutcome.NO_V2_PATH else SendOutcome.GATE_CLOSED
+        } else {
+            SendOutcome.NO_V2_PATH
+        }
+        for (lane in lanes) {
+            val sent = when (lane) {
+                com.oshi.desktop.lora.DesktopTransportPolicy.Lane.RELAY ->
+                    // A stored row is a user message: its other devices get a sent-copy (§3.6).
+                    router.sendText(peerAddress, text.toByteArray(Charsets.UTF_8), msgId, selfCopy = storeRow)
+                com.oshi.desktop.lora.DesktopTransportPolicy.Lane.RADIO ->
+                    loraSendOshiMessage(peerAddress, text, storeRow = false, messageId = msgId)
+            }
+            if (sent) { usedLane = lane; outcome = SendOutcome.SENT; break }
         }
         // __DESKTOP_MESSAGE_PUSH_2026_09_23__ user-visible rows only; silent control payloads
         // (profile, receipts, typing, group state…) never wake anyone — same catalog as the phones.
@@ -1034,12 +1186,96 @@ class OshiClient(
                     // later reader never has to guess which of the four epochs this was.
                     sentAtSource = TimestampSource.LOCAL_CLOCK,
                     deliveryStatus = if (outcome == SendOutcome.SENT) DeliveryStatus.SENT else DeliveryStatus.FAILED,
-                    transport = if (outcome == SendOutcome.SENT) "relay-v2" else "none",
+                    transport = when {
+                        outcome != SendOutcome.SENT -> "none"
+                        usedLane == com.oshi.desktop.lora.DesktopTransportPolicy.Lane.RADIO -> "lora"
+                        else -> "relay-v2"
+                    },
                 )
             )
         }
         contacts.seen(peerAddress, now)
+        if (usedLane == com.oshi.desktop.lora.DesktopTransportPolicy.Lane.RADIO && storeRow) {
+            armRadioEscalation(peerAddress, msgId, text)
+        }
         return outcome
+    }
+
+    /**
+     * The radio was tried first. If nothing comes back, give the message to the relay.
+     *
+     * __DESKTOP_RADIO_LANE_2026_10_28__ Port of iOS's `escalateAfterLoRa`, and the reason
+     * "prefer my radio over the internet" can be a PREFERENCE rather than a sacrifice:
+     * re-spending airtime on a route the mesh could not serve would be pointless, but
+     * handing the message to a working network path is not.
+     *
+     * **Silence is the only signal there is.** OSHI broadcasts, and Meshtastic does not
+     * acknowledge a broadcast, so there is nothing to wait FOR except the peer's own
+     * delivery receipt arriving by some other path. Ninety seconds is iOS's number and its
+     * reason is physical: Meshtastic retries for well under a minute, so a later answer
+     * would be for a packet id already reused.
+     *
+     * Three things are deliberately re-read at expiry rather than captured at send time:
+     * whether the message has since been delivered (another transport may have won),
+     * whether the relay is reachable, and whether the person still permits the internet.
+     * The ban in particular must be re-read — someone who turns it on during those ninety
+     * seconds has asked for the message to wait, not to leave a minute later.
+     */
+    /**
+     * __DESKTOP_OFFLINE_ONLY_2026_10_29__ May the relay pick up what the radio could not, for
+     * THIS conversation?
+     *
+     * This is the second of the two places that decide whether the relay may carry something,
+     * and the one a per-conversation restriction gets missed in. The failure is silent and
+     * total: the message leaves correctly over the radio, nothing acknowledges it, and ninety
+     * seconds later the timer hands the SAME message to the relay — breaking the one promise
+     * the switch makes completely, in a conversation someone deliberately took off the
+     * internet. iOS carries the identical warning on its own version: *"Reading the global
+     * here as well would let a conversation marked offline-only be escalated onto the relay
+     * anyway."*
+     *
+     * **Extracted from the timer body on purpose.** Inline, the composition was unreachable
+     * from a test: a mutation that dropped the per-conversation half and read only the
+     * app-wide ban left the whole suite green, because the only test of it exercised the pure
+     * policy function rather than this call site. A decision that cannot be mutated is a
+     * decision that is not tested, so it became a function with a name.
+     *
+     * Both switches are re-read HERE, at expiry, rather than captured when the message was
+     * sent — which is what lets a restriction turned on during those ninety seconds be
+     * honoured.
+     */
+    internal fun relayMayPickUpAfterRadio(peerAddress: String, alreadyDelivered: Boolean): Boolean =
+        com.oshi.desktop.lora.DesktopTransportPolicy.internetPicksUpAfterRadio(
+            relayPossible = config.isEnabledCached(),
+            internetAllowed = com.oshi.desktop.msg.OfflineOnlyPayload.internetAllowed(
+                globalInternetAllowed = !transportPreferences.load().neverOverInternet,
+                conversationIsOfflineOnly = offlineOnly.isOfflineOnly(peerAddress),
+            ),
+            alreadyDelivered = alreadyDelivered,
+        )
+
+    private fun armRadioEscalation(peerAddress: String, msgId: String, text: String) {
+        val timer = timers ?: return
+        timer.schedule({
+            runCatching {
+                val row = messages.messages(peerAddress).firstOrNull { it.id == msgId }
+                // Delivered by anything at all? Then the radio did its job, or another lane did.
+                if (row != null && row.deliveryStatus.rank >= DeliveryStatus.DELIVERED.rank) return@runCatching
+                val prefs = transportPreferences.load()
+                if (!relayMayPickUpAfterRadio(peerAddress, alreadyDelivered = false)) {
+                    onLoRa("radio went unanswered for ${msgId.take(8)}… and the relay may not pick it up — it waits")
+                    return@runCatching
+                }
+                // Same msgId on purpose: one logical message, one id across every transport,
+                // so the receiver's cross-transport dedup sees a duplicate rather than a
+                // second bubble if the radio copy turns up later.
+                if (router.sendText(peerAddress, text.toByteArray(Charsets.UTF_8), msgId, selfCopy = true)) {
+                    onLoRa("radio went unanswered for ${msgId.take(8)}… — the internet picked it up")
+                } else {
+                    onLoRa("radio went unanswered for ${msgId.take(8)}… and the relay could not take it either")
+                }
+            }
+        }, com.oshi.desktop.lora.DesktopTransportPolicy.ACK_WINDOW_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
     }
 
     /** True when this peer can be reached over V2 right now (session or fetchable bundle). */
@@ -1951,10 +2187,34 @@ class OshiClient(
     fun syncCheckpoint(upToSeq: Int): Result<SyncProtocol.CheckpointResult> =
         V2SyncClient(http, address).checkpoint(upToSeq)
 
-    /** The legacy `/api/sync` alias map — aliases only, no block state. See [ContactSyncRecord]. */
-    fun legacySyncPushAliases(): Result<Unit> =
+    /**
+     * __ANDROID_EXACT_SYNC_2026_10_29__ The legacy `/api/sync` contact archive, emitted the
+     * way the phones emit it — full records, `isBlocked` included.
+     *
+     * This used to push an ALIAS MAP ONLY, deliberately, so that a sync could never move a
+     * block in either direction. That was a divergence from both phones, and the owner of
+     * this project chose exact parity on 2026-10-29 after being shown what it costs:
+     * blocked contacts are now omitted from the payload and every emitted row carries
+     * `isBlocked=false`, so **a sync can unblock someone on the receiving device**. See
+     * [ContactSyncRecord.exportAllAndroidExact] for the line-by-line mirror and
+     * `PARITY.md` row 0.24.
+     *
+     * [ContactSyncRecord.assertBlocksRepresented] is deliberately NOT called here: its whole
+     * purpose is to refuse this payload shape.
+     */
+    fun legacySyncPush(): Result<Unit> =
         storedSyncRefusal()?.let { Result.failure(it) }
-            ?: legacySync.push(SyncProtocol.LegacyKind.CONTACTS, ContactSyncRecord.encodeLegacyAliasMap(contacts))
+            ?: run {
+                val now = System.currentTimeMillis()
+                legacySync.push(
+                    SyncProtocol.LegacyKind.CONTACTS,
+                    ContactSyncRecord.encodePayload(
+                        ContactSyncRecord.exportAllAndroidExact(contacts, now),
+                        now,
+                        syncCursor.deviceId(),
+                    ),
+                )
+            }
 
     /**
      * __DEVSYNC_DIRECT_2026_09_22__ Once direct device sync is on for this account, nothing is
@@ -1966,16 +2226,85 @@ class OshiClient(
             IllegalStateException("stored sync is off: this account uses direct device sync (More → Linked devices)")
         else null
 
-    /** Gap-fill from the legacy alias map. Never overwrites a local alias. Returns rows added. */
-    fun legacySyncPullAliases(): Result<Int> =
+    /**
+     * __ANDROID_EXACT_SYNC_2026_10_29__ Apply the legacy contact archive the way the phones
+     * apply it: last-writer-wins on the record's own stamp, block decisions included.
+     *
+     * This used to be gap-fill only — it never overwrote a local alias and never touched a
+     * block. It now goes through [ContactSyncRecord.applyTo], whose rule 3 honours a record
+     * that CARRIES a block decision, which after the push change above means an incoming
+     * `isBlocked=false` under a winning stamp UNBLOCKS a locally blocked contact. That is
+     * the phones' behaviour and it is the behaviour that was chosen; it is written down
+     * here rather than discovered later.
+     *
+     * @return rows inserted + rows updated, as the CLI reports.
+     */
+    fun legacySyncPull(): Result<Int> =
         legacySync.pull(SyncProtocol.LegacyKind.CONTACTS).map { body ->
             if (body == null) 0
-            else ContactSyncRecord.applyLegacyAliasMap(contacts, body, System.currentTimeMillis())
+            else {
+                val outcome = ContactSyncRecord.applyTo(
+                    contacts,
+                    ContactSyncRecord.parsePayload(body),
+                    System.currentTimeMillis(),
+                )
+                outcome.inserted + outcome.updated
+            }
         }
 
     // ------------------------------------------------------------ row 0.27, LoRa
 
-    private val loraInbound = com.oshi.desktop.lora.LoRaInbound()
+    /**
+     * __DESKTOP_LORA_MANUAL_LINK_2026_10_28__ The bindings OUTLIVE the process now.
+     *
+     * [com.oshi.desktop.lora.LoRaNodeBindings] had `snapshot()`/`restore()` and no caller
+     * for either, so every binding died at exit. Survivable for a learned one, which the
+     * next envelope re-proves; not for a manual link, which a person would otherwise have
+     * to re-make on every launch.
+     */
+    /** __DESKTOP_RADIO_LANE_2026_10_28__ The two radio switches. See DesktopTransportPolicy. */
+    private val transportPreferences = com.oshi.desktop.store.TransportPreferences(
+        File(home, com.oshi.desktop.store.TransportPreferences.FILE_NAME)
+    )
+
+    /** What the Radio screen shows and writes. */
+    fun transportPrefs(): com.oshi.desktop.store.TransportPreferences.Values = transportPreferences.load()
+
+    fun setTransportPrefs(values: com.oshi.desktop.store.TransportPreferences.Values) {
+        transportPreferences.save(values)
+    }
+
+    private val loraBindingStore = com.oshi.desktop.store.LoRaNodeBindingStore(
+        File(home, com.oshi.desktop.store.LoRaNodeBindingStore.FILE_NAME),
+        LocalDataKeys.derive(localDataRoot, LocalDataKeys.LORA_BINDINGS),
+    )
+
+    private val loraBindings = com.oshi.desktop.lora.LoRaNodeBindings().also {
+        it.restore(loraBindingStore.load())
+    }
+
+    private val loraInbound = com.oshi.desktop.lora.LoRaInbound(loraBindings)
+
+    /**
+     * __RATCHET_IS_SHARED_SOURCE_2026_10_28__ PARITY.md row 0.16, answered.
+     *
+     * The legacy Double Ratchet — the phones' own file, compiled by this build, not a
+     * second implementation of it. This is what turns an OSHI↔OSHI envelope over LoRa from
+     * "reported and never opened" into a message.
+     *
+     * Sessions are loaded once here and persisted after every send and every receive, for
+     * the reason [com.oshi.desktop.store.RatchetSessionStore] states: a chain that advanced
+     * in memory but not on disk re-derives a message key that is already on the wire.
+     */
+    private val ratchetSessionStore = com.oshi.desktop.store.RatchetSessionStore(
+        File(home, com.oshi.desktop.store.RatchetSessionStore.FILE_NAME),
+        LocalDataKeys.derive(localDataRoot, LocalDataKeys.RATCHET_SESSIONS),
+    )
+
+    private val legacyEnvelope = com.oshi.desktop.crypto.LegacyRatchetEnvelope(
+        ourPrivateKey = identity.identity.priv,
+        ourPublicKeyBase64 = address,
+    ).also { ratchetSessionStore.load(it.ratchet) }
     @Volatile private var lora: com.oshi.desktop.lora.LoRaLink? = null
 
     val loraAttached: Boolean get() = lora?.isConnected == true
@@ -1992,9 +2321,62 @@ class OshiClient(
     /** The same peers by display name, for the list behind the header badge. */
     val meshPeerNames: List<String> get() = mesh.peers().map { it.displayName }
 
+    /**
+     * __PEERS_ARE_A_SCREEN_2026_10_28__ Every LAN peer, flattened for the Peers screen —
+     * PARITY.md row 1.3's "no peers/mesh SCREEN".
+     *
+     * `connected` and `dialable` are deliberately separate facts. A peer that DIALLED US
+     * has no dialable port — the socket's remote port is its ephemeral source port, not the
+     * one it listens on, and `MeshNode` records PORT_UNKNOWN rather than guessing — so it
+     * can reach us while we cannot re-open a connection to it. Collapsing the two would
+     * mislead at exactly the moment someone opens this screen to find out why a message did
+     * not arrive.
+     */
+    fun meshPeerRows(): List<com.oshi.desktop.ui.components.PeerRow> {
+        val routes = mesh.routes()
+        return mesh.peers().map { p ->
+            com.oshi.desktop.ui.components.PeerRow(
+                publicKey = p.publicKey,
+                displayName = p.displayName,
+                platform = p.platform,
+                address = if (p.portIsDialable) "${p.host}:${p.port}" else p.host,
+                connected = mesh.isConnectedTo(p.publicKey),
+                dialable = p.portIsDialable,
+                hopCount = routes[p.publicKey]?.hopCount,
+            )
+        }
+    }
+
+    /** __PEERS_ARE_A_SCREEN_2026_10_28__ Hang up on one peer. Not a block — see BlockPolicy. */
+    fun meshDisconnect(publicKey: String): Boolean = mesh.disconnectPeer(publicKey)
+
+    /** Is this machine announcing itself and looking for others? */
+    val meshIsDiscovering: Boolean get() = mesh.isDiscovering
+
+    /** Turn discovery on or off; returns the state after the call. */
+    /** __MESH_OFF_IS_A_SENTENCE_2026_10_29__ Is the LAN mesh running in this process? */
+    val meshRunning: Boolean get() = mesh.isRunning
+
+    fun meshSetDiscovery(enabled: Boolean): Boolean = mesh.setDiscoveryEnabled(enabled)
+
+    /** Dial a peer whose address discovery cannot see. Identity is still checked on connect. */
+    fun meshConnectByHand(host: String, port: Int): Boolean {
+        if (host.isBlank() || port !in 1..65_535) return false
+        return runCatching { mesh.connectToPeer(host, port, expectedKey = null) }.isSuccess
+    }
+
     /** The nodes behind the header's "LoRa N", named — the LoRa half of that same list. */
     fun loraOnlineNodeList(nowMs: Long = System.currentTimeMillis()): List<com.oshi.desktop.lora.LoRaNodeRoster.Node> =
         if (loraAttached) loraRoster.onlineNodes(nowMs) else emptyList()
+
+    /**
+     * OUR OWN radio's node number, or 0 before the handshake has delivered `my_info`.
+     *
+     * Exposed because "the reach badge excludes our own radio" is a claim about a specific
+     * number, and a test that cannot name that number can only re-assert the roster's
+     * implementation back at itself.
+     */
+    fun loraMyNodeNumber(): UInt = loraRoster.myNodeNumOrZero()
 
     /**
      * Attach to a Meshtastic node over TCP — PARITY.md row 0.27.
@@ -2025,18 +2407,628 @@ class OshiClient(
         val link = com.oshi.desktop.lora.LoRaLink(
             host = endpoint.host,
             port = endpoint.port,
-            onFromRadio = { fromRadio -> onFromRadio(fromRadio) },
+            onFromRadio = { fromRadio ->
+                loraTraffic.observe("←", fromRadio)
+                loraRadioState.observeFromRadio(fromRadio)
+                onFromRadio(fromRadio)
+            },
             log = { log("lora: $it"); onLoRa(it) },
         )
+        link.onToRadio = { loraTraffic.observe("→", it) }
         lora = link
         link.start()
         return true
     }
 
+    /**
+     * Attach to a Meshtastic node over **USB serial** — the transport a person has when the
+     * radio is plugged into this machine, and the macOS/Linux counterpart of the phones' BLE.
+     *
+     * Same protobufs, same [com.oshi.desktop.lora.LoRaAttach.StreamFraming], same
+     * [onFromRadio]: only the bytes' route into the process differs. See
+     * [com.oshi.desktop.lora.LoRaSerial] for why this needs no dependency, and
+     * [com.oshi.desktop.lora.LoRaChannel.Serial] for the open-then-configure order.
+     *
+     * The same limitation [loraAttach] prints applies here and is not softened by the
+     * transport being nicer: stock Meshtastic TEXT is readable and quarantined, an
+     * OSHI↔OSHI envelope is still sealed with the legacy Double Ratchet this client does
+     * not implement (rows 0.16 / 0.27).
+     */
+    fun loraAttachSerial(device: String, baud: Int = com.oshi.desktop.lora.LoRaSerial.DEFAULT_BAUD): Boolean {
+        if (!com.oshi.desktop.lora.LoRaSerial.isSupported()) {
+            onLoRa("lora: serial attach needs macOS or Linux — use /lora attach <host> on Windows")
+            return false
+        }
+        val path = com.oshi.desktop.lora.LoRaSerial.devicePath(device)
+        if (path == null) {
+            // As in loraAttach: never echo the rejected value into a sink that feeds a terminal.
+            onLoRa("lora: refused invalid serial device path")
+            return false
+        }
+        loraDetach()
+        val link = com.oshi.desktop.lora.LoRaLink(
+            channel = com.oshi.desktop.lora.LoRaChannel.Serial(path, baud),
+            onFromRadio = { fromRadio ->
+                loraTraffic.observe("←", fromRadio)
+                loraRadioState.observeFromRadio(fromRadio)
+                onFromRadio(fromRadio)
+            },
+            log = { log("lora: $it"); onLoRa(it) },
+        )
+        link.onToRadio = { loraTraffic.observe("→", it) }
+        lora = link
+        link.start()
+        return true
+    }
+
+    /**
+     * **One person, one conversation**: tell this client that a radio node is a contact.
+     *
+     * The answer to "my own Mac's radio made a second conversation". A node that only ever
+     * sends stock Meshtastic text can never PROVE an OSHI identity — proof means an
+     * envelope that decrypted, and there is no envelope on that lane — so without this the
+     * `lora!<nodehex>` thread stays separate for ever.
+     *
+     * What the person takes on is in [com.oshi.desktop.lora.LoRaNodeBindings.link], and the
+     * caller must show it: the text is NOT authenticated, so linking means text claiming
+     * this node number lands in that contact's conversation on the strength of the node
+     * number alone. Refused for a key that is not an identity key, for a node whose
+     * evidence already contradicted itself, and — never silently — for a node the ratchet
+     * has already bound to someone else.
+     */
+    fun loraLinkNode(node: UInt, address: String): com.oshi.desktop.lora.LoRaNodeBindings.LearnResult {
+        val result = loraBindings.link(node, address, System.currentTimeMillis())
+        if (result == com.oshi.desktop.lora.LoRaNodeBindings.LearnResult.BOUND) {
+            loraBindingStore.save(loraBindings.snapshot())
+        }
+        return result
+    }
+
+    /**
+     * Send MEDIA over the radio — end-to-end encrypted, opt-in, and tiny.
+     *
+     * __DESKTOP_LORA_MEDIA_2026_10_28__ The bytes do not ride the envelope's own fields:
+     * the wire form strips the plaintext sidecar, so the media goes INSIDE the ciphertext
+     * as the JSON wrapper both phones read ([com.oshi.desktop.lora.LoRaMediaWire]).
+     *
+     * Gated on the preference, which defaults OFF exactly as iOS's does. Refused above the
+     * frame budget with the real number, never truncated — a truncated base64 string
+     * decodes to nothing on the far side and the recipient sees an empty bubble with no
+     * error anywhere.
+     */
+    fun loraSendMedia(
+        recipient: String,
+        bytes: ByteArray,
+        type: com.oshi.desktop.store.MediaType,
+        fileName: String? = null,
+    ): Boolean {
+        if (loraRefuseSend() != null) return false
+        if (!transportPreferences.load().mediaOverLoRa) {
+            // Recorded as a refusal too, so the pane can say WHICH of the five reasons it
+            // was rather than only that something went wrong.
+            loraLastRefusal = com.oshi.desktop.lora.LoRaSendRefusal.CARRIES_MEDIA
+            onLoRa("lora: media over the radio is off — turn it on in Radio if you want it")
+            return false
+        }
+        val ceiling = com.oshi.desktop.lora.LoRaMediaWire.maxMediaBytes()
+        if (bytes.size > ceiling) {
+            onLoRa(
+                "lora: that is ${bytes.size} bytes and the radio carries about $ceiling — " +
+                    "refused, not truncated. LoRa media is a thumbnail, not a photograph."
+            )
+            return false
+        }
+        val wrapper = com.oshi.desktop.lora.LoRaMediaWire.encode(
+            com.oshi.desktop.lora.LoRaMediaWire.Media(type, bytes, fileName)
+        )
+        return loraSendOshiMessage(recipient, wrapper)
+    }
+
+    /** Undo a manual link; the thread goes back to `lora!<nodehex>`. Never drops proof. */
+    fun loraUnlinkNode(node: UInt): Boolean {
+        val removed = loraBindings.unlink(node)
+        if (removed) loraBindingStore.save(loraBindings.snapshot())
+        return removed
+    }
+
+    /** Node key (8 hex) → the identity a person attached to it. */
+    fun loraManualLinks(): Map<String, String> = loraBindings.manualLinks()
+
+    /**
+     * The identity this node PROVED, by sending an envelope that decrypted — never one a
+     * person asserted. Distinct from [loraLinkedContact] on purpose: the two must not be
+     * conflated anywhere, least of all in a test.
+     */
+    fun loraProvedBinding(node: UInt): String? = loraBindings.boundKey(node)
+
+    /** The identity this node's raw text is filed under, for a row in the UI. */
+    fun loraLinkedContact(node: UInt): String? = loraBindings.manualKey(node)
+
+    /**
+     * Send an OSHI message over the radio — the SEND half of PARITY.md row 0.27.
+     *
+     * __DESKTOP_LORA_OSHI_SEND_2026_10_28__ With the receive half landed, this client could
+     * read a message off the air and not answer it, which is a worse place to stop than
+     * either end of it. This is the counterpart of iOS's
+     * `MeshtasticManager.sendSecureMessage` (`OSHI/MeshtasticManager.swift:651`).
+     *
+     * ============================================================ WHAT GOES ON THE AIR
+     *
+     * The same envelope the relay and the LAN mesh carry — ratchet inside, static-static
+     * HKDF + AES-GCM outside — serialised with [com.oshi.desktop.lora.LoRaSecureMessage]'s
+     * wire form and chunked behind the 8-byte `"OM"` header onto portnum 256. Nothing here
+     * is LoRa-specific except the chunking: a phone reassembles these frames and hands the
+     * result to the same pipeline as any other mesh message.
+     *
+     * **It is BROADCAST**, as iOS broadcasts. Every OSHI radio in range receives the
+     * ciphertext and each decides whether it is the addressee by comparing
+     * `recipientPublicKey` to its own. That is a filter, not routing — confidentiality
+     * rests entirely on the ratchet, because the Meshtastic channel underneath is the
+     * default LongFast one whose key is public. `want_ack` is therefore false: Meshtastic
+     * does not acknowledge a broadcast, so asking would raise a flag nobody answers.
+     *
+     * ============================================================ PERSIST BEFORE THE BYTES
+     * LEAVE, AND REFUSE IF THAT FAILS
+     *
+     * `seal` advances the sending chain IN MEMORY. If the write does not land and the
+     * process dies, the next send re-derives a message key that is already on the air — an
+     * AES-256-GCM key reused across two plaintexts. So the save happens BEFORE a single
+     * frame is written, and a failed save ABORTS the send rather than being logged past.
+     * Android states the same rule at its own call site and deliberately does not catch it.
+     *
+     * @return false, with a reason on [onLoRa], when there is no radio, no identity key for
+     *         the recipient, the ratchet state could not be persisted, or the envelope does
+     *         not fit the 12-frame budget. Over the budget is REFUSED, never truncated.
+     */
+    @JvmOverloads
+    fun loraSendOshiMessage(
+        recipient: String,
+        text: String,
+        /** False when [sendPlaintext] already owns the row — it stores one for every lane. */
+        storeRow: Boolean = true,
+        /** The app-level id, so ONE logical message keeps ONE id across every transport. */
+        messageId: String = UUID.randomUUID().toString(),
+    ): Boolean {
+        // __DESKTOP_LORA_REFUSAL_2026_10_29__ Before anything is sealed: a muted radio or
+        // one with no region takes the frame and transmits nothing.
+        if (loraRefuseSend() != null) return false
+        val link = lora
+        if (link == null || !link.isConnected) {
+            onLoRa("lora: no radio attached")
+            return false
+        }
+        if (text.isEmpty()) return false
+
+        val recipientKey = com.oshi.desktop.crypto.LegacyRatchetEnvelope.canonicalKey(recipient)
+        val sealed = try {
+            legacyEnvelope.seal(text, recipientKey)
+        } catch (e: Exception) {
+            onLoRa("lora: could not seal for ${recipientKey.take(12)}…: ${e.message}")
+            return false
+        }
+
+        // BEFORE the air. See the doc: a chain that advanced in memory but not on disk is
+        // a key-reuse waiting for the next process start.
+        try {
+            ratchetSessionStore.save(legacyEnvelope.ratchet)
+        } catch (e: Exception) {
+            onLoRa("lora: REFUSING to send — ratchet state could not be saved (${e.message})")
+            return false
+        }
+
+        val now = System.currentTimeMillis()
+        val envelope = com.oshi.desktop.lora.LoRaSecureMessage(
+            id = messageId,
+            senderAddress = address,
+            recipientAddress = recipientKey,
+            encryptedContent = com.oshi.desktop.lora.LoRaEncryptedContent(
+                ciphertext = sealed.getString("ciphertext"),
+                signature = sealed.getString("signature"),
+                senderPublicKey = address,
+                unixMillis = now,
+            ),
+            unixMillis = now,
+            isRead = false,
+            deliveryStatus = com.oshi.desktop.lora.LoRaSecureMessage.STATUS_SENT,
+            senderPublicKey = address,
+            recipientPublicKey = recipientKey,
+        )
+
+        val msgId = com.oshi.desktop.lora.LoRaProto.randomPacketId()
+        val frames = com.oshi.desktop.lora.LoRaFrame.frames(msgId, envelope.toWireJson())
+        if (frames == null) {
+            val bytes = envelope.toWireJson().size
+            onLoRa(
+                "lora: this message is $bytes bytes of envelope, over the " +
+                    "${com.oshi.desktop.lora.LoRaFrame.MAX_SEND_BYTES}-byte radio budget " +
+                    "(${com.oshi.desktop.lora.LoRaFrame.MAX_CHUNKS} frames) — refused, not truncated"
+            )
+            return false
+        }
+
+        var written = 0
+        for (frame in frames) {
+            val packet = com.oshi.desktop.lora.LoRaProto.toRadioPacket(
+                to = com.oshi.desktop.lora.LoRaProto.BROADCAST_ADDR,
+                portnum = com.oshi.desktop.lora.LoRaProto.PORT_OSHI,
+                payload = frame,
+                // Never on a broadcast. See the doc.
+                wantAck = false,
+                packetId = com.oshi.desktop.lora.LoRaProto.randomPacketId(),
+            )
+            if (!link.send(packet)) break
+            written++
+        }
+        if (written != frames.size) {
+            onLoRa("lora: only $written of ${frames.size} frames left this process — the message is incomplete on the air")
+            return false
+        }
+
+        if (!storeRow) {
+            onLoRa("OSHI message handed to the radio in ${frames.size} frame(s) — encrypted, broadcast, unacknowledged")
+            return true
+        }
+        val stored = Message(
+            id = messageId,
+            conversationId = recipientKey,
+            senderAddress = address,
+            recipientAddress = recipientKey,
+            fromMe = true,
+            content = text,
+            sentAtMs = now,
+            sentAtSource = TimestampSource.LOCAL_CLOCK,
+            // SENT, never DELIVERED: the bytes left this process over a broadcast nobody
+            // acknowledges. Claiming delivery here is the mistake the phones already made
+            // once — handing frames to a radio counted as delivery, so nothing ever fell
+            // back to the internet.
+            deliveryStatus = DeliveryStatus.SENT,
+            transport = "lora",
+        )
+        messages.append(stored)
+        onMessage(stored)
+        onLoRa("OSHI message handed to the radio in ${frames.size} frame(s) — encrypted, broadcast, unacknowledged")
+        return true
+    }
+
+    /**
+     * Write the node's region, modem preset and hop limit — PARITY.md row 0.27's last gap.
+     *
+     * __DESKTOP_LORA_ADMIN_2026_10_28__ A node from the flasher boots at `region=UNSET` and
+     * transmits NOTHING while reporting itself connected, so this is the step that makes a
+     * new radio usable. It is also the step that can silence a working one: see
+     * [com.oshi.desktop.lora.LoRaAdmin] for why every field is written explicitly and why
+     * the AdminMessage field number is 34 and not 33.
+     *
+     * Addressed to OUR OWN node, never a peer. `want_ack` is true because this IS a unicast
+     * — to the radio on the other end of the cable — and an acknowledgement is the only
+     * sign the node took it.
+     */
+    fun loraSetRegion(
+        region: com.oshi.desktop.lora.LoRaAdmin.Region,
+        preset: com.oshi.desktop.lora.LoRaAdmin.ModemPreset = com.oshi.desktop.lora.LoRaAdmin.ModemPreset.LONG_FAST,
+        hopLimit: Long = com.oshi.desktop.lora.LoRaAdmin.DEFAULT_HOP_LIMIT,
+    ): Boolean {
+        val frame = com.oshi.desktop.lora.LoRaAdmin.setConfigFrame(region, preset, hopLimit)
+        if (frame == null) {
+            onLoRa("lora: refusing to write region UNSET — that is the state this rescues a radio FROM")
+            return false
+        }
+        return sendAdmin(frame, "region ${region.label}, ${preset.label}, hop limit $hopLimit")
+    }
+
+    /**
+     * Put the node on a channel — "which mesh am I on".
+     *
+     * A blank name with the default key IS the stock LongFast channel, so blank is not an
+     * error: it is how "put me back on the normal mesh" is reachable. A psk that is not a
+     * key the firmware accepts is refused rather than silently replaced, because replacing
+     * it would quietly move the radio onto a different mesh from the one asked for.
+     */
+    fun loraSetChannel(name: String, pskRaw: String = ""): Boolean {
+        val psk = com.oshi.desktop.lora.LoRaAdmin.Channel.pskOrNull(pskRaw)
+        if (psk == null) {
+            onLoRa("lora: that is not a channel key — it must be base64 of 1, 16 or 32 bytes")
+            return false
+        }
+        val clamped = com.oshi.desktop.lora.LoRaAdmin.Channel.clampName(name)
+        val frame = com.oshi.desktop.lora.LoRaAdmin.setChannelFrame(clamped, psk)
+        val shown = clamped.ifEmpty { com.oshi.desktop.lora.LoRaAdmin.Channel.DEFAULT_NAME }
+        return sendAdmin(frame, "channel $shown")
+    }
+
+    /**
+     * One admin frame to our own node.
+     *
+     * Refuses while the handshake has not produced `my_node_num`: a write addressed to node
+     * 0 goes nowhere, and reporting success for it would be the worst possible answer on a
+     * screen whose job is to rescue a silent radio.
+     */
+    /**
+     * __DESKTOP_LORA_BEACON_FIXED_2026_10_28__ Tell the RADIO where it is, and let its own
+     * PositionModule do the announcing.
+     *
+     * This replaces [loraBroadcastPosition] as the way a position reaches other nodes.
+     * That function sent a POSITION_APP packet to the broadcast address — the mechanism
+     * both phones shipped this morning — and it is accepted by the radio and goes nowhere:
+     * measured with two ThinkNode M1s in one room, a text broadcast from the same radio
+     * crossed in 3 seconds while ten position frames over four minutes produced nothing, on
+     * a mesh whose receiver was reading 36 other nodes' positions fine. See
+     * `LoRaAdmin.setFixedPositionFrame`.
+     *
+     * ⚠️ Unlike a broadcast this CHANGES THE NODE'S CONFIGURATION and persists on the
+     * device: a radio told it is in Geneva stays in Geneva for every app that connects to
+     * it afterwards. [loraClearFixedPosition] is the undo, and the pane's "Forget" calls it.
+     */
+    fun loraSetFixedPosition(latitude: Double, longitude: Double): Boolean {
+        val frame = com.oshi.desktop.lora.LoRaAdmin.setFixedPositionFrame(latitude, longitude)
+        if (frame == null) {
+            onLoRa("lora: that is not a position on Earth — 0/0 included, which is what a radio with no lock reports")
+            return false
+        }
+        return sendAdmin(frame, "fixed position %.5f, %.5f".format(latitude, longitude))
+    }
+
+    /**
+     * __DESKTOP_LORA_SMART_BROADCAST_2026_10_28__ Write a COMPLETE `Config.position` back
+     * to the node.
+     *
+     * Takes the whole payload because the firmware replaces the submessage wholesale and
+     * protobuf omits defaults — the only safe way to change one setting is to read the
+     * node's current config, rewrite one field of those exact bytes
+     * ([com.oshi.desktop.lora.LoRaAdmin.withVarintField], which refuses anything it cannot
+     * reproduce byte-for-byte) and send the result. Building a config from arguments is how
+     * a radio ends up with `position_broadcast_secs = 0`.
+     *
+     * Deliberately not exposed in the UI. This is a diagnostic entry point for
+     * `LiveSmartBroadcastBench`, and a screen that let someone write a partial config would
+     * be the defect this signature exists to prevent.
+     */
+    fun loraSetPositionConfig(positionConfig: ByteArray): Boolean =
+        sendAdmin(
+            com.oshi.desktop.lora.LoRaAdmin.setPositionConfigFrame(positionConfig),
+            "Config.position (${positionConfig.size} bytes, written whole)",
+        )
+
+    /**
+     * __DESKTOP_LORA_REBOOT_2026_10_28__ Ask the attached radio to reboot.
+     *
+     * Diagnostic only — see [com.oshi.desktop.lora.LoRaAdmin.rebootFrame]. The node's own
+     * position announcement is clamped to six hours while `fixed_position` is set, and a
+     * fresh boot is the only point at which `PositionModule` sends one unprompted.
+     */
+    fun loraReboot(seconds: Int = 5): Boolean =
+        sendAdmin(com.oshi.desktop.lora.LoRaAdmin.rebootFrame(seconds), "a reboot in ${seconds}s")
+
+    /**
+     * __DESKTOP_LORA_SET_OWNER_2026_10_29__ Name the attached radio — what both phones
+     * have had and this client did not.
+     *
+     * Region and channel were settable here; the NAME was not, so a desktop owner's node
+     * kept its factory label on every other client's list and on public mesh maps. Returns
+     * false, with the reason logged, when the name is empty or no radio is attached.
+     *
+     * `shortName` is clamped to four BYTES by [com.oshi.desktop.lora.LoRaAdmin.clampShortName]
+     * rather than four characters — the distinction Android had to fix after two emoji went
+     * out as eight bytes.
+     */
+    fun loraSetOwner(longName: String, shortName: String): Boolean {
+        val node = loraRoster.myNodeNumOrZero()
+        if (node == 0u) {
+            onLoRa("lora: the radio has not said which node it is yet — wait for the config burst")
+            return false
+        }
+        val long = longName.trim()
+        if (long.isEmpty()) {
+            onLoRa("lora: a node needs a name")
+            return false
+        }
+        val short = com.oshi.desktop.lora.LoRaAdmin.clampShortName(
+            shortName.ifBlank { long },
+        )
+        if (short.isEmpty()) {
+            onLoRa("lora: the short name came out empty — it must fit in four bytes")
+            return false
+        }
+        return sendAdmin(
+            com.oshi.desktop.lora.LoRaAdmin.setOwnerFrame(node, long, short),
+            "the node's name to \"$long\" / \"$short\"",
+        )
+    }
+
+    /**
+     * Adopt a radio still wearing its factory default — iOS's `renameIfFactoryDefault`.
+     *
+     * Only renames a node whose announced long name looks untouched. A radio somebody
+     * deliberately named is left alone, which is the whole point: this is a convenience for
+     * a new node, not a claim on every node an OSHI user attaches.
+     */
+    fun loraAdoptIfFactoryDefault(): Boolean {
+        val node = loraRoster.myNodeNumOrZero()
+        if (node == 0u) return false
+        val mine = loraOnlineNodeList().firstOrNull { it.num == node }
+        val current = mine?.name?.trim().orEmpty()
+        val looksFactory = current.isEmpty() ||
+            Regex("^Meshtastic\\s+[0-9a-fA-F]{4}$").matches(current) ||
+            Regex("^OSHI Mesh [0-9A-F]{4}$").matches(current)
+        if (!looksFactory) {
+            onLoRa("lora: \"$current\" is a name somebody chose — leaving it alone")
+            return false
+        }
+        val adopted = com.oshi.desktop.lora.LoRaAdmin.adoptedName(node)
+        return loraSetOwner(adopted, "OSHI")
+    }
+
+    /** Clear the node's stored fixed position — the undo for [loraSetFixedPosition]. */
+    fun loraClearFixedPosition(): Boolean =
+        sendAdmin(com.oshi.desktop.lora.LoRaAdmin.removeFixedPositionFrame(), "no fixed position")
+
+    private fun sendAdmin(frame: ByteArray, what: String): Boolean {
+        val link = lora
+        if (link == null || !link.isConnected) {
+            onLoRa("lora: no radio attached")
+            return false
+        }
+        val me = loraRoster.myNodeNumOrZero()
+        if (me == 0u) {
+            onLoRa("lora: the radio has not said which node it is yet — wait for the config burst")
+            return false
+        }
+        val packet = com.oshi.desktop.lora.LoRaProto.toRadioPacket(
+            to = me,
+            portnum = com.oshi.desktop.lora.LoRaAdmin.PORT_ADMIN,
+            payload = frame,
+            // A real unicast to our own node, so an ack is meaningful here — unlike the
+            // broadcasts every other lane uses.
+            wantAck = true,
+            packetId = com.oshi.desktop.lora.LoRaProto.randomPacketId(),
+        )
+        val wrote = link.send(packet)
+        onLoRa(if (wrote) "asked the radio to set $what" else "lora: write failed")
+        return wrote
+    }
+
+    /** USB serial devices visible right now — what a picker offers. */
+    fun loraSerialDevices(): List<com.oshi.desktop.lora.LoRaSerial.Device> =
+        com.oshi.desktop.lora.LoRaSerial.listDevices()
+
+    /**
+     * Transmit stock Meshtastic text on portnum 1 — the lane every Meshtastic client reads.
+     *
+     * This is the send half of the interop lane, and the counterpart of iOS's
+     * `MeshtasticManager.sendText` (`OSHI/MeshtasticManager.swift:556`). Until this existed
+     * the desktop's radio was receive-only and `/lora` said so.
+     *
+     * **It is PLAINTEXT on a channel whose key is public**, which is what interop means:
+     * the point is that a stock Meshtastic user with no OSHI can read it. So it is
+     * deliberately NOT reachable from a conversation's composer — the caller is a person
+     * who asked for a radio broadcast, not someone sending a message to a contact. The same
+     * asymmetry the receive side already has: inbound interop text is quarantined under
+     * `lora!<nodehex>` and flagged unverified, and nothing about sending changes that.
+     *
+     * Not chunked, by the same rule as iOS: a stock client has no reassembler, so a long
+     * message would arrive as fragments. Over the limit is refused, not truncated — a
+     * silently cut message is worse than a refused one.
+     *
+     * @param to a node number, or null to broadcast.
+     * @return false when there is no attached radio or the text does not fit.
+     */
+    fun loraSendInteropText(text: String, to: UInt? = null): Boolean {
+        // __DESKTOP_LORA_REFUSAL_2026_10_29__ A muted radio or one with no region accepts
+        // every frame and transmits none; this used to report that as sent.
+        if (loraRefuseSend() != null) return false
+        val link = lora
+        if (link == null || !link.isConnected) {
+            onLoRa("lora: no radio attached")
+            return false
+        }
+        val bytes = text.toByteArray(Charsets.UTF_8)
+        if (bytes.isEmpty()) return false
+        if (bytes.size > com.oshi.desktop.lora.LoRaProto.INTEROP_TEXT_LIMIT) {
+            onLoRa("lora: text is ${bytes.size} bytes, the interop limit is ${com.oshi.desktop.lora.LoRaProto.INTEROP_TEXT_LIMIT}")
+            return false
+        }
+        val target = to ?: com.oshi.desktop.lora.LoRaProto.BROADCAST_ADDR
+        // want_ack only on a unicast: Meshtastic does not acknowledge a broadcast, so
+        // asking raises a flag nobody answers (LoRaProto.toRadioPacket's doc).
+        val packet = com.oshi.desktop.lora.LoRaProto.toRadioPacket(
+            to = target,
+            portnum = com.oshi.desktop.lora.LoRaProto.PORT_TEXT,
+            payload = bytes,
+            wantAck = target != com.oshi.desktop.lora.LoRaProto.BROADCAST_ADDR,
+            packetId = com.oshi.desktop.lora.LoRaProto.randomPacketId(),
+        )
+        val wrote = link.send(packet)
+        // "Wrote" is bytes leaving this process, never delivery — LoRaLink.send says so and
+        // the wording here must not quietly upgrade it.
+        onLoRa(
+            if (wrote) "interop text handed to the radio (${bytes.size}B${if (to == null) ", broadcast" else ", node $target"}) — PLAINTEXT, not encrypted"
+            else "lora: write failed"
+        )
+        return wrote
+    }
+
+    /**
+     * __DESKTOP_LORA_BEACON_2026_10_28__ Put THIS machine's stated position on the air —
+     * the send half of the position lane this client could only receive.
+     *
+     * A public, cleartext broadcast on the default LongFast channel, exactly as on the
+     * phones, and the same consequence: every radio in range hears it, up to tens of
+     * kilometres, including people the owner has never met and cannot enumerate. The
+     * difference here is only the SOURCE — a position its owner typed rather than one a
+     * sensor measured, which is Meshtastic's own `fixed_position` case for a node with no
+     * GPS. See `LoRaFixedPosition`.
+     *
+     * No policy in this function. When to beacon is [com.oshi.desktop.lora.LoRaPositionBeacon]'s
+     * decision — one function shared, byte for byte, with both phones — and this is only
+     * the hands. The 0/0 and range guards are repeated anyway, because a sender that trusts
+     * its caller is one refactor away from broadcasting the Gulf of Guinea.
+     */
+    fun loraBroadcastPosition(latitude: Double, longitude: Double): Boolean {
+        if (loraRefuseSend() != null) return false
+        val link = lora
+        if (link == null || !link.isConnected) {
+            onLoRa("lora: no radio attached")
+            return false
+        }
+        if (latitude == 0.0 && longitude == 0.0) return false
+        if (latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) return false
+        val payload = com.oshi.desktop.lora.LoRaProto.positionPayload(
+            latitude, longitude, System.currentTimeMillis() / 1000,
+        )
+        val packet = com.oshi.desktop.lora.LoRaProto.toRadioPacket(
+            to = com.oshi.desktop.lora.LoRaProto.BROADCAST_ADDR,
+            portnum = com.oshi.desktop.lora.LoRaProto.PORT_POSITION,
+            payload = payload,
+            // Never on a broadcast — Meshtastic does not acknowledge one.
+            wantAck = false,
+            packetId = com.oshi.desktop.lora.LoRaProto.randomPacketId(),
+        )
+        val wrote = link.send(packet)
+        // "Handed to the radio" is bytes leaving this process, not delivery. LoRaLink.send
+        // says so and this wording must not quietly upgrade it.
+        onLoRa(
+            if (wrote) "position %.5f, %.5f handed to the radio → ALL — PLAINTEXT, not encrypted"
+                .format(latitude, longitude)
+            else "lora: position write failed",
+        )
+        return wrote
+    }
+
+    /**
+     * One pass of the position beacon, driven by the caller's existing one-second tick.
+     *
+     * Returns the decision so a surface can say why nothing went out; sends nothing at all
+     * unless the switch is on, a position is stored and a radio is attached.
+     */
+    fun loraPositionBeaconTick(nowMs: Long = System.currentTimeMillis()):
+        com.oshi.desktop.lora.LoRaPositionBeacon.Decision =
+        com.oshi.desktop.lora.LoRaPositionBeacon.tick(
+            radioReady = lora?.isConnected == true,
+            nowMs = nowMs,
+            // __DESKTOP_LORA_BEACON_FIXED_2026_10_28__ The ADMIN path, not
+            // [loraBroadcastPosition]. A POSITION_APP packet from a client to the broadcast
+            // address is accepted by the radio and does not reach other nodes — measured,
+            // see `LoRaAdmin.setFixedPositionFrame`. Telling the node where it is and
+            // letting its PositionModule announce is what Meshtastic's own clients do.
+            //
+            // The policy still rate-limits, and that is no longer about airtime: this writes
+            // the node's CONFIGURATION, so the 15-minute floor keeps a UI tick from
+            // rewriting flash fifty times a minute. The radio owns the broadcast schedule.
+            send = ::loraSetFixedPosition,
+        )
+
     fun loraDetach() {
         lora?.stop()
         lora = null
         loraRoster.clear()
+        // __DESKTOP_LORA_BEACON_2026_10_28__ Forget what was last beaconed. Without this,
+        // detaching and re-attaching leaves `lastSentAtMs` set, so the first beacon of the
+        // new session is suppressed as TOO_SOON — and with a fixed position, which never
+        // moves, the node would then say nothing until the one-hour ceiling fired.
+        com.oshi.desktop.lora.LoRaPositionBeacon.reset()
+        // What the OLD node said about itself is not true of the next one.
+        loraRadioState.clear()
+        loraTraffic.clear()
     }
 
     /**
@@ -2077,17 +3069,146 @@ class OshiClient(
                 if (outcome != MessageStore.AppendOutcome.DUPLICATE) onMessage(stored)
                 onLoRa("interop text from node ${d.nodeNum} (UNVERIFIED — not authenticated): ${d.text.take(200)}")
             }
-            is com.oshi.desktop.lora.LoRaInbound.Decision.Envelope -> {
-                // Reported, not opened, and not stored. See loraAttach's doc.
-                onLoRa(
-                    "OSHI envelope from node ${d.nodeNum} — UNREADABLE by this client " +
-                        "(legacy Double Ratchet, PARITY.md rows 0.16 / 0.27)"
-                )
-            }
+            is com.oshi.desktop.lora.LoRaInbound.Decision.Envelope -> openLoRaEnvelope(d)
             is com.oshi.desktop.lora.LoRaInbound.Decision.Routing ->
                 onLoRa("routing ack from node ${d.nodeNum}")
             com.oshi.desktop.lora.LoRaInbound.Decision.Ignored -> {}
         }
+    }
+
+    /**
+     * An OSHI envelope off the radio — opened, filed, and used as PROOF of who sent it.
+     *
+     * __RATCHET_IS_SHARED_SOURCE_2026_10_28__ This branch used to be one log line saying
+     * the message could not be read.
+     *
+     * ============================================================ THE BINDING IS MADE HERE
+     * AND NOWHERE ELSE
+     *
+     * A node number is a firmware-assigned integer on a channel whose key is public, so it
+     * proves nothing by itself. The ONE moment it becomes evidence is the moment an
+     * envelope from that node DECRYPTS: only the holder of the sender's identity key could
+     * have produced ciphertext this session opens. Android marks the same spot
+     * (`ratchetProofCounter++`, "the ONLY place cryptographic proof of the sender exists").
+     *
+     * So [com.oshi.desktop.lora.LoRaNodeBindings.bind] is called AFTER the decrypt and
+     * never before, and never on the interop lane. Its own conflict rules then apply — one
+     * node claiming two identities, or two nodes claiming one, marks both ambiguous rather
+     * than picking a winner.
+     *
+     * ============================================================ FAILURES ARE NOT ALIKE
+     *
+     * A replay is not a desync. A mesh floods and retries, so a second copy of a message is
+     * routine; treating it as a broken session would throw away a session that is working
+     * and lose the NEXT message — the "one message in two" both phones carry a named fix
+     * for. `RatchetFailurePolicy` is the shared rule and it is consulted rather than
+     * re-derived.
+     */
+    private fun openLoRaEnvelope(d: com.oshi.desktop.lora.LoRaInbound.Decision.Envelope) {
+        openOshiEnvelope(d.message, transport = "lora", nodeNum = d.nodeNum) { onLoRa(it) }
+    }
+
+    /**
+     * __MESH_IS_NO_LONGER_OPAQUE_2026_10_28__ An OSHI envelope off ANY offline transport.
+     *
+     * Extracted from the LoRa path because the LAN mesh carries the SAME `SecureMessage`
+     * JSON — Android builds it in `crossPlatformMeshSecureMessage` and iOS in
+     * `meshWireSafe()`, and `LoRaSecureMessage` already parses that shape. Two copies of
+     * this would be two places to forget the proof rule below.
+     *
+     * @param nodeNum the LoRa node this arrived on, or null on the LAN mesh, where there is
+     *   no node number to bind and nothing to learn from one.
+     */
+    private fun openOshiEnvelope(
+        msg: com.oshi.desktop.lora.LoRaSecureMessage,
+        transport: String,
+        nodeNum: UInt?,
+        report: (String) -> Unit,
+    ) {
+        // One spelling, for the same reason LegacyRatchetEnvelope canonicalises: this key
+        // is the conversation id, so a base64url spelling off the wire would open a SECOND
+        // thread with the same person — the very complaint the manual link exists to fix.
+        val routedSender = com.oshi.desktop.crypto.LegacyRatchetEnvelope.canonicalKey(msg.senderPublicKey)
+        if (routedSender.isEmpty()) {
+            report("OSHI envelope carries no sender key — dropped")
+            return
+        }
+        // The recipient filter IS the addressing on these lanes: both broadcast, so every
+        // client in range sees every envelope and each decides whether it is the addressee.
+        if (!com.oshi.desktop.lora.LoRaSecureMessage.isAddressedToMe(msg, address)) return
+        val envelopeJson = org.json.JSONObject()
+            .put("ciphertext", msg.encryptedContent.ciphertext)
+            .put("signature", msg.encryptedContent.signature)
+            .put("senderPublicKey", msg.encryptedContent.senderPublicKey)
+
+        val plaintext = try {
+            legacyEnvelope.open(envelopeJson, routedSender)
+        } catch (e: com.oshi.desktop.crypto.LegacyRatchetEnvelope.ImpersonationException) {
+            // Loud, never silent: this is a forgery attempt, not a glitch.
+            log("$transport: REFUSED an envelope: ${e.message}")
+            report("REFUSED an OSHI envelope: ${e.message}")
+            return
+        } catch (e: Exception) {
+            val replay = !com.oshi.messenger.network.encryption.RatchetFailurePolicy.provesSessionIsBroken(e)
+            report(
+                if (replay) "an OSHI envelope was a duplicate the mesh re-flooded — ignored"
+                else "an OSHI envelope did not decrypt: ${e.message}"
+            )
+            return
+        }
+
+        // Persist BEFORE anything else observable: the receiving chain has advanced.
+        runCatching { ratchetSessionStore.save(legacyEnvelope.ratchet) }
+            .onFailure { log("$transport: ratchet state NOT saved after receive: ${it.message}") }
+
+        // PROOF, and only now — and only where there is a node number to bind. The LAN mesh
+        // has none: its sender key rides the envelope, so there is nothing to learn.
+        if (nodeNum != null) {
+            val learned = loraBindings.bind(nodeNum, routedSender, System.currentTimeMillis())
+            if (learned == com.oshi.desktop.lora.LoRaNodeBindings.LearnResult.BOUND) {
+                runCatching { loraBindingStore.save(loraBindings.snapshot()) }
+            }
+        }
+
+        // __DESKTOP_LORA_MEDIA_2026_10_28__ A decrypted payload may BE media: both phones
+        // put it inside the ciphertext as a JSON wrapper rather than in the envelope's own
+        // fields. Reading it here is what stops a photo arriving as a line of base64.
+        val media = com.oshi.desktop.lora.LoRaMediaWire.decode(plaintext)
+        val mediaRef = media?.let { m ->
+            runCatching {
+                // Same naming and the same SEALING WRITE as every other inbound media path:
+                // `sealingStream` makes the file 0600 and encrypts as it writes, so the
+                // plaintext never lands on disk even briefly.
+                val safe = (m.fileName ?: "lora-media")
+                    .replace(Regex("[^A-Za-z0-9._-]"), "_").take(120).ifEmpty { "file" }
+                val out = File(mediaDir, "${msg.id.take(8)}-$safe")
+                mediaVault.sealingStream(out).use { it.write(m.bytes) }
+                out.absolutePath
+            }.onFailure { report("media arrived but could not be stored: ${it.message}") }
+                .getOrNull()
+        }
+
+        val stored = Message(
+            id = msg.id.ifEmpty { UUID.randomUUID().toString() },
+            // The identity, not `lora!<nodehex>`: this one IS authenticated, so it belongs
+            // in the sender's conversation beside everything else they have sent.
+            conversationId = routedSender,
+            senderAddress = routedSender,
+            recipientAddress = address,
+            fromMe = false,
+            // A media row carries no text: the wrapper JSON is not something to render.
+            content = if (mediaRef != null) null else plaintext,
+            mediaType = if (mediaRef != null) media?.type else null,
+            mediaRef = mediaRef,
+            sentAtMs = msg.unixMillis ?: System.currentTimeMillis(),
+            sentAtSource = if (msg.unixMillis != null) TimestampSource.APPLE_EPOCH_SECONDS
+            else TimestampSource.LOCAL_CLOCK,
+            deliveryStatus = DeliveryStatus.DELIVERED,
+            transport = transport,
+        )
+        val outcome = messages.append(stored)
+        if (outcome != MessageStore.AppendOutcome.DUPLICATE) onMessage(stored)
+        report("OSHI message decrypted over $transport (${plaintext.length} chars) — authenticated by the ratchet")
     }
 
     // ------------------------------------------------------ row 0.25, scheduled
@@ -2341,6 +3462,133 @@ class OshiClient(
                 // client. Stored as sent — the bubble unwraps it and draws the quote — and
                 // treated like prose: receipt, notification, profile request.
                 if (com.oshi.desktop.msg.ReplyEnvelope.unwrap(text) != null) {
+                    storeInbound(inbound, text, suppressNotification = false)
+                    if (deliveryReceiptsEnabled) {
+                        sendPlaintext(inbound.from, DeliveryReceipt.encode(inbound.msgId), storeRow = false)
+                    }
+                    maybeRequestProfile(inbound.from)
+                    return
+                }
+                // 6b. __DESKTOP_POLLS_2026_10_29__ Polls — the two sentinels this client
+                //     has carried in its catalog since 2026-10-27 and acted on never.
+                //
+                //     Being in the catalog is what sent them HERE instead of into step 8's
+                //     prose, and step 7 below then logged and dropped them. So an iPhone's
+                //     poll did not arrive mangled; it did not arrive. These two branches are
+                //     the whole of the difference.
+                //
+                //     A VOTE IS SILENT AND A POLL IS A ROW, which is both phones' own
+                //     classification (`Kind.SILENT` vs `Kind.RENDERED`) and not a choice made
+                //     here: a ballot is not an event to notify about, and the poll card is.
+                if (PollPayload.isVote(text)) {
+                    contacts.seen(inbound.from, inbound.ts)
+                    val vote = PollPayload.decodeVote(text)
+                    if (vote == null) {
+                        log("client: unparseable \uD83D\uDCCAPOLL_VOTE\uD83D\uDCCA from ${inbound.from.take(12)}…")
+                    } else {
+                        // THE VOTER IS THE AUTHENTICATED SENDER, never a field in the JSON —
+                        // the payload carries no voter precisely so that it cannot lie about
+                        // one. `inbound.from` is the identity whose ratchet produced this
+                        // plaintext, which is the same rule the LoRa node binding follows.
+                        val changed = pollBallots.record(vote.pollId, inbound.from, vote.ballot)
+                        // A duplicate is the COMMON case (the mesh redelivers the same vote
+                        // routinely), so it must not look like news — and it does not: the
+                        // repaint below comes from `onControl`, whose handler ends in
+                        // `publish()`, and a `record` that returned false changed nothing for
+                        // it to draw. Logged at the boundary so a vote that lost on timestamp
+                        // is distinguishable from one that never arrived.
+                        if (!changed) log("client: duplicate or stale ballot for poll ${vote.pollId.take(8)}…")
+                    }
+                    onControl(inbound.from, event, outcome)
+                    return
+                }
+                // 6d. __DESKTOP_PROFILE_LINKS_2026_10_29__ A contact sharing or
+                //     withdrawing their profile links. SILENT on both phones — somebody
+                //     adding a GitHub URL is not an event — so this never stores a row and
+                //     never notifies, and the only visible effect is in their profile.
+                if (com.oshi.desktop.msg.ProfileLinksPayload.isVisibilityMessage(text)) {
+                    contacts.seen(inbound.from, inbound.ts)
+                    val v = com.oshi.desktop.msg.ProfileLinksPayload.decode(text)
+                    if (v == null) {
+                        log("client: unparseable \uD83D\uDD17LINKS_VISIBILITY\uD83D\uDD17 from ${inbound.from.take(12)}…")
+                    } else if (!contactLinks.apply(inbound.from, v)) {
+                        log("client: profile links from ${inbound.from.take(12)}… were unchanged")
+                    }
+                    onControl(inbound.from, event, outcome)
+                    return
+                }
+                // 6c. __DESKTOP_OFFLINE_ONLY_2026_10_29__ The third drifted sentinel, and
+                //     the one that is a PRIVACY PROMISE: a peer asking this conversation to
+                //     stop using the relay. It fell to step 7 and was dropped, while the
+                //     asking phone's UI waited for a confirmation that was never coming.
+                if (com.oshi.desktop.msg.OfflineOnlyPayload.isRequest(text)) {
+                    contacts.seen(inbound.from, inbound.ts)
+                    val req = com.oshi.desktop.msg.OfflineOnlyPayload.decode(text)
+                    if (req == null) {
+                        log("client: unparseable \uD83D\uDD12OFFLINE_ONLY\uD83D\uDD12 from ${inbound.from.take(12)}…")
+                        onControl(inbound.from, event, outcome)
+                        return
+                    }
+                    if (req.isAck) {
+                        // An ACK is never echoed — echoing one is the ping-pong the `ack`
+                        // field exists to stop. It is counted only if it answers the request
+                        // we are actually waiting on, matched on state AND stamp.
+                        if (offlineOnly.answersCurrentRequest(req, inbound.from)) {
+                            offlineOnly.noteConfirmation(inbound.from, inbound.from)
+                        } else {
+                            log("client: a stale offline-only ack from ${inbound.from.take(12)}… was not counted")
+                        }
+                        onControl(inbound.from, event, outcome)
+                        return
+                    }
+                    // Honour it locally — that is the whole point of the request — and answer
+                    // so their side can show us as agreed. The ack is attempted even when
+                    // nothing changed (a redelivery): an ack that crosses with a duplicate is
+                    // cheap, and a peer waiting for one is not.
+                    offlineOnly.applyIncoming(req, inbound.from)
+                    runCatching { sendPlaintext(inbound.from, req.acknowledgement().encode(), storeRow = false) }
+                    // THE REQUEST IS A ROW, THE ACK IS NOT, and that asymmetry is iOS's:
+                    // `handleOfflineOnlyPayload` returns false for a request so it renders
+                    // and true for an ack so it is swallowed, because *"seeing when a
+                    // conversation was taken off the relay, and by whom, is the point of it
+                    // being rendered at all"* — while a rendered ack would print the same
+                    // sentence a second time in the asker's thread.
+                    //
+                    // Stored as the LOCALISED sentence, not the payload: the catalogs already
+                    // carry `offline_only.summary.{on,off}` in every language because they are
+                    // extracted from the iOS tree, so there is no string to invent and nothing
+                    // to print raw.
+                    storeInbound(
+                        inbound,
+                        // Each key sits INSIDE its own `t(...)`: `CatalogAuditTest`'s suspect
+                        // scan looks for a literal adjacent to a registered accessor, and
+                        // `t(if (x) "a" else "b")` hides both literals from it. The audit
+                        // caught this, which is the blind spot its TRAP 3 is named for.
+                        "\uD83D\uDD12 " + (if (req.on) t("offline_only.summary.on") else t("offline_only.summary.off")),
+                        // NOT suppressed, and this was wrong first: `suppressNotification`
+                        // skips `onMessage` ENTIRELY (`:3558`), not just the alert, so the
+                        // running window never learned the row existed and the switch in its
+                        // header did not flip until something else repainted. iOS lets the
+                        // request fall through to ordinary handling for the same reason it
+                        // renders at all — a conversation being taken off the relay is news.
+                        suppressNotification = false,
+                    )
+                    return
+                }
+                if (PollPayload.isPoll(text)) {
+                    val poll = PollPayload.decodePoll(text)
+                    if (poll == null) {
+                        // A malformed poll is dropped rather than shown: there is no partial
+                        // poll worth drawing, and `decodePoll` already refuses one with
+                        // fewer than two surviving options.
+                        log("client: unparseable \uD83D\uDCCAPOLL\uD83D\uDCCA from ${inbound.from.take(12)}…")
+                        onControl(inbound.from, event, outcome)
+                        return
+                    }
+                    // Stored with the payload AS IT ARRIVED, not with a rendered summary.
+                    // The bubble re-decodes it every draw, so a vote arriving later changes
+                    // the bars without the row being rewritten — which is the property that
+                    // keeps the definition immutable.
                     storeInbound(inbound, text, suppressNotification = false)
                     if (deliveryReceiptsEnabled) {
                         sendPlaintext(inbound.from, DeliveryReceipt.encode(inbound.msgId), storeRow = false)
@@ -2644,8 +3892,33 @@ class OshiClient(
         key: V2FileKeyMessage,
         videoNote: com.oshi.desktop.media.VideoNoteWire.Meta? = null,
     ) {
+        // __DESKTOP_TIMED_REVEAL_2026_10_29__ A TIMED PHOTO REVEAL, which this client parsed
+        // and ignored.
+        //
+        // iOS sends such a photo as N standalone JPEGs ("layers"), smallest first: layer 0
+        // arrives at once and the relay holds the rest on a schedule, so the picture SHARPENS.
+        // The four fields that say so (`revealId`, `revealLayerIndex`, `revealLayerCount`,
+        // `revealTotalMs`) have been in `V2FileKeyMessage` all along — the desktop COMPILES
+        // that file as shared source, so it has been parsing them for free and acting on
+        // none. The result: the same photograph appeared in the thread once per layer, each
+        // copy sharper than the last.
+        //
+        // The security argument is worth repeating because it constrains the fix: a small
+        // layer is small because it was DOWNSCALED AND RE-ENCODED, so a 48px JPEG contains
+        // 48px of information and nothing more. Rendering a blurred copy of the full image
+        // instead would be cosmetic — the whole picture would already be on this disk.
+        val reveal = RevealLayer.of(key)
+        if (reveal != null && reveal.layerIndex > 0) {
+            applyRevealLayer(inbound, key, reveal)
+            return
+        }
+
         val safeName = key.filename.replace(Regex("[^A-Za-z0-9._-]"), "_").take(120).ifEmpty { "file" }
-        val out = File(mediaDir, "${inbound.msgId.take(8)}-$safeName")
+        // Layer 0 is the CARRIER and must be findable by the layers that follow, so its row id
+        // is the `revealId` rather than the envelope's — which is exactly what iOS does
+        // (`messages.firstIndex(where: { $0.id == reveal.revealId })`).
+        val rowId = reveal?.revealId ?: inbound.msgId
+        val out = File(mediaDir, "${rowId.take(8)}-$safeName")
         val written = blobs.downloadAndDecryptToFile(
             blobId = key.blobId,
             chunkCount = key.chunkCount,
@@ -2692,7 +3965,7 @@ class OshiClient(
         }
 
         val stored = Message(
-            id = inbound.msgId,
+            id = rowId,
             conversationId = inbound.from,
             senderAddress = inbound.from,
             recipientAddress = address,
@@ -2721,6 +3994,71 @@ class OshiClient(
         if (outcome != MessageStore.AppendOutcome.DUPLICATE) onMessage(stored)
         if (deliveryReceiptsEnabled) {
             sendPlaintext(inbound.from, DeliveryReceipt.encode(inbound.msgId), storeRow = false)
+        }
+    }
+
+    /**
+     * __DESKTOP_TIMED_REVEAL_2026_10_29__ A later layer of a timed reveal: the same photo,
+     * sharper, replacing the bytes of the row layer 0 created.
+     *
+     * Three rules, all iOS's:
+     *  - **No new row.** The carrier is found by `revealId` and its media is replaced.
+     *  - **A layer with no carrier is DROPPED**, not stored. iOS's words: rather than
+     *    *"fabriquer une bulle orpheline qui montrerait une image floue sans fin"* — an
+     *    orphan bubble showing a blurry image for ever, because the sharper layers have
+     *    nowhere to land.
+     *  - **No notification and no receipt.** Layer 0 already raised both; a photo sharpening
+     *    is not four new messages, and alerting per layer would make the feature hostile.
+     */
+    private fun applyRevealLayer(inbound: V2Inbound, key: V2FileKeyMessage, reveal: RevealLayer) {
+        // The carrier first, BEFORE the download: a layer whose row is gone is bytes we have
+        // no use for, and fetching them would cost the airtime and the disk for nothing.
+        if (messages.message(inbound.from, reveal.revealId) == null) {
+            log("client: reveal layer ${reveal.layerIndex} with no carrier message — dropped")
+            return
+        }
+        val safeName = key.filename.replace(Regex("[^A-Za-z0-9._-]"), "_").take(120).ifEmpty { "file" }
+        val out = File(mediaDir, "${reveal.revealId.take(8)}-L${reveal.layerIndex}-$safeName")
+        val written = blobs.downloadAndDecryptToFile(
+            blobId = key.blobId,
+            chunkCount = key.chunkCount,
+            fileKey = key.fileKey,
+            fileNonce = key.fileNonce,
+            manifest = key.manifest,
+            out = out,
+            openSink = mediaVault::sealingStream,
+        )
+        if (written == null) {
+            log("client: reveal layer ${reveal.layerIndex} could not be fetched or decrypted")
+            return
+        }
+        val updated = messages.replaceMedia(inbound.from, reveal.revealId, out.absolutePath)
+        if (updated == null) {
+            log("client: reveal layer ${reveal.layerIndex} could not be applied (row gone or hidden)")
+            return
+        }
+        contacts.seen(inbound.from, inbound.ts)
+        log("client: reveal layer ${reveal.layerIndex}/${reveal.layerCount - 1} applied")
+    }
+
+    /**
+     * The four reveal fields, validated together — iOS's `RevealWirePlan`.
+     *
+     * Validated as a GROUP because they are only meaningful together: an index without a
+     * count cannot say whether it is the last layer, and a count of 1 is not a reveal. The
+     * bounds are iOS's (`count >= 2, count <= 64`): 64 layers of one photograph is already
+     * absurd, and the ceiling is what stops a peer-chosen number deciding how many blobs this
+     * client will fetch for one message.
+     */
+    private data class RevealLayer(val revealId: String, val layerIndex: Int, val layerCount: Int) {
+        companion object {
+            fun of(key: V2FileKeyMessage): RevealLayer? {
+                val id = key.revealId?.takeIf { it.isNotBlank() } ?: return null
+                val index = key.revealLayerIndex ?: return null
+                val count = key.revealLayerCount ?: return null
+                if (index < 0 || count < 2 || count > 64 || index >= count) return null
+                return RevealLayer(id, index, count)
+            }
         }
     }
 
@@ -2865,6 +4203,164 @@ class OshiClient(
         groups.put(updated)
         broadcastGroupUpdate(updated, GroupUpdateWire.encodeDefinitionFramed(updated))
         return updated
+    }
+
+    /**
+     * __DESKTOP_PROFILE_LINKS_2026_10_29__ Share our own links with a contact, or withdraw
+     * them.
+     *
+     * Withdrawing sends `visible:false` and NO links, which is iOS's own encoder
+     * (`links: visible ? myLinks : nil`) and the only sane shape: a withdrawal must not hand
+     * over the very strings it is withdrawing.
+     *
+     * What it cannot do is take back what was already delivered, and the caller should say so
+     * rather than imply otherwise — the peer holds those strings on their disk. This asks
+     * them to stop showing them.
+     */
+    fun setProfileLinksVisible(
+        peerAddress: String,
+        visible: Boolean,
+        links: com.oshi.desktop.msg.ProfileLinksPayload.Links,
+    ): SendOutcome = sendPlaintext(
+        peerAddress,
+        com.oshi.desktop.msg.ProfileLinksPayload.encode(visible, links),
+        storeRow = false,
+    )
+
+    /**
+     * __DESKTOP_OFFLINE_ONLY_2026_10_29__ Restrict a conversation to the mesh and the radio,
+     * or lift the restriction.
+     *
+     * **The local state is written FIRST and unconditionally**, and that order is the whole
+     * feature rather than a convenience. The promise this switch makes is that nothing this
+     * device sends over that conversation touches the relay; if the write waited on the
+     * request reaching the peer, then a failed send would leave the restriction off while the
+     * person believed it was on. A request nobody received is a weaker promise than intended;
+     * a restriction nobody applied is a broken one.
+     *
+     * The peer is then ASKED. There is no way to make their client refuse the internet, so
+     * what comes back is a confirmation to display — [OfflineOnlyStore.confirmedCount] — and
+     * a count below the other-participant count is the honest state, not a bug.
+     *
+     * Note the request itself travels over whatever lane is still available, which after
+     * turning the switch ON excludes the relay for this conversation. That is correct and
+     * worth stating: with no radio and no mesh peer, turning it on means the PEER may never
+     * hear about it, and the local restriction still holds. The switch protects this device
+     * first and negotiates second.
+     */
+    fun setOfflineOnly(peerAddress: String, on: Boolean): SendOutcome {
+        val atUnix = System.currentTimeMillis() / 1000.0
+        // Local first. See the note above.
+        offlineOnly.set(on, peerAddress, atUnix)
+        val req = com.oshi.desktop.msg.OfflineOnlyPayload.Request(on = on, atUnix = atUnix)
+        return sendPlaintext(peerAddress, req.encode(), storeRow = false)
+    }
+
+    /**
+     * __DESKTOP_POLLS_2026_10_29__ Send a poll into a 1:1 conversation.
+     *
+     * [PollPayload.sanitize] is the single definition of "sendable", so this refuses exactly
+     * what the composer would refuse — iOS's reason for putting it in one place is that a
+     * Send button and the wire must never disagree.
+     *
+     * The poll is stored locally as the payload itself, exactly as the inbound path stores
+     * one: the bubble decodes it on every draw, which is what lets a ballot arriving later
+     * move the bars without the row being rewritten.
+     *
+     * @return null when the question or the options are not sendable — not a transport
+     *   failure, and distinguished from one so a caller can say which happened.
+     */
+    fun sendPoll(
+        peerAddress: String,
+        question: String,
+        options: List<String>,
+        allowsMultipleAnswers: Boolean = false,
+        isAnonymous: Boolean = false,
+        closesAtUnix: Double? = null,
+    ): SendOutcome? {
+        val (q, opts) = PollPayload.sanitize(question, options) ?: return null
+        val poll = PollPayload.Poll(
+            id = UUID.randomUUID().toString(),
+            question = q,
+            options = opts,
+            allowsMultipleAnswers = allowsMultipleAnswers,
+            isAnonymous = isAnonymous,
+            // UNIX SECONDS, as a Double. The whole payload uses this epoch and iOS carries a
+            // comment with the 978 307 200 s trap in it; a millisecond value here would read
+            // as a poll created in the year 56 000.
+            createdAtUnix = System.currentTimeMillis() / 1000.0,
+            closesAtUnix = closesAtUnix,
+            creatorPublicKey = address,
+        )
+        val wire = poll.encode()
+        val outcome = sendPlaintext(peerAddress, wire, storeRow = true)
+        return outcome
+    }
+
+    /**
+     * Cast or change our ballot on a poll, and tell the peer.
+     *
+     * [picks] EMPTY is a retraction, not a no-op — both phones treat it as a real ballot that
+     * has to beat the earlier one on timestamp, so it is sent rather than swallowed.
+     *
+     * Applied locally whatever the network said, which is [reactToMessage]'s rule and both
+     * phones' order: a ballot the user pressed is local state first, and the peer converges
+     * on the next successful send. The local record goes through the SAME [PollTally.record]
+     * an inbound vote uses, so our own ballot obeys the same later-wins rule as everyone
+     * else's — a separate "mine" field would be a second source of truth to disagree with.
+     */
+    fun votePoll(peerAddress: String, pollId: String, picks: List<Int>): SendOutcome {
+        if (pollId.isEmpty()) return SendOutcome.NO_V2_PATH
+        val atUnix = System.currentTimeMillis() / 1000.0
+        val vote = PollPayload.Vote(pollId = pollId, picks = picks.distinct().sorted(), atUnix = atUnix)
+        val outcome = sendPlaintext(peerAddress, vote.encode(), storeRow = false)
+        if (outcome != SendOutcome.BLOCKED) pollBallots.record(pollId, address, vote.ballot)
+        return outcome
+    }
+
+    /**
+     * __DESKTOP_DIRECT_PIN_2026_10_29__ Pin ([messageId]) or unpin (null) a message in a 1:1
+     * conversation — iOS `pinMessageAndSync` / `unpinMessageAndSync`
+     * (`MessageManager.swift:9000-9012`), Android `MessageRepository.togglePinMessage`
+     * (`:7399`). This is the SYNCING variant because it is the only one either phone's UI
+     * calls: `ChatView.swift:5675-5677` wires the context menu straight to the *AndSync*
+     * pair, and a pin that stayed on this machine would disagree with the peer's banner for
+     * ever with nothing to resolve it.
+     *
+     * ## Three places this deliberately differs from [setGroupPin]
+     *
+     *  - **No permission check.** A group pin needs `canEditGroupInfo`; a 1:1 has no admin,
+     *    and both phones let either party pin. [PinnedMessageStore] has the receivers.
+     *  - **No ownership check.** Unlike [editMessage] and [deleteMessage], which refuse a
+     *    target that is not ours (C-MSG-4), a pin may name the PEER's message — that is the
+     *    ordinary case, since what you want to keep in view is usually something they said.
+     *  - **No id uppercasing.** `setGroupPin` normalises to upper case because the group
+     *    definition's `pinnedMessageId` comes from `UUID.uuidString`. Here the id stays as
+     *    this client stored it, and every comparison is case-insensitive instead, which is
+     *    what both phones do for a 1:1.
+     *
+     * Local state is written whatever the network said, matching [reactToMessage]'s rule and
+     * both phones' order (`togglePinMessage` writes the map before it sends): a pin the user
+     * pressed is local state first, and the peer converges on the next successful send. A
+     * BLOCKED send is the one case that changes nothing.
+     */
+    fun pinDirectMessage(peerAddress: String, messageId: String?): SendOutcome {
+        val target = messageId?.let {
+            messages.message(peerAddress, it) ?: return SendOutcome.NO_V2_PATH
+        }
+        // Unpin names the message being unpinned, as both phones' payloads do; with no pin
+        // on record there is nothing to name and nothing to tell the peer.
+        val named = target?.id ?: pinnedMessages.get(peerAddress) ?: return SendOutcome.NO_V2_PATH
+        val payload = MessageActionPayload.encode(
+            actionType = if (messageId == null) MessageActionPayload.ActionType.UNPIN_MESSAGE
+            else MessageActionPayload.ActionType.PIN_MESSAGE,
+            targetMessageId = named,
+            newContent = null,
+            atUnixMillis = System.currentTimeMillis(),
+        )
+        val outcome = sendPlaintext(peerAddress, payload, storeRow = false)
+        if (outcome != SendOutcome.BLOCKED) pinnedMessages.set(peerAddress, target?.id)
+        return outcome
     }
 
     /**

@@ -1,6 +1,7 @@
 package com.oshi.desktop.store
 
 import com.oshi.desktop.i18n.dt
+import com.oshi.desktop.i18n.t
 import com.oshi.messenger.network.v2.OSHICryptoV2
 import org.bouncycastle.crypto.digests.SHA256Digest
 import org.bouncycastle.crypto.generators.HKDFBytesGenerator
@@ -292,10 +293,10 @@ class MessageExportException(
 
     /** Localised, user-facing sentence. */
     fun userMessage(): String = when (kind) {
-        Kind.NOT_AN_EXPORT -> dt("desktop.export.error.notExport")
-        Kind.UNSUPPORTED_VERSION -> dt("desktop.export.error.version")
-        Kind.OTHER_ACCOUNT -> dt("desktop.export.error.otherAccount")
-        Kind.CORRUPTED -> dt("desktop.export.error.corrupted")
-        Kind.OTHER_PLATFORM -> dt("desktop.export.error.otherPlatform", platform ?: "?")
+        Kind.NOT_AN_EXPORT -> t("export.error.not_export")
+        Kind.UNSUPPORTED_VERSION -> t("export.error.version")
+        Kind.OTHER_ACCOUNT -> t("export.error.other_account")
+        Kind.CORRUPTED -> t("export.error.corrupted")
+        Kind.OTHER_PLATFORM -> t("export.error.other_platform", platform ?: "?")
     }
 }

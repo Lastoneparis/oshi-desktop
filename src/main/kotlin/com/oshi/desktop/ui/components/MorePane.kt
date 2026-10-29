@@ -129,11 +129,23 @@ fun MorePane(
                 // __DEVSYNC_DIRECT_2026_09_22__ Direct own-device sync.
                 SettingsRow("Linked devices", "Sync your history directly with your phone and other devices") { onShow(Pane.DEVICES) }
                 Hairline()
+                // __DESKTOP_LORA_UI_2026_10_28__
+                SettingsRow("Radio", "Attach a Meshtastic node on USB, and say which contact a radio is") { onShow(Pane.LORA) }
+                Hairline()
+                // __PEERS_ARE_A_SCREEN_2026_10_28__
+                SettingsRow("Nearby peers", "Who is on this network, and connect to one by hand") { onShow(Pane.PEERS) }
+                Hairline()
                 // __CALL_LOG_AT_REST_2026_09_23__ Same label and promise as the phones: a
                 // REDACTED copy of the sealed call log, saved where the person chooses.
                 SettingsRow(t("settings.calls.diaglog.title"), t("settings.calls.diaglog.subtitle")) {
                     if (!state.busy) onExportCallDiagnostics()
                 }
+                Hairline()
+                // __DESKTOP_DELETE_ACCOUNT_UI_2026_10_29__ Both phones ship this screen and
+                // this window had no way to delete the account at all — `/deleteaccount
+                // confirm` in the console was the only route. LAST in the card, deliberately:
+                // it is the one row here that cannot be undone.
+                SettingsRow(t("account.delete.title"), t("account.delete.headline")) { onShow(Pane.DELETE_ACCOUNT) }
             }
 
             Spacer(Modifier.height(OshiTheme.lg))
@@ -157,7 +169,7 @@ fun MorePane(
                 Spacer(Modifier.height(OshiTheme.md))
                 Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.md)) {
                     PrimaryButton(t("export.messages"), enabled = !state.busy, onClick = onExportMessages)
-                    PrimaryButton(dt("desktop.import.action"), enabled = !state.busy, onClick = onImportMessages)
+                    PrimaryButton(t("settings.data.importMessages"), enabled = !state.busy, onClick = onImportMessages)
                 }
                 state.backupNotice?.let { outcome ->
                     Spacer(Modifier.height(OshiTheme.md))
@@ -551,7 +563,7 @@ private fun NotificationPreviewCard() {
         androidx.compose.runtime.mutableStateOf(prefs.load().preview)
     }
     PaneCard {
-        Text(dt("desktop.notifications.title"), style = OshiTheme.typography.titleMedium, color = Ink.strong)
+        Text(t("notification_permission"), style = OshiTheme.typography.titleMedium, color = Ink.strong)
         Spacer(Modifier.height(OshiTheme.xs))
         Text(dt("desktop.notifications.body"), style = OshiTheme.typography.bodySmall, color = Ink.soft)
         Spacer(Modifier.height(OshiTheme.md))

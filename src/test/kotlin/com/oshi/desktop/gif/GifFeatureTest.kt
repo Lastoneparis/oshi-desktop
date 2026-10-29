@@ -20,14 +20,48 @@ class GifFeatureTest {
 
     @Test
     fun `the whole iOS and Android pack is on the classpath`() {
-        assertEquals("GifPack/manifest.json lists 1,718 GIFs, all present", 1718, lib.all(LocalGifLibrary.Kind.GIF).size)
-        assertEquals("StickerPack/manifest.json lists 1,454 stickers, all present", 1454, lib.all(LocalGifLibrary.Kind.STICKER).size)
+        // This asserted the literal counts 1,718 and 1,454. The claim worth making is
+        // "all present" — every entry the manifest lists is loadable — and the count was
+        // only ever a way of spelling it. The packs have since grown (the GIF manifest
+        // lists 2,405 now, with a whole `fc_` set and an Animals category), so the
+        // literal turned a healthy addition into a red test and said nothing about
+        // integrity either way. Set equality against the manifest is the same claim,
+        // strictly stronger, and survives the pack growing again tomorrow.
+        for (kind in LocalGifLibrary.Kind.entries) {
+            val listed = manifestIds(kind)
+            assertTrue("${kind.folder}/manifest.json should list something", listed.isNotEmpty())
+            val loaded = lib.all(kind).map { it.id }.toSet()
+            assertEquals("${kind.folder}: listed in the manifest but not on the classpath",
+                emptySet<String>(), listed - loaded)
+            assertEquals("${kind.folder}: loaded but not listed in the manifest",
+                emptySet<String>(), loaded - listed)
+        }
     }
 
+    /** The ids `GifPack`/`StickerPack`'s own manifest lists, read the way the library reads it. */
+    private fun manifestIds(kind: LocalGifLibrary.Kind): Set<String> {
+        val path = "${LocalGifLibrary.ROOT}/${kind.folder}/manifest.json"
+        val raw = LocalGifLibrary::class.java.classLoader.getResourceAsStream(path)!!.use { it.readBytes() }
+        val arr = org.json.JSONObject(String(raw, Charsets.UTF_8)).getJSONArray("gifs")
+        return (0 until arr.length()).mapNotNull { arr.optJSONObject(it)?.optString("id")?.ifBlank { null } }.toSet()
+    }
     @Test
     fun `categories follow iOS's hand-picked order`() {
-        assertEquals(LocalGifLibrary.PREFERRED_CATEGORIES, lib.categories(LocalGifLibrary.Kind.GIF))
-        assertEquals(LocalGifLibrary.PREFERRED_CATEGORIES, lib.categories(LocalGifLibrary.Kind.STICKER))
+        // `categories()` is `PREFERRED_CATEGORIES.filter { present } + (extras).sorted()`,
+        // so equality with PREFERRED_CATEGORIES held only while the pack shipped nothing
+        // else. It now ships Animals (39 GIFs), and the test contradicted the function it
+        // was testing. The contract is the ORDER: the hand-picked ones first, in iOS's
+        // order, then anything new, sorted — which is also the first coverage that second
+        // half has had.
+        for (kind in LocalGifLibrary.Kind.entries) {
+            val got = lib.categories(kind)
+            val preferred = LocalGifLibrary.PREFERRED_CATEGORIES.filter { it in got }
+            assertEquals("$kind: the hand-picked categories come first, in iOS's order",
+                preferred, got.take(preferred.size))
+            val extras = got.drop(preferred.size)
+            assertEquals("$kind: anything beyond the hand-picked set follows, sorted",
+                extras.sorted(), extras)
+        }
     }
 
     @Test
@@ -43,9 +77,13 @@ class GifFeatureTest {
     fun `search is case- and accent-insensitive and category-scoped`() {
         val any = lib.search("THANK", LocalGifLibrary.Kind.GIF)
         assertTrue(any.isNotEmpty())
+        // Was `assertEquals(65, thanks.size)` — another count over shipped assets, now 87.
+        // What the test is for is that an empty query scoped to a category returns THAT
+        // category and all of it, so it is asked of the data instead of a literal.
         val thanks = lib.search("", LocalGifLibrary.Kind.GIF, "Thanks")
-        assertEquals(65, thanks.size)
-        assertTrue(thanks.all { it.category == "Thanks" })
+        assertEquals("an empty query scoped to a category returns all of it",
+            lib.all(LocalGifLibrary.Kind.GIF).count { it.category == "Thanks" }, thanks.size)
+        assertTrue("and nothing outside it", thanks.isNotEmpty() && thanks.all { it.category == "Thanks" })
         assertEquals(LocalGifLibrary.fold("félicitations"), LocalGifLibrary.fold("FELICITATIONS"))
     }
 

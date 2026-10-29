@@ -26,6 +26,84 @@ class V2ConfigGateTest {
     private fun gate(build: Int = 1, ttl: Long = 60_000, clock: () -> Long = System::currentTimeMillis) =
         V2ConfigGate(baseUrl = relay.baseUrl, buildNumber = build, ttlMillis = ttl, clock = clock)
 
+    // __DESKTOP_GATE_DOES_NOT_CACHE_A_TIMEOUT_2026_10_29__ ------------------------------
+
+    /**
+     * A SERVER DECISION IS CACHED; AN UNREACHABLE SERVER IS NOT.
+     *
+     * `cachedAt` used to be stamped whatever happened, so one unreachable moment disabled the
+     * V2 lane for the whole TTL — and because `fetch` returned a bare `false` for both cases,
+     * a slow network was indistinguishable from "the server rolled you out to 0%". A live
+     * bench hit exactly that on 2026-10-29 and reported `v2 gate closed`, which reads as a
+     * rollout decision, when the truth was a relay answering `/v2/config` in 9-25 s.
+     *
+     * Nothing is learned from a timeout, and caching it guarantees the next TTL cannot learn
+     * anything either.
+     */
+    @Test
+    fun `a failure to reach the server is not cached, so the next poll retries`() {
+        // A GENUINELY unreachable address. The first version of this test made the fake
+        // relay's responder throw, which `FakeRelay` turns into a 500 — a real answer from a
+        // real server, and correctly cached. Nothing was being tested.
+        val logs = ArrayList<String>()
+        val dead = V2ConfigGate(
+            baseUrl = "http://127.0.0.1:1",   // nothing listens on port 1
+            buildNumber = 1,
+            ttlMillis = 10 * 60_000,          // long: a cached failure could never retry
+            log = { logs += it },
+        )
+        assertTrue("an unreachable server must read as closed", !dead.isEnabled(USER_A))
+        assertTrue("and must say so in those words: ${dead.lastDecision}",
+            dead.lastDecision.contains("could not reach"))
+        assertTrue(!dead.isEnabled(USER_A))
+        assertTrue(!dead.isEnabled(USER_A))
+        assertEquals(
+            "the gate stopped asking — a timeout was cached like a decision",
+            3, logs.count { it.contains("could not reach") },
+        )
+    }
+
+    /** ...and a real decision IS cached, or every poll would re-ask. */
+    @Test
+    fun `a server decision is cached for the TTL`() {
+        var calls = 0
+        relay.responder = {
+            calls++
+            200 to """{"v2_enabled":false,"rollout_percent":100,"min_build":0}"""
+        }
+        val g = gate(ttl = 10 * 60_000)
+        assertTrue(!g.isEnabled(USER_A))
+        assertTrue(!g.isEnabled(USER_A))
+        assertEquals("a decision must not be re-fetched inside the TTL", 1, calls)
+    }
+
+    /**
+     * `serverUnreachable` is the one bit that lets the window blame the right party. A send
+     * that fails while the relay is down used to be drawn as "that peer has published no
+     * prekey bundle" or "the V2 rollout gate is closed for this account" — both false, both
+     * about somebody other than the actual culprit, and neither actionable.
+     */
+    @Test
+    fun `the gate reports whether the server was reachable, separately from its answer`() {
+        val dead = V2ConfigGate(baseUrl = "http://127.0.0.1:1", buildNumber = 1)
+        assertTrue(!dead.isEnabled(USER_A))
+        assertTrue("an unreachable server must be flagged as such", dead.serverUnreachable)
+
+        relay.responder = { 200 to """{"v2_enabled":false,"rollout_percent":100,"min_build":0}""" }
+        val refused = gate()
+        assertTrue(!refused.isEnabled(USER_A))
+        assertTrue(
+            "a server that ANSWERED no must not be reported as unreachable",
+            !refused.serverUnreachable,
+        )
+
+        // And it clears once the server answers again.
+        relay.responder = { 200 to """{"v2_enabled":true,"rollout_percent":100,"min_build":0}""" }
+        val ok = gate()
+        assertTrue(ok.isEnabled(USER_A))
+        assertTrue(!ok.serverUnreachable)
+    }
+
     // __LEGACY_COMPAT_2026_09_23__ -------------------------------------------------------
     @Test
     fun `group_legacy_compat defaults to false and only a JSON true turns it on`() {

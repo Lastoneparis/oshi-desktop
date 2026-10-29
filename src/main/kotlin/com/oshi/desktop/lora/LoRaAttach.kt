@@ -52,12 +52,21 @@ import java.io.ByteArrayOutputStream
  * | transport | JDK support | new dependency |
  * |---|---|---|
  * | BLE | none | a native binding per OS |
- * | USB serial | none (no `javax.comm` in a modern JDK) | a serial library, e.g. jSerialComm |
+ * | USB serial | `java.io` on the device file + `stty` for termios | **none** — see [LoRaSerial] |
  * | **TCP :4403** | `java.net.Socket` | **none** |
  *
  * So the desktop's cheapest attachment is a TCP socket to a Meshtastic node — either a
  * WiFi-capable board directly, or a `meshtasticd` / phone acting as a bridge. Zero new
  * dependencies, and the radio relays the exact `"OM"` frames an iPhone would have sent.
+ *
+ * **The serial row above used to read "a serial library, e.g. jSerialComm", and that was
+ * wrong (corrected 2026-10-28).** It is true that the JDK has no serial API, and false that
+ * one is therefore needed: on macOS and Linux the port is a character device in the
+ * filesystem, so the BYTES are ordinary `java.io`, and the only thing a library adds is the
+ * `termios` ioctl — which POSIX also exposes as `stty`. [LoRaSerial] does it that way, and
+ * it matters because serial is the transport a person actually has: the radio is plugged
+ * into the machine. Windows is the exception and keeps TCP, because `COM3` is neither a
+ * file you can open this way nor reachable from `stty`.
  *
  * ============================================================ WHAT IS AND IS NOT VERIFIED
  *
@@ -72,10 +81,17 @@ import java.io.ByteArrayOutputStream
  * package is checked against the shipped trees; this is not, and the distinction is the
  * point of writing it down.
  *
- * No socket, no serial port and no reconnect loop is implemented here. A transport that
- * cannot be exercised on CI should not be written speculatively — the framing can be tested
- * today, a connection manager cannot, and the difference between "the codec is right" and
- * "the link works" is the difference this file exists to keep visible.
+ * No socket, no serial port and no reconnect loop is implemented *here*, in this file —
+ * they live in [LoRaLink] and [LoRaChannel], which arrived later (TCP 2026-08-27, serial
+ * 2026-10-28). The rule this paragraph was written to defend still stands and is worth
+ * restating now that both exist: the framing can be unit-tested, a connection manager
+ * cannot, and the difference between "the codec is right" and "the link works" is the
+ * difference this file exists to keep visible.
+ *
+ * As of 2026-10-28 the link HAS moved bytes to a device over serial — a desktop-composed
+ * portnum-1 broadcast left a ThinkNode M1 on USB and was received over the air by a second
+ * radio (`TRANSPORT_LORA`, SNR 9.25). [StreamFraming] below is therefore no longer
+ * unverified against hardware on the send side.
  */
 object LoRaAttach {
 

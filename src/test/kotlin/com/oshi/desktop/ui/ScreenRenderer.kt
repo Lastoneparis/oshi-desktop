@@ -189,6 +189,26 @@ object ScreenRenderer {
                 phase = com.oshi.desktop.ui.state.CallScreenModel.Phase.CONNECTED,
                 connectedAtMs = fixedNow - 83_000, audio = com.oshi.desktop.ui.state.CallScreenModel.Audio.FLOWING,
             ))
+            // __CALL_QUALITY_TIERS / CALL_VOICE_EFFECTS_2026_10_28__ The two things added
+            // to this screen today, neither of which had ever been drawn. The tier and the
+            // round trip sit under the transport badge; the eight effect chips sit under
+            // those. Rendered in a GOOD state and a VERY_POOR one, because the colour
+            // changes and a badge whose red is unreadable on this background is a defect
+            // that only a picture shows.
+            shot("14b-call-quality-good.png", base.copy(
+                phase = com.oshi.desktop.ui.state.CallScreenModel.Phase.CONNECTED,
+                connectedAtMs = fixedNow - 83_000, audio = com.oshi.desktop.ui.state.CallScreenModel.Audio.FLOWING,
+                carrier = com.oshi.desktop.ui.state.CallCarrier.P2P,
+                quality = com.oshi.desktop.ui.state.CallQuality.GOOD, latencyMs = 128,
+                voiceEffect = com.oshi.desktop.call.media.CallVoiceEffects.Effect.NONE,
+            ))
+            shot("14c-call-quality-very-poor-effect-on.png", base.copy(
+                phase = com.oshi.desktop.ui.state.CallScreenModel.Phase.CONNECTED,
+                connectedAtMs = fixedNow - 605_000, audio = com.oshi.desktop.ui.state.CallScreenModel.Audio.FLOWING,
+                carrier = com.oshi.desktop.ui.state.CallCarrier.P2P,
+                quality = com.oshi.desktop.ui.state.CallQuality.VERY_POOR, latencyMs = 380,
+                voiceEffect = com.oshi.desktop.call.media.CallVoiceEffects.Effect.CHIPMUNK,
+            ))
             shot("15-call-connected-muted-connecting-audio.png", base.copy(
                 phase = com.oshi.desktop.ui.state.CallScreenModel.Phase.CONNECTED, muted = true,
                 connectedAtMs = fixedNow - 4_000, audio = com.oshi.desktop.ui.state.CallScreenModel.Audio.CONNECTING,
@@ -317,7 +337,8 @@ object ScreenRenderer {
             // (header), and a blocked group (banner, closed composer).
             val rich = thread.copy(
                 groupDescription = "Saturday hikes around Chamonix. Bring water.",
-                groupPinned = com.oshi.desktop.ui.state.QuoteRow("1", "Bob", "Trailhead at 8, parking fills up fast"),
+                pinned = com.oshi.desktop.ui.state.QuoteRow("1", "Bob", "Trailhead at 8, parking fills up fast"),
+                pinCanToggle = true,
                 typingNames = listOf("Chloé"),
                 groupInviteLink = com.oshi.desktop.group.GroupInvite.link("3F2A9C10-1B2C-4D5E-8F90-ABCDEF012345", "Weekend hike", addr('a')),
                 forwardTargets = listOf(com.oshi.desktop.ui.state.GroupCandidateRow(addr('d'), "Dan")),
@@ -373,6 +394,47 @@ object ScreenRenderer {
         render(File(out, "11-scheduled.png"), W, H) {
             ScheduledPane(rows = demoState().scheduled, contacts = demoState().contacts, groups = demoState().conversations.filter { it.kind == ConversationKind.GROUP })
         }
+        // __DESKTOP_LORA_UI_2026_10_28__ Two shots because the interesting state is the
+        // SECOND one: a radio already linked to a contact, which is the case the pane exists
+        // for and the one whose wording has to be read rather than assumed.
+        // __DESKTOP_DELETE_ACCOUNT_UI_2026_10_29__ The one screen here that cannot be
+        // undone. Rendered for its WORDING, which is where its whole risk lives, and in the
+        // state that matters: nothing typed, so the destructive button must be drawn OFF.
+        render(File(out, "26b-delete-account.png"), W, 900) {
+            com.oshi.desktop.ui.components.DeleteAccountPane(
+                object : com.oshi.desktop.ui.components.DeleteAccountHost {
+                    override fun delete() = throw UnsupportedOperationException("render only")
+                },
+            )
+        }
+        render(File(out, "27-radio.png"), W, 2400) {
+            com.oshi.desktop.ui.components.LoRaPane(radio = demoRadio(linked = false), contacts = demoState().contacts, onCopy = {})
+        }
+        render(File(out, "27b-radio-linked.png"), W, 2400) {
+            com.oshi.desktop.ui.components.LoRaPane(radio = demoRadio(linked = true), contacts = demoState().contacts, onCopy = {})
+        }
+        // __PEERS_ARE_A_SCREEN_2026_10_28__ PARITY row 1.3. The second shot is the one
+        // worth having: a peer that dialled US and has no listen port yet, which is the
+        // state the screen exists to make legible.
+        render(File(out, "28-peers.png"), W, H) {
+            val demoPeers = listOf(
+                    com.oshi.desktop.ui.components.PeerRow(
+                        publicKey = addr('b'), displayName = "Bob", platform = "android",
+                        address = "192.168.1.42:8765", connected = true, dialable = true, hopCount = 0,
+                    ),
+                    com.oshi.desktop.ui.components.PeerRow(
+                        publicKey = addr('c'), displayName = "iPad", platform = "ios",
+                        address = "192.168.1.51", connected = true, dialable = false, hopCount = 1,
+                    ),
+            )
+            com.oshi.desktop.ui.components.PeersPane(
+                peers = demoPeers,
+                onConnect = { _, _ -> true },
+                // Must return the SAME rows: the pane polls, and a refresh that answered
+                // empty would blank the screenshot a tick after it was drawn.
+                refresh = { demoPeers },
+            )
+        }
         renderMail(out)
 
         println("[screens] wrote ${out.listFiles()?.size ?: 0} file(s) to ${out.absolutePath}")
@@ -408,6 +470,73 @@ object ScreenRenderer {
     }
 
     private const val SCALE = 2f
+
+    /**
+     * A radio that is attached and has heard three nodes — no device, no socket, no account.
+     *
+     * The whole reason [com.oshi.desktop.ui.components.LoRaPaneHost] exists: rendering this
+     * screen must not need a ThinkNode on USB.
+     */
+    private fun demoRadio(linked: Boolean) = object : com.oshi.desktop.ui.components.LoRaPaneHost {
+        override val attached = true
+        override fun devices() = listOf(
+            com.oshi.desktop.lora.LoRaSerial.Device("/dev/cu.usbmodem21201", "cu.usbmodem21201"),
+            com.oshi.desktop.lora.LoRaSerial.Device("/dev/cu.usbmodem21301", "cu.usbmodem21301"),
+        )
+        override fun nodes() = listOf(
+            com.oshi.desktop.lora.LoRaNodeRoster.Node(0x766eb396u, "ThinkNode M1-B", 0L),
+            com.oshi.desktop.lora.LoRaNodeRoster.Node(0x4b88a86du, "ThinkNode M1-A", 0L),
+            com.oshi.desktop.lora.LoRaNodeRoster.Node(0x51e37c4au, "Tracker", 0L),
+        )
+        override fun links() = if (linked) mapOf("766eb396" to addr('b')) else emptyMap()
+        override fun attachSerial(path: String) = true
+        override fun attachTcp(host: String) = true
+        override fun detach() {}
+        override fun send(text: String) = true
+        override fun sendOshi(recipient: String, text: String) = true
+        override fun link(node: UInt, address: String) = com.oshi.desktop.lora.LoRaNodeBindings.LearnResult.BOUND
+        override fun unlink(node: UInt) = true
+        override fun prefs() = com.oshi.desktop.store.TransportPreferences.Values(preferRadio = linked)
+        override fun setPrefs(values: com.oshi.desktop.store.TransportPreferences.Values) {}
+
+        // __DESKTOP_LORA_BEACON_2026_10_28__ A stated position and the beacon on, so the
+        // rendered pane shows the section in its interesting state rather than its empty
+        // one. Nothing is transmitted: this host has no radio behind it, which is the point
+        // of the interface.
+        override fun fixedPosition() = 46.2044 to 6.1432
+        override fun setFixedPosition(latitude: Double, longitude: Double) = true
+        override fun clearFixedPosition() {}
+        override val beaconEnabled = true
+        override fun setBeaconEnabled(value: Boolean) = true
+        override fun beaconTick() = com.oshi.desktop.lora.LoRaPositionBeacon.Decision.STILL_HERE
+        // __DESKTOP_LORA_SET_OWNER_2026_10_29__ A node already wearing a name, so the card
+        // renders its "Currently:" line rather than its empty state.
+        override fun myNodeName() = "OSHI ThinkNode M1 B"
+        override fun setOwner(longName: String, shortName: String) = true
+        override fun adoptIfFactoryDefault() = true
+        // A plausible minute on a busy mesh, so the card renders its real shape.
+        // `linked` doubles as "this radio is healthy": the unlinked shot shows the
+        // muted-radio warning, which is the state the card exists for and the one nobody
+        // would otherwise see drawn.
+        override fun reportedRegion() =
+            if (linked) com.oshi.desktop.lora.LoRaAdmin.Region.EU868 else null
+        override fun blockedReason() =
+            if (linked) null else "This radio is muted — its own tx_enabled is off, so nothing you send leaves it."
+        // __DESKTOP_LORA_REGION_UI_2026_10_29__ Both succeed: this host writes to nothing,
+        // and the card is rendered for its wording, which is where its risk lives.
+        override fun setRegion(
+            region: com.oshi.desktop.lora.LoRaAdmin.Region,
+            preset: com.oshi.desktop.lora.LoRaAdmin.ModemPreset,
+        ) = true
+        override fun setChannel(name: String, psk: String) = true
+        override fun traffic() = listOf(
+            com.oshi.desktop.lora.LoRaTrafficLog.Entry("→", 3L, 16, "ALL", 0L),
+            com.oshi.desktop.lora.LoRaTrafficLog.Entry("←", 4L, 62, "!f8fb2a75", 0L),
+            com.oshi.desktop.lora.LoRaTrafficLog.Entry("←", 3L, 16, "!49e4ca65", 0L),
+            com.oshi.desktop.lora.LoRaTrafficLog.Entry("→", 256L, 180, "!4b88a86d", 0L),
+            com.oshi.desktop.lora.LoRaTrafficLog.Entry("←", 1L, 24, "!a6d7c767", 0L),
+        )
+    }
 
     private fun render(target: File, wDp: Int, hDp: Int, frames: Int = 1, content: @Composable () -> Unit) {
         val scene = ImageComposeScene(
@@ -446,6 +575,7 @@ object ScreenRenderer {
         displayName = "Hugo",
         relayUrl = "https://oshi-messenger.com",
         gateOpen = true,
+        gateAnswered = true,
         deliveryReceiptsEnabled = true,
         readReceiptsEnabled = true,
         syncNotice = null,

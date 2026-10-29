@@ -2,6 +2,7 @@ package com.oshi.desktop.msg
 
 import com.oshi.desktop.store.DeliveryStatus
 import com.oshi.desktop.store.MessageStore
+import com.oshi.desktop.store.PinnedMessageStore
 
 /**
  * What a decrypted plaintext turned out to be — the result of PARSING it, never of looking
@@ -134,7 +135,16 @@ sealed class ControlEvent {
  *
  * It does not apply PINS. See [Outcome.PIN_NOT_APPLIED].
  */
-class ControlPayloadRouter(private val store: MessageStore) {
+class ControlPayloadRouter(
+    private val store: MessageStore,
+    /**
+     * Where a 1:1 pin lands. Null keeps the pre-2026-10-29 behaviour — parse, count
+     * [Outcome.PIN_NOT_APPLIED], change nothing — which is what the pure-classification
+     * tests and `PlaceRouterTest` construct, and which stays an honest answer rather than
+     * a silent drop. See [PinnedMessageStore].
+     */
+    private val pins: PinnedMessageStore? = null,
+) {
 
     /**
      * What [apply] did. An enum rather than a Boolean because "nothing happened" has five
@@ -168,15 +178,16 @@ class ControlPayloadRouter(private val store: MessageStore) {
 
         /**
          * A valid `pinMessage` / `unpinMessage` that this client understood and did not act
-         * on, because there is nowhere to put it yet.
+         * on, because no [PinnedMessageStore] was wired into this router.
          *
-         * iOS keeps a `pinnedMessages: [senderKey: messageId]` map persisted beside the
-         * thread (`MessageManager.swift:7607-7615`); [MessageStore] has no equivalent field
-         * and adding one is a change to row 0.13's file, which this row does not own.
-         * Reporting the outcome instead of dropping it silently is the whole difference
-         * between "not implemented" and "quietly broken" — and it is the honest status,
-         * given that Android does not send 1:1 pins at all today (see
-         * [MessageActionPayload]'s PIN section, which shows why its stated reason is wrong).
+         * **This used to be the only answer, and its second reason was wrong.** The text
+         * here read *"given that Android does not send 1:1 pins at all today"*; measured
+         * 2026-10-29, Android both sends and applies them, and iOS always has. The store
+         * exists now and the wired router returns [APPLIED] / [NO_CHANGE]; this outcome is
+         * kept for the constructions that pass no store, because reporting it is still the
+         * whole difference between "not implemented" and "quietly broken".
+         *
+         * [PinnedMessageStore] holds the measurement and the three rules it follows.
          */
         PIN_NOT_APPLIED,
     }
@@ -340,10 +351,22 @@ class ControlPayloadRouter(private val store: MessageStore) {
      * [WireClock] because it is a policy about local state, not about the epoch.
      */
     private fun applyAction(conversationId: String, fromSenderKey: String, p: MessageActionPayload): Outcome {
-        if (p.actionType == MessageActionPayload.ActionType.PIN_MESSAGE ||
-            p.actionType == MessageActionPayload.ActionType.UNPIN_MESSAGE
-        ) {
-            return Outcome.PIN_NOT_APPLIED
+        // Pin before the target lookup and before the ownership rule, and both are
+        // deliberate. An UNPIN names a message this device may never have stored, and
+        // either party may pin either party's message — see [PinnedMessageStore] for the
+        // phones' receivers this follows. A pin rewrites nobody's words, so C-MSG-4 has
+        // nothing to protect here; applying it would have looked careful and diverged.
+        if (p.actionType == MessageActionPayload.ActionType.PIN_MESSAGE) {
+            val pinStore = pins ?: return Outcome.PIN_NOT_APPLIED
+            return if (pinStore.set(conversationId, p.targetMessageId)) Outcome.APPLIED else Outcome.NO_CHANGE
+        }
+        if (p.actionType == MessageActionPayload.ActionType.UNPIN_MESSAGE) {
+            val pinStore = pins ?: return Outcome.PIN_NOT_APPLIED
+            // The peer names the message it is unpinning; we only act when that IS our pin,
+            // so a stale unpin cannot clear a newer one. Case-insensitive: an iPhone's id
+            // arrives uppercased out of `UUID.uuidString`.
+            if (!pinStore.isPinned(conversationId, p.targetMessageId)) return Outcome.NO_CHANGE
+            return if (pinStore.set(conversationId, null)) Outcome.APPLIED else Outcome.NO_CHANGE
         }
 
         val target = store.message(conversationId, p.targetMessageId) ?: return Outcome.TARGET_UNKNOWN

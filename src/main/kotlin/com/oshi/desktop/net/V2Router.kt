@@ -7,6 +7,7 @@ import com.oshi.desktop.store.PrekeyStore
 import com.oshi.desktop.store.SessionStore
 import com.oshi.messenger.network.v2.OSHICryptoV2
 import com.oshi.messenger.network.v2.OSHIRatchetV2
+import com.oshi.messenger.network.v2.RatchetHealSignal
 import com.oshi.messenger.network.v2.V2RetryBudget
 import com.oshi.messenger.network.v2.V2Session
 import java.util.Base64
@@ -331,6 +332,15 @@ class V2Router(
                     log("inbound ${env.msgId.take(8)} from ${env.from.take(8)}… held: ${e.message}")
                 } else {
                     log("giving up on ${env.msgId.take(8)} after ${V2RetryBudget.MAX_RETRIES} attempts: ${e.message}")
+                    // __DESKTOP_RATCHET_HEAL_2026_10_29__ THE PEER HOLDS THE REMEDY AND HAS
+                    // NO WAY TO LEARN IT IS NEEDED. This branch used to end here, and that
+                    // was the whole defect: the retry budget condemns the envelope, the
+                    // session stays dead, and every later message from that peer dies the
+                    // same way. Half the cure was already present — the shared `V2Session`
+                    // adopts a fresh session from an inbound X3DH header — but an X3DH header
+                    // is attached ONLY by a sender with no session, and the peer's own is
+                    // fine as far as it knows.
+                    healBrokenSession(env.from, e)
                 }
                 continue
             }
@@ -345,7 +355,36 @@ class V2Router(
                     // Another device of this account (§3.6). Only a sent-copy becomes anything.
                     SentCopy.parse(plaintext)?.let { onSentCopy(it.copy(fromDevice = env.fromDevice)); delivered++ }
                 } else {
-                    onMessage(V2Inbound(env.from, env.msgId, env.ts, env.groupId, String(plaintext, Charsets.UTF_8), env.fromDevice))
+                    val text = String(plaintext, Charsets.UTF_8)
+                    // __DESKTOP_RATCHET_HEAL_2026_10_29__ A heal acknowledgement is caught
+                    // HERE, in the router, and never handed to the client.
+                    //
+                    // It is not a control sentinel and `ControlPrefix` must not learn about
+                    // it: this is a V2 SESSION artefact, meaningful only to the layer that
+                    // owns sessions, and the client has no business knowing the ratchet broke.
+                    // Caught before `onMessage` is also what keeps it out of every path that
+                    // follows — no row, no receipt, no notification, no profile request.
+                    //
+                    // **By the time this runs it has already done its work.** The envelope
+                    // carried an X3DH header, `decryptInbound` adopted the fresh session while
+                    // opening it, and that adoption IS the repair. There is nothing to act on;
+                    // the only job left is to not draw it.
+                    val heal = RatchetHealSignal.parse(text)
+                    if (heal != null) {
+                        // The resend list is READ and deliberately not honoured: this client
+                        // keeps no store of message ids a peer could not open, so it has
+                        // nothing to look them up in. Logged with the count so the gap is
+                        // visible rather than silent — both phones log the mirror case when a
+                        // peer cannot honour a list.
+                        if (heal.resend.isNotEmpty()) {
+                            log("heal: ${env.from.take(8)}… asked us to resend ${heal.resend.size} message(s); " +
+                                "this client keeps no unreadable-id store, so the session is repaired and nothing is resent")
+                        } else {
+                            log("heal: session with ${env.from.take(8)}… repaired by their fresh X3DH header")
+                        }
+                        continue
+                    }
+                    onMessage(V2Inbound(env.from, env.msgId, env.ts, env.groupId, text, env.fromDevice))
                     delivered++
                 }
             } catch (e: Exception) {
@@ -356,6 +395,87 @@ class V2Router(
         }
         val ackSeq = if (lowestFailedSeq == Long.MAX_VALUE) pull.maxSeq else lowestFailedSeq - 1
         return delivered to ackSeq
+    }
+
+    /**
+     * __DESKTOP_RATCHET_HEAL_2026_10_29__ Repair a 1:1 session the retry budget condemned.
+     *
+     * The shape is Signal's and WhatsApp's, which is worth stating because the obvious design
+     * is the wrong one: **nobody sends a "reset"**. The receiver is the only party that KNOWS
+     * the session is broken, so it sends an acknowledgement on the ORDINARY message channel
+     * and the sender re-emits with a fresh session. The repair therefore travels the path the
+     * messages travel — if messages arrive, the repair arrives. The predecessor of this on
+     * the phones went over a SEPARATE channel (Pinata/IPFS) and was observed failing while
+     * messages still flowed.
+     *
+     * **And the acknowledgement IS the repair, not a request for one.** It is sent AFTER the
+     * session is deleted, so [sendText] finds nothing, re-runs X3DH, and the envelope CARRIES
+     * the header; the peer adopts it in the act of decrypting. Signal's `PreKeySignalMessage`,
+     * out of pieces this client already had.
+     *
+     * ## Two failures that must NOT heal, and why
+     *
+     *  - [SecurityException] — the envelope's X3DH identity did not match its `from`. That is
+     *    a forgery, and a forgery proves nothing about our session with the real contact.
+     *    Deleting it would let anyone who can POST an envelope destroy a working session.
+     *    **Nothing is deleted and nothing is sent.**
+     *  - [V2X3DHException] — the peer bootstrapped against pre-key material this device no
+     *    longer holds. An acknowledgement would restart that exact problem; what is missing
+     *    is our material back on the server, so the bundle is republished instead.
+     *
+     * ## The tie-break is not ours to re-decide
+     *
+     * `RatchetHealSignal.Policy` is COMPILED from the phones' own source (see
+     * `build.gradle.kts`), including `isHealInitiator(me, peer) = me < peer`. Two devices
+     * that both see one broken batch would each delete and each send a header — a symmetric
+     * loop the cooldown only spaces out. Exactly one side acts immediately; the other waits a
+     * full cooldown, adopting headers in the meantime. A second implementation that disagreed
+     * about which side waits would produce the loop the rule exists to prevent, which is why
+     * this is shared source and not a port.
+     *
+     * The resend list (`RatchetHealSignal.encode(resend)`) is deliberately sent EMPTY here:
+     * this client keeps no store of unreadable message ids to ask for, so claiming to is
+     * worse than the bare form, which still heals the session and simply rescues nothing —
+     * exactly what both phones log when the peer cannot honour a list.
+     */
+    private fun healBrokenSession(peer: String, cause: Exception) {
+        when (cause) {
+            is SecurityException -> {
+                log("heal: refusing to touch the session for ${peer.take(8)}… — that was a forged identity")
+                return
+            }
+            is V2X3DHException -> {
+                log("heal: ${peer.take(8)}… used pre-key material we no longer hold — republishing our bundle")
+                runCatching { publishBundleIfNeeded() }
+                    .onFailure { log("heal: republish failed: ${it.message}") }
+                return
+            }
+        }
+        val now = System.currentTimeMillis()
+        val firstEvidence = state.healEvidenceAt(peer, now)
+        if (!RatchetHealSignal.Policy.isHealInitiator(identity.userKey, peer) &&
+            now - firstEvidence < RatchetHealSignal.Policy.COOLDOWN_MS
+        ) {
+            log("heal: yielding to ${peer.take(8)}… as the initiator of this pair")
+            return
+        }
+        if (!RatchetHealSignal.Policy.maySend(state.healSentAt(peer), now)) {
+            log("heal: still within the cooldown for ${peer.take(8)}…")
+            return
+        }
+        // The deletion is HERE and not inside the envelope loop: it must happen once per
+        // condemnation, not once per undecryptable envelope in the batch.
+        sessions.delete(peer)
+        state.noteHealSent(peer, now)
+        val sent = runCatching {
+            sendText(
+                peer,
+                RatchetHealSignal.encode().toByteArray(Charsets.UTF_8),
+                msgId = RatchetHealSignal.makeMsgId(),
+            )
+        }.getOrDefault(false)
+        log("heal: session with ${peer.take(8)}… deleted and a fresh X3DH header " +
+            if (sent) "sent — the peer adopts it by decrypting" else "could NOT be sent; it will be retried on the next condemnation")
     }
 
     /**

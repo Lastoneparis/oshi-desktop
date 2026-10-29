@@ -1,7 +1,10 @@
 package com.oshi.desktop.ui.components
 
 import androidx.compose.animation.animateContentSize
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -31,6 +34,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import com.oshi.desktop.ui.state.ContactRow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -132,6 +136,16 @@ fun ThreadPane(
     onPin: (String?) -> Unit = {},
     onDeleteForMe: (String) -> Unit = {},
     onForward: (messageId: String, toAddress: String) -> Unit = { _, _ -> },
+    /** __DESKTOP_POLLS_2026_10_29__ cast or toggle a vote on a poll row. */
+    onVote: (messageId: String, optionIndex: Int) -> Unit = { _, _ -> },
+    /** __DESKTOP_POLL_COMPOSER_2026_10_29__ create a poll in this conversation. */
+    onCreatePoll: ((String, List<String>, Boolean, Boolean) -> Unit)? = null,
+    /** __DESKTOP_CONTACT_CARD_COMPOSER_2026_10_29__ send one contact INTO this thread. */
+    onSendContact: ((cardAddress: String) -> Unit)? = null,
+    /** Everyone this machine knows, for that picker. */
+    contacts: List<ContactRow> = emptyList(),
+    /** __DESKTOP_OFFLINE_ONLY_2026_10_29__ take this conversation off the relay, or put it back. */
+    onSetOfflineOnly: ((Boolean) -> Unit)? = null,
     onCopy: (String) -> Unit = {},
     /** __MENTIONS_2026_09_23__ a member picked from the `@` picker (groups only). */
     onPickMention: (com.oshi.desktop.group.MentionWire.Mention) -> Unit = {},
@@ -142,6 +156,13 @@ fun ThreadPane(
 ) {
     var pickerOpen by remember(thread.conversationId) { mutableStateOf(false) }
     var reportOpen by remember(thread.conversationId) { mutableStateOf(false) }
+    // __DESKTOP_MEDIA_GALLERY_2026_10_29__ keyed by conversation so switching chats closes it.
+    var galleryOpen by remember(thread.conversationId) { mutableStateOf(false) }
+    // __DESKTOP_THREAD_SEARCH_2026_10_29__ also keyed by conversation: a query typed in one
+    // chat has no meaning in the next, and carrying it over would silently hide messages.
+    var searchOpen by remember(thread.conversationId) { mutableStateOf(false) }
+    var searchQuery by remember(thread.conversationId) { mutableStateOf("") }
+    var searchDay by remember(thread.conversationId) { mutableStateOf<java.time.LocalDate?>(null) }
     val reportable = onReport != null &&
         (thread.kind == ConversationKind.DIRECT || thread.kind == ConversationKind.GROUP)
 
@@ -168,6 +189,16 @@ fun ThreadPane(
                     // group, and never in a bot or radio thread: neither has a peer that can answer.
                     onCall = onCall?.takeIf { thread.kind == ConversationKind.DIRECT },
                     onReport = if (reportable) ({ reportOpen = !reportOpen }) else null,
+                    // 1:1 only: `setOfflineOnly` is a 1:1 path, and a control that sent
+                    // nothing would be worse than none.
+                    onSetOfflineOnly = onSetOfflineOnly?.takeIf { thread.kind == ConversationKind.DIRECT },
+                    // Only when there is something to show: a control that opens an empty
+                    // grid teaches the user it is broken.
+                    onOpenGallery = if (thread.media.isEmpty()) null else ({ galleryOpen = !galleryOpen }),
+                    onOpenSearch = if (thread.messages.isEmpty()) null else ({
+                        searchOpen = !searchOpen
+                        if (!searchOpen) { searchQuery = ""; searchDay = null }
+                    }),
                 ) { pickerOpen = !pickerOpen }
                 Hairline()
                 if (reportOpen && onReport != null) {
@@ -179,14 +210,48 @@ fun ThreadPane(
                     )
                     Hairline()
                 }
-                thread.groupPinned?.let { PinnedBar(it, canUnpin = thread.groupCanEditInfo) { onPin(null) } }
+                thread.pinned?.let { PinnedBar(it, canUnpin = thread.pinCanToggle) { onPin(null) } }
+                // __DESKTOP_OFFLINE_ONLY_2026_10_29__ A restricted conversation says so, and
+                // says how many others have confirmed. A number below the total is the HONEST
+                // state — nothing can make another client refuse the internet — so it is shown
+                // rather than rounded up to "everyone".
+                if (thread.offlineOnly) OfflineOnlyBar(thread.offlineOnlyConfirmed)
                 thread.botSealing?.let { BotSealLabel(it) }
 
                 Box(Modifier.weight(1f).fillMaxWidth()) {
-                    if (thread.messages.isEmpty()) {
+                    // __DESKTOP_MEDIA_GALLERY_2026_10_29__ The grid REPLACES the log rather
+                    // than floating over it: it is a different way of looking at the same
+                    // conversation, not a dialog about one message, and a half-covered thread
+                    // behind a grid is two things to read at once.
+                    if (galleryOpen) {
+                        MediaGalleryPane(thread.media) { galleryOpen = false }
+                    } else if (searchOpen) {
+                        // The matches REPLACE the log while searching, for the same reason the
+                        // gallery does: a filtered view and the full thread behind it are two
+                        // conversations to read at once.
+                        val matches = remember(thread.messages, searchQuery, searchDay) {
+                            com.oshi.desktop.ui.state.ThreadSearch.apply(thread.messages, searchQuery, searchDay)
+                        }
+                        val days = remember(thread.messages) {
+                            com.oshi.desktop.ui.state.ThreadSearch.daysWithMessages(thread.messages)
+                        }
+                        ThreadSearchPane(
+                            matches = matches,
+                            total = thread.messages.size,
+                            query = searchQuery,
+                            onQuery = { searchQuery = it },
+                            days = days,
+                            day = searchDay,
+                            onDay = { searchDay = it },
+                            thread = thread,
+                            wallpaper = wallpaper,
+                            today = today,
+                            onClose = { searchOpen = false; searchQuery = ""; searchDay = null },
+                        )
+                    } else if (thread.messages.isEmpty()) {
                         EmptyThread(thread.kind)
                     } else {
-                        MessageLog(thread, wallpaper, viewOnce, revealed, onReveal, onReact, onEditMessage, onDeleteMessage, today, onReply, onPin, onDeleteForMe, onForward)
+                        MessageLog(thread, wallpaper, viewOnce, revealed, onReveal, onReact, onEditMessage, onDeleteMessage, today, onReply, onPin, onDeleteForMe, onForward, onVote)
                     }
                     if (pickerOpen) {
                         Box(Modifier.fillMaxSize().padding(OshiTheme.lg), contentAlignment = Alignment.TopEnd) {
@@ -211,7 +276,19 @@ fun ThreadPane(
                         thread.groupMembers.filter { !it.self }.map { com.oshi.desktop.group.MentionWire.Mention(it.address, it.label.trim()) }
                     else emptyList(),
                     onPickMention = onPickMention,
-                    onVideoNote = onVideoNote)
+                    onVideoNote = onVideoNote,
+                    // __DESKTOP_POLL_COMPOSER_2026_10_29__ 1:1 only, because `votePoll` and
+                    // `sendPoll` are 1:1 paths — a poll offered in a group would send
+                    // nothing. Named here rather than hidden in the Composer so the reason
+                    // sits with the kind check beside it.
+                    onCreatePoll = onCreatePoll?.takeIf { thread.kind == com.oshi.desktop.ui.state.ConversationKind.DIRECT },
+                    // __DESKTOP_CONTACT_CARD_COMPOSER_2026_10_29__ Direct only, and for a
+                    // harder reason than the poll's: `sendContactCard` addresses ONE peer and
+                    // has no group fan-out at all, so offering it in a group would be a
+                    // control that cannot work rather than one that works badly.
+                    onSendContact = onSendContact?.takeIf { thread.kind == com.oshi.desktop.ui.state.ConversationKind.DIRECT },
+                    // The card's subject is never the person you are sending it to.
+                    contacts = contacts.filterNot { it.address == thread.conversationId })
             }
         }
     }
@@ -238,6 +315,11 @@ private fun ThreadHeader(
     onDeleteGroup: () -> Unit = {},
     onCopy: (String) -> Unit = {},
     onReport: (() -> Unit)? = null,
+    onSetOfflineOnly: ((Boolean) -> Unit)? = null,
+    /** __DESKTOP_MEDIA_GALLERY_2026_10_29__ null when the conversation has no attachments. */
+    onOpenGallery: (() -> Unit)? = null,
+    /** __DESKTOP_THREAD_SEARCH_2026_10_29__ null when there is nothing to search. */
+    onOpenSearch: (() -> Unit)? = null,
     onWallpaper: () -> Unit,
 ) {
     var editingDescription by remember(thread.conversationId) { mutableStateOf(false) }
@@ -279,10 +361,24 @@ private fun ThreadHeader(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    if (thread.groupAdmin) TextAction(dt("desktop.group.rename.action")) { editingName = true }
+                    if (thread.groupAdmin) TextAction(t("mail.drive.rename")) { editingName = true }
                 }
                 KindBadge(thread.kind)
                 // __DESKTOP_REPORT_2026_09_23__ "Signaler", like the phones' contact/group sheet.
+                // __DESKTOP_OFFLINE_ONLY_2026_10_29__ The switch, and the honest count under
+                // it. `offline_only.menu.{on,off}` and `.summary.{on,off}` already exist in
+                // all 30-odd catalogs because they are extracted from the iOS tree, so this
+                // invents no string.
+                // __DESKTOP_MEDIA_GALLERY_2026_10_29__ Only when there is something to show:
+                // a control that opens an empty grid teaches the user it is broken.
+                onOpenGallery?.let { open -> TextAction(t("media_gallery.title")) { open() } }
+                onOpenSearch?.let { open -> TextAction(t("chat.search")) { open() } }
+                onSetOfflineOnly?.let { set ->
+                    // One literal per `t(...)` — see the note at the same change in OshiClient.
+                    TextAction(if (thread.offlineOnly) t("offline_only.menu.off") else t("offline_only.menu.on")) {
+                        set(!thread.offlineOnly)
+                    }
+                }
                 onReport?.let { open ->
                     TextAction(if (thread.kind == ConversationKind.GROUP) t("group.report_group") else t("report.contact_title")) { open() }
                 }
@@ -311,8 +407,8 @@ private fun ThreadHeader(
             if (thread.kind == ConversationKind.GROUP) {
                 Spacer(Modifier.height(OshiTheme.xxs))
                 Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm), verticalAlignment = Alignment.CenterVertically) {
-                    Text(dt("desktop.group.members.count", thread.groupMembers.size), fontSize = 11.sp, color = Ink.soft)
-                    if (thread.groupAdmin) Text(dt("desktop.group.members.admin"), fontSize = 11.sp, color = OshiTheme.success)
+                    Text(t("group_member_count", thread.groupMembers.size), fontSize = 11.sp, color = Ink.soft)
+                    if (thread.groupAdmin) Text(t("group_admin"), fontSize = 11.sp, color = OshiTheme.success)
                     TextAction(if (showRoster) dt("desktop.group.members.hide") else dt("desktop.group.members.show")) { showRoster = !showRoster }
                     // __GROUP_E2E_V2_2026_09_23__ leave, with the phones' confirmation wording.
                     if (!confirmLeave) TextAction(t("groups.leave")) { confirmLeave = true }
@@ -358,7 +454,7 @@ private fun ThreadHeader(
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis,
                         )
-                        if (thread.groupCanEditInfo) TextAction(dt("desktop.group.rename.action")) { editingDescription = true }
+                        if (thread.groupCanEditInfo) TextAction(t("mail.drive.rename")) { editingDescription = true }
                     }
                 }
                 if (showInvite && thread.groupInviteLink != null) {
@@ -470,6 +566,7 @@ private fun MessageLog(
     onPin: (String?) -> Unit = {},
     onDeleteForMe: (String) -> Unit = {},
     onForward: (String, String) -> Unit = { _, _ -> },
+    onVote: (messageId: String, optionIndex: Int) -> Unit = { _, _ -> },
 ) {
     val listState = rememberLazyListState()
     val targets = thread.forwardTargets.map { it.address to it.label }
@@ -520,8 +617,13 @@ private fun MessageLog(
                     (thread.kind == ConversationKind.GROUP && (row.fromMe || thread.groupAdmin))) { { onDeleteMessage(row.id) } } else null,
                 // __GROUP_PARITY_2026_09_23__ reply in 1:1 and groups; sender names in groups.
                 onReply = if (thread.composer.enabled && (thread.kind == ConversationKind.DIRECT || thread.kind == ConversationKind.GROUP)) { { onReply(row.id) } } else null,
-                onPin = if (thread.kind == ConversationKind.GROUP && thread.groupCanEditInfo && !row.deleted) { pin -> onPin(if (pin) row.id else null) } else null,
-                pinned = thread.groupPinned?.messageId == row.id,
+                // __DESKTOP_DIRECT_PIN_2026_10_29__ 1:1 too. `pinCanToggle` already carries the
+                // group permission rule, so this no longer names a kind.
+                onPin = if (thread.pinCanToggle && !row.deleted) { pin -> onPin(if (pin) row.id else null) } else null,
+                // __DESKTOP_POLLS_2026_10_29__ votable only where a ballot can actually be
+                // sent: the composer being open is the same condition `onReply` uses.
+                onVote = if (row.poll != null && thread.composer.enabled) { i -> onVote(row.id, i) } else null,
+                pinned = thread.pinned?.messageId.equals(row.id, ignoreCase = true),
                 onDeleteForMe = if (thread.kind == ConversationKind.DIRECT || thread.kind == ConversationKind.GROUP) { { onDeleteForMe(row.id) } } else null,
                 forwardTargets = targets,
                 onForward = if (thread.kind == ConversationKind.DIRECT || thread.kind == ConversationKind.GROUP) { to -> onForward(row.id, to) } else null,
@@ -603,9 +705,9 @@ private fun EmptyThread(kind: ConversationKind) {
 private fun BotSealLabel(sealing: com.oshi.desktop.bot.BotEnvelope.Sealing) {
     Text(
         when (sealing) {
-            com.oshi.desktop.bot.BotEnvelope.Sealing.SERVER -> dt("desktop.bot.seal.server")
-            com.oshi.desktop.bot.BotEnvelope.Sealing.BOT -> dt("desktop.bot.seal.bot")
-            com.oshi.desktop.bot.BotEnvelope.Sealing.NONE -> dt("desktop.bot.seal.none")
+            com.oshi.desktop.bot.BotEnvelope.Sealing.SERVER -> t("bot.seal.server.full")
+            com.oshi.desktop.bot.BotEnvelope.Sealing.BOT -> t("bot.seal.bot.full")
+            com.oshi.desktop.bot.BotEnvelope.Sealing.NONE -> t("bot.seal.legacy.full")
         },
         fontSize = 11.sp,
         color = Ink.soft,
@@ -655,13 +757,18 @@ private fun NoticeBar(notice: Notice) {
  * same path `/sendfile` takes, the one PARITY.md rows 0.15 and 0.12 record crossing to a
  * shipped Android handset over the live relay.
  *
- * ============================================================ EXCEPT IN A GROUP
+ * ============================================================ AND IN A GROUP
  *
- * There it is still disabled, and for a reason that is a CLIENT fact rather than a schedule:
- * there is no group media fan-out anywhere in this client, so a blob uploaded here would be
- * fetched by nobody. The two gates are separate fields on [ComposerState] precisely so this
- * case can exist — one boolean would have forced a choice between a group with no composer
- * and a group with a paperclip that lies.
+ * There it attaches too, through `OshiClient.sendGroupFile` (GROUP_E2E_V2_SPEC §4): sealed
+ * ONCE, one blob reservation per member because the blob store authorises exactly one
+ * recipient, each member's envelope carrying the `v2file` key JSON plus `groupMessage`.
+ * This block used to say the opposite — *"there is no group media fan-out anywhere in this
+ * client, so a blob uploaded here would be fetched by nobody"* — and it was describing a gap
+ * the client had already closed.
+ *
+ * The two gates are still separate fields on [ComposerState], and the second one still earns
+ * its keep: a BLOCKED group closes the composer behind iOS's own banner. One boolean would
+ * have forced a choice between a group with no composer and a group with a paperclip that lies.
  */
 @Composable
 private fun Composer(
@@ -677,6 +784,15 @@ private fun Composer(
     mentionMembers: List<com.oshi.desktop.group.MentionWire.Mention> = emptyList(),
     onPickMention: (com.oshi.desktop.group.MentionWire.Mention) -> Unit = {},
     onVideoNote: ((java.io.File, com.oshi.desktop.media.VideoNoteWire.Meta) -> Unit)? = null,
+    /** __DESKTOP_POLL_COMPOSER_2026_10_29__ create a poll; null hides the control entirely. */
+    onCreatePoll: ((question: String, options: List<String>, multi: Boolean, anon: Boolean) -> Unit)? = null,
+    /**
+     * __DESKTOP_CONTACT_CARD_COMPOSER_2026_10_29__ send one contact INTO this conversation.
+     * Null hides the control: a card addresses one peer, so it is not offered in a group,
+     * for the same reason the poll control is not offered where a ballot cannot come back.
+     */
+    onSendContact: ((cardAddress: String) -> Unit)? = null,
+    contacts: List<ContactRow> = emptyList(),
 ) {
     if (!composer.enabled && !busy) {
         DisabledComposer(composer)
@@ -684,6 +800,9 @@ private fun Composer(
     }
 
     var whyOpen by remember { mutableStateOf(false) }
+    // __DESKTOP_CONTACT_CARD_COMPOSER_2026_10_29__ Reset per conversation: a picker left
+    // open while the user switches threads would send into the wrong one.
+    var contactOpen by remember(conversationId) { mutableStateOf(false) }
     val voice = remember { VoiceNotes() }
     var recording by remember(conversationId) { mutableStateOf(false) }
     var voiceProblem by remember(conversationId) { mutableStateOf<String?>(null) }
@@ -699,6 +818,7 @@ private fun Composer(
         value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { VideoNoteAvailability.reason() }
     }
     var gifOpen by remember(conversationId) { mutableStateOf(false) }   // __GIF_PACK_2026_09_23__
+    var pollOpen by remember(conversationId) { mutableStateOf(false) }  // __DESKTOP_POLL_COMPOSER_2026_10_29__
     // __MENTIONS_2026_09_23__ the typed `@query` (cursor = end of draft) and the members picked.
     var picked by remember(conversationId) { mutableStateOf(listOf<com.oshi.desktop.group.MentionWire.Mention>()) }
     LaunchedEffect(draft.isEmpty()) { if (draft.isEmpty()) picked = emptyList() }
@@ -719,6 +839,37 @@ private fun Composer(
                 onPick = { bytes, name -> gifOpen = false; onGif(GifOutbox.write(bytes, name)) },
                 onClose = { gifOpen = false },
             )
+        }
+        if (pollOpen && onCreatePoll != null) {
+            PollComposer(
+                onSend = { q, opts, multi, anon -> pollOpen = false; onCreatePoll(q, opts, multi, anon) },
+                onClose = { pollOpen = false },
+            )
+        }
+        // __DESKTOP_CONTACT_CARD_COMPOSER_2026_10_29__ Who to send. Blocked contacts are
+        // left out: enforcement is a real rule here (row 0.21), and handing someone's card
+        // around is exactly the thing a block is for.
+        if (contactOpen && onSendContact != null) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = OshiTheme.md)) {
+                Text(
+                    "Send a contact card — the person receives their key, so they can start " +
+                        "a conversation with them.",
+                    style = OshiTheme.typography.bodySmall,
+                    color = Ink.soft,
+                )
+                for (c in contacts.filterNot { it.blocked }) {
+                    TextAction(c.label) { contactOpen = false; onSendContact(c.address) }
+                }
+                TextAction("Cancel") { contactOpen = false }
+            }
+        }
+        // __DESKTOP_SLASH_MENU_2026_10_29__ The `/` menu, in the same slot as the mention
+        // picker and never beside it: both are completions of what is being typed, and two
+        // lists stacked over one composer is a menu about a menu. The mention picker wins
+        // because an `@` is already an answer to a narrower question.
+        val slash = remember(draft) { com.oshi.desktop.msg.SlashCommands.matches(draft) }
+        if (candidates.isEmpty() && slash.isNotEmpty() && !busy) {
+            SlashMenu(slash) { onDraft(com.oshi.desktop.msg.SlashCommands.completion(it)) }
         }
         if (candidates.isNotEmpty() && !busy) MentionPicker(candidates, pick)
         if (voiceProblem != null) {
@@ -773,6 +924,22 @@ private fun Composer(
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm)) {
             if (onGif != null && composer.attachEnabled) {
                 TextAction(dt("desktop.gif.button")) { if (!busy) gifOpen = !gifOpen }
+            }
+
+            // __DESKTOP_POLL_COMPOSER_2026_10_29__ Beside the GIF button and gated the same
+            // way. Not shown at all when `onCreatePoll` is null — a poll can only be sent
+            // where a ballot can come back, so offering it in a thread that cannot carry one
+            // would be the greyed-out phone icon `DesktopLimits` argues against.
+            if (onCreatePoll != null && composer.attachEnabled) {
+                TextAction("Poll") { if (!busy) { gifOpen = false; pollOpen = !pollOpen } }
+            }
+
+            // __DESKTOP_CONTACT_CARD_COMPOSER_2026_10_29__ The window could DISPLAY a
+            // received contact card and had no way to send one; `sendContactCard` was
+            // console-only. Hidden where there is nobody to send — a control that opens an
+            // empty list is the greyed-out phone icon `DesktopLimits` argues against.
+            if (onSendContact != null && composer.attachEnabled && contacts.any { !it.blocked }) {
+                TextAction("Contact") { if (!busy) { gifOpen = false; pollOpen = false; contactOpen = !contactOpen } }
             }
 
             if (onVideoNote != null && composer.attachEnabled && !recording) {
@@ -1094,4 +1261,335 @@ private fun rememberFollowNewest(
         }
     }
     return follow
+}
+
+/**
+ * __DESKTOP_POLL_COMPOSER_2026_10_29__ Write a poll: a question, two to twelve options, and
+ * the two switches both phones offer.
+ *
+ * ## The Send button and the wire cannot disagree
+ *
+ * Enablement is `PollPayload.sanitize(...) != null` — the SAME call `OshiClient.sendPoll`
+ * makes before it builds anything. iOS gives the reason for having one definition of
+ * "sendable" and it is exactly this: a composer that enables Send on its own idea of
+ * validity eventually enables it for something the sender then refuses, and the user gets a
+ * dead button or a silent failure. Nothing here re-decides a limit.
+ *
+ * ## Why the option rows grow rather than being a fixed twelve
+ *
+ * A poll needs two options and may have twelve. Twelve boxes on screen asks the person to
+ * read eleven empty fields to find the one they want; a blank row appears as the last one is
+ * filled, and the cap is enforced by not adding a thirteenth. The trailing blank is dropped
+ * by `sanitize`, so it never becomes an option.
+ */
+@Composable
+private fun PollComposer(
+    onSend: (question: String, options: List<String>, multi: Boolean, anon: Boolean) -> Unit,
+    onClose: () -> Unit,
+) {
+    var question by remember { mutableStateOf("") }
+    var options by remember { mutableStateOf(listOf("", "")) }
+    var multi by remember { mutableStateOf(false) }
+    var anon by remember { mutableStateOf(false) }
+
+    // The one definition of sendable — see the class note.
+    val sendable = remember(question, options) {
+        com.oshi.desktop.msg.PollPayload.sanitize(question, options) != null
+    }
+
+    Column(
+        Modifier.fillMaxWidth().background(OshiTheme.surfaceElevated).padding(OshiTheme.lg),
+    ) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("📊", fontSize = 13.sp)
+            Spacer(Modifier.width(OshiTheme.sm))
+            Text("New poll", style = OshiTheme.typography.labelMedium, color = OshiTheme.brand, modifier = Modifier.weight(1f))
+            TextAction("Close") { onClose() }
+        }
+        Spacer(Modifier.height(OshiTheme.sm))
+
+        PollField(
+            value = question,
+            placeholder = "Ask something…",
+            max = com.oshi.desktop.msg.PollPayload.MAX_QUESTION_LENGTH,
+            onChange = { question = it },
+        )
+        Spacer(Modifier.height(OshiTheme.xs))
+
+        options.forEachIndexed { i, option ->
+            PollField(
+                value = option,
+                placeholder = "Option ${i + 1}",
+                max = com.oshi.desktop.msg.PollPayload.MAX_OPTION_LENGTH,
+                onChange = { text ->
+                    val next = options.toMutableList()
+                    next[i] = text
+                    // Grow by one when the last row is first filled, up to the cap. The
+                    // trailing blank is dropped by `sanitize` and never ships.
+                    if (i == next.lastIndex && text.isNotBlank() &&
+                        next.size < com.oshi.desktop.msg.PollPayload.MAX_OPTIONS
+                    ) {
+                        next.add("")
+                    }
+                    options = next
+                },
+            )
+            Spacer(Modifier.height(2.dp))
+        }
+
+        Spacer(Modifier.height(OshiTheme.xs))
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            TextAction(if (multi) "☑ Pick several" else "☐ Pick several") { multi = !multi }
+            Spacer(Modifier.width(OshiTheme.md))
+            TextAction(if (anon) "☑ Anonymous" else "☐ Anonymous") { anon = !anon }
+        }
+        // ANONYMOUS IS A PRESENTATION PROMISE, NOT A CRYPTOGRAPHIC ONE, and the composer says
+        // so in as many words because iOS's does: a ballot still travels signed by its
+        // sender — it cannot be otherwise on a peer-to-peer mesh — so what this buys is that
+        // no name is collected or shown, not that the sender is unknowable.
+        if (anon) {
+            Text(
+                "Names are never collected or shown. A ballot still travels signed by its " +
+                    "sender, so this hides names rather than making a vote untraceable.",
+                style = OshiTheme.typography.bodySmall,
+                color = Ink.soft,
+                modifier = Modifier.padding(top = OshiTheme.xs),
+            )
+        }
+
+        Spacer(Modifier.height(OshiTheme.sm))
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                if (sendable) "" else "A question and at least two options.",
+                style = OshiTheme.typography.bodySmall,
+                color = Ink.soft,
+                modifier = Modifier.weight(1f),
+            )
+            if (sendable) {
+                TextAction("Send poll") {
+                    onSend(question, options, multi, anon)
+                }
+            }
+        }
+    }
+}
+
+/** One bounded text box. The cap is enforced on INPUT so the counter can never disagree. */
+@Composable
+private fun PollField(value: String, placeholder: String, max: Int, onChange: (String) -> Unit) {
+    Box(
+        Modifier.fillMaxWidth()
+            .background(OshiTheme.surface, RoundedCornerShape(6.dp))
+            .padding(horizontal = OshiTheme.sm, vertical = 6.dp),
+    ) {
+        if (value.isEmpty()) {
+            Text(placeholder, style = OshiTheme.typography.bodySmall, color = Ink.soft)
+        }
+        BasicTextField(
+            value = value,
+            onValueChange = { onChange(it.take(max)) },
+            singleLine = true,
+            textStyle = OshiTheme.typography.bodySmall.copy(color = Ink.strong),
+            cursorBrush = androidx.compose.ui.graphics.SolidColor(OshiTheme.brand),
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+}
+
+/**
+ * __DESKTOP_OFFLINE_ONLY_2026_10_29__ "This conversation is offline only", with the count of
+ * other participants who have confirmed.
+ *
+ * The count is the whole reason this bar exists rather than a padlock icon. Nothing can make
+ * another client refuse the internet, so "N of M confirmed" is the honest state of the
+ * conversation and a padlock would be a privacy promise the app cannot keep. iOS says the
+ * same of its own subtitle: a number smaller than the member count *"is the honest state of
+ * the conversation, not a bug to hide"*.
+ *
+ * A null count means the conversation is not restricted and there is nothing to report, so
+ * the caller does not draw this at all.
+ */
+@Composable
+private fun OfflineOnlyBar(confirmed: Pair<Int, Int>?) {
+    Row(
+        Modifier.fillMaxWidth().background(OshiTheme.brand.copy(alpha = 0.10f))
+            .padding(horizontal = OshiTheme.xl, vertical = OshiTheme.sm),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("🔒", fontSize = 13.sp)
+        Spacer(Modifier.width(OshiTheme.sm))
+        Column(Modifier.weight(1f)) {
+            Text(t("offline_only.summary.on"), style = OshiTheme.typography.labelMedium, color = OshiTheme.brand)
+            confirmed?.let { (yes, total) ->
+                Text(
+                    if (yes >= total && total > 0) "Confirmed by $yes of $total."
+                    else "Confirmed by $yes of $total — the others may still be using the internet.",
+                    style = OshiTheme.typography.bodySmall,
+                    color = Ink.soft,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * __DESKTOP_THREAD_SEARCH_2026_10_29__ Finding a message inside the open conversation.
+ *
+ * The second of the three gaps PARITY row 0.0's sweep left open. This client could filter the
+ * conversation LIST and could not search inside a thread at all, while iOS has a
+ * calendar-based message search and Android a "Search" item in the same menu this sits in.
+ *
+ * The decision of WHAT matches is not here — it is [com.oshi.desktop.ui.state.ThreadSearch],
+ * a pure function, so the cases nobody reproduces by hand (an accented query, midnight in a
+ * named zone, a deleted row) are reachable from a test. This file only draws the result.
+ *
+ * Every string is an iOS key the catalogs already carry (`chat.search_placeholder`,
+ * `chat.search_by_date`, `chat.search_results`, `chat.close_search`): a `desktop.` key where
+ * an iOS key exists ships English to 33 locales for nothing.
+ */
+@Composable
+private fun ThreadSearchPane(
+    matches: List<com.oshi.desktop.ui.state.MessageRow>,
+    total: Int,
+    query: String,
+    onQuery: (String) -> Unit,
+    days: List<java.time.LocalDate>,
+    day: java.time.LocalDate?,
+    onDay: (java.time.LocalDate?) -> Unit,
+    thread: ThreadView,
+    wallpaper: WallpaperId,
+    today: LocalDate,
+    onClose: () -> Unit,
+) {
+    Column(Modifier.fillMaxSize().background(OshiTheme.background)) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = OshiTheme.xl, vertical = OshiTheme.sm),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                Modifier.weight(1f)
+                    .background(OshiTheme.surface, RoundedCornerShape(6.dp))
+                    .padding(horizontal = OshiTheme.sm, vertical = 6.dp),
+            ) {
+                if (query.isEmpty()) {
+                    Text(t("chat.search_placeholder"), style = OshiTheme.typography.bodySmall, color = Ink.soft)
+                }
+                BasicTextField(
+                    value = query,
+                    onValueChange = onQuery,
+                    singleLine = true,
+                    textStyle = OshiTheme.typography.bodySmall.copy(color = Ink.strong),
+                    cursorBrush = androidx.compose.ui.graphics.SolidColor(OshiTheme.brand),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            Spacer(Modifier.width(OshiTheme.sm))
+            // The count uses the iOS format string, which is "%d/%d" — matches over total.
+            Text(
+                // The bare `t`, not a qualified call: `CatalogAuditTest`'s suspect scan looks
+                // for a literal next to a REGISTERED accessor, and
+                // `com.oshi.desktop.i18n.t(...)` is not one it knows — the audit flagged this
+                // exact line. Second time today that its TRAP 3 earned its name.
+                t("chat.search_results", matches.size, total),
+                style = OshiTheme.typography.labelMedium,
+                color = if (matches.isEmpty()) OshiTheme.warning else Ink.soft,
+            )
+            Spacer(Modifier.width(OshiTheme.sm))
+            TextAction(t("chat.close_search")) { onClose() }
+        }
+        // The days that actually HAVE messages, rather than a calendar: a date picker that
+        // offers every day of the month invites choosing one that can only ever be empty.
+        if (days.isNotEmpty()) {
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                    .padding(horizontal = OshiTheme.xl, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(t("chat.search_by_date"), style = OshiTheme.typography.bodySmall, color = Ink.soft)
+                Spacer(Modifier.width(OshiTheme.sm))
+                for (d in days.take(30)) {
+                    val selected = d == day
+                    Box(
+                        Modifier.padding(end = 4.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(if (selected) OshiTheme.brand.copy(alpha = 0.18f) else OshiTheme.surface)
+                            .clickable { onDay(if (selected) null else d) }
+                            .padding(horizontal = 6.dp, vertical = 3.dp),
+                    ) {
+                        Text(
+                            // `DayBreaks.label` takes an ISO day STRING and already says
+                            // today / yesterday / the weekday / the long date, with the
+                            // catalog keys that exist. The first version here invented
+                            // `common.today` and `common.yesterday`, which are not keys —
+                            // `t` would have rendered the key itself into the chip.
+                            DayBreaks.label(d.toString(), today),
+                            style = OshiTheme.typography.bodySmall,
+                            color = if (selected) OshiTheme.brand else Ink.soft,
+                        )
+                    }
+                }
+            }
+        }
+        Hairline()
+        if (matches.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                // Says what was searched rather than "no results": an empty result for a day
+                // with no messages is a different thing from a word nobody wrote.
+                Text(
+                    if (query.isBlank() && day != null) t("chat.search_by_date") else t("chat.search_placeholder"),
+                    style = OshiTheme.typography.bodySmall,
+                    color = Ink.soft,
+                )
+            }
+            return@Column
+        }
+        MessageLog(
+            thread.copy(messages = matches),
+            wallpaper,
+            com.oshi.desktop.ui.components.ViewOnceFacts.NONE,
+            emptySet(), {}, { _, _ -> }, { _, _ -> }, {}, today, {}, {}, {}, { _, _ -> }, { _, _ -> },
+        )
+    }
+}
+
+/**
+ * __DESKTOP_SLASH_MENU_2026_10_29__ The list that opens when a message starts with `/`.
+ *
+ * Drawn above the composer, like the mention picker, because it completes what is being
+ * typed. The rule for WHEN it appears is [com.oshi.desktop.msg.SlashCommands], a pure
+ * function — a space closes it, a lone `/` opens the full list — so the behaviour is
+ * testable without a window.
+ *
+ * Every row is a command this client already executes. A menu that advertises something the
+ * composer will not honour is worse than no menu, and a test asserts the pairing rather than
+ * trusting this comment.
+ */
+@Composable
+private fun SlashMenu(
+    commands: List<com.oshi.desktop.msg.SlashCommands.Command>,
+    onPick: (com.oshi.desktop.msg.SlashCommands.Command) -> Unit,
+) {
+    Column(Modifier.fillMaxWidth().background(OshiTheme.surfaceElevated)) {
+        Hairline()
+        for (c in commands) {
+            Row(
+                Modifier.fillMaxWidth()
+                    .clickable { onPick(c) }
+                    .padding(horizontal = OshiTheme.xl, vertical = OshiTheme.sm),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(c.command, style = OshiTheme.typography.labelMedium, color = OshiTheme.brand)
+                Spacer(Modifier.width(OshiTheme.sm))
+                Text(
+                    c.description,
+                    style = OshiTheme.typography.bodySmall,
+                    color = Ink.soft,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(c.source, style = OshiTheme.typography.bodySmall, color = Ink.soft)
+            }
+        }
+    }
 }

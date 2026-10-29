@@ -200,7 +200,7 @@ private fun GroupCreateCard(
     var selected by remember(contacts) { mutableStateOf(emptySet<String>()) }
     val eligible = contacts.filterNot { it.blocked }
     Column(modifier.fillMaxWidth().clip(OshiTheme.radiusMd).background(OshiTheme.surface).padding(OshiTheme.md)) {
-        Text(dt("desktop.group.create.title"), style = OshiTheme.typography.titleSmall, color = Ink.strong)
+        Text(t("nav_title_new_group"), style = OshiTheme.typography.titleSmall, color = Ink.strong)
         Spacer(Modifier.height(OshiTheme.xxs))
         Text(dt("desktop.group.create.hint"), style = OshiTheme.typography.bodySmall, color = Ink.soft)
         Spacer(Modifier.height(OshiTheme.sm))
@@ -212,7 +212,7 @@ private fun GroupCreateCard(
             cursorBrush = SolidColor(OshiTheme.brand),
             modifier = Modifier.fillMaxWidth().padding(vertical = OshiTheme.xxs),
             decorationBox = { inner ->
-                if (name.isBlank()) Text(dt("desktop.group.create.name"), style = OshiTheme.typography.bodySmall, color = Ink.soft)
+                if (name.isBlank()) Text(t("Group Name"), style = OshiTheme.typography.bodySmall, color = Ink.soft)
                 inner()
             },
         )
@@ -222,12 +222,12 @@ private fun GroupCreateCard(
             for (contact in eligible) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text(contact.label, style = OshiTheme.typography.bodySmall, color = Ink.strong, modifier = Modifier.weight(1f))
-                    TextAction(if (contact.address in selected) dt("desktop.group.create.remove") else dt("desktop.group.create.add")) {
+                    TextAction(if (contact.address in selected) t("common.remove") else t("common.add")) {
                         selected = if (contact.address in selected) selected - contact.address else selected + contact.address
                     }
                 }
             }
-            TextAction(dt("desktop.group.create.action")) { onCreate(name, selected.toList()) }
+            TextAction(t("button_create_group")) { onCreate(name, selected.toList()) }
         }
     }
 }
@@ -292,15 +292,27 @@ private fun AccountStrip(state: ShellState, onShow: (Pane) -> Unit) {
             // refused before it reaches the network" (PARITY.md row 0.8), so it is on screen
             // and not in a log line. It is a STATE badge, never a presence dot: this client
             // has no presence protocol and a green "online" would be inventing one.
-            GateChip(state.gateOpen)
+            GateChip(state.gateOpen, state.gateAnswered)
         }
         GlyphIcon(Glyph.CHEVRON_RIGHT, Ink.soft, 14.dp)
     }
 }
 
 @Composable
-private fun GateChip(open: Boolean) {
-    val tint = if (open) OshiTheme.success else OshiTheme.danger
+private fun GateChip(open: Boolean, answered: Boolean) {
+    // __GATE_NOT_YET_IS_NOT_NO_2026_10_29__ Three states, not two. Before the first
+    // `/v2/config` answer this chip said "V2 gate closed — sends refused" in DANGER red:
+    // a verdict about the account, shown to someone whose client had not finished asking.
+    // On this relay that route has been measured at 9-25 s, so it is the state every
+    // launch passes through. "Connecting..." is the shared catalog's own sentence
+    // (`connection.connecting`, translated in 33 of 33 locales), so saying this honestly
+    // costs no new English string.
+    val shown = com.oshi.desktop.ui.state.gateDisplay(open, answered)
+    val tint = when (shown) {
+        com.oshi.desktop.ui.state.GateDisplay.OPEN -> OshiTheme.success
+        com.oshi.desktop.ui.state.GateDisplay.ASKING -> Ink.soft
+        com.oshi.desktop.ui.state.GateDisplay.CLOSED -> OshiTheme.danger
+    }
     Row(
         Modifier
             .clip(OshiTheme.pill)
@@ -311,7 +323,11 @@ private fun GateChip(open: Boolean) {
     ) {
         Box(Modifier.size(6.dp).clip(CircleShape).background(tint))
         Text(
-            if (open) dt("desktop.gate.open.chip") else dt("desktop.gate.closed.chip"),
+            when (shown) {
+                com.oshi.desktop.ui.state.GateDisplay.OPEN -> dt("desktop.gate.open.chip")
+                com.oshi.desktop.ui.state.GateDisplay.ASKING -> t("connection.connecting")
+                com.oshi.desktop.ui.state.GateDisplay.CLOSED -> dt("desktop.gate.closed.chip")
+            },
             fontSize = 11.sp,
             fontWeight = FontWeight.Medium,
             // The chip's own ink, not the tint: `success` on a 14% wash of itself is far

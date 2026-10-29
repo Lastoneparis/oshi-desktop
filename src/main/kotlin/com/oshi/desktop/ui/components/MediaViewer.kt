@@ -1,6 +1,7 @@
 package com.oshi.desktop.ui.components
 
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -21,6 +22,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.ProvidableCompositionLocal
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -43,6 +45,11 @@ import com.oshi.desktop.media.PlaybackEnd
 import com.oshi.desktop.media.PlaybackStart
 import com.oshi.desktop.store.MediaType
 import com.oshi.desktop.ui.OshiTheme
+import com.oshi.desktop.media.VideoNotePlayer
+import com.oshi.desktop.media.VideoNoteReader
+import com.oshi.desktop.media.VideoNoteThumbnails
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.awt.EventQueue
 import java.io.File
 import org.jetbrains.skia.Codec
@@ -623,7 +630,7 @@ fun MediaViewerOverlay(target: MediaViewerTarget, onClose: () -> Unit) {
             Hairline()
 
             when {
-                target.kind == MediaType.VIDEO -> NoPlayerPanel(target)
+                target.kind == MediaType.VIDEO -> VideoPlayerPanel(target)
                 target.kind == MediaType.AUDIO -> AudioPlayerPanel(target, audio)
                 load is MediaLoad.Ready -> ReadyPanel(load)
                 load is MediaLoad.Refused -> RefusedPanel(load)
@@ -721,14 +728,55 @@ private fun RefusedPanel(load: MediaLoad.Refused) {
 }
 
 /**
- * A video: named, located, and explicitly not played.
+ * A video attachment, PLAYED — picture and sound, in the viewer.
  *
- * The file is NOT read here at all — not a byte. There is nothing this window could do with
- * the contents, and reading a stranger's MP4 into memory to display its size would be work
- * done for no reason on bytes chosen by somebody else.
+ * This panel used to be `NoPlayerPanel` and said, in these words: *"Nothing in this window
+ * plays video, and it will not pretend otherwise with a play button that produces silence."*
+ * That was true when it was written and had stopped being true before it was replaced. The
+ * decoder arrived with round video notes (__VIDEO_NOTE_2026_09_24__): `VideoNoteReader`
+ * demuxes and decodes H.264/AAC through the FFmpeg natives the CALL pipeline already ships,
+ * and `VideoNotePlayer` paces frames against a monotonic clock and writes the audio to the
+ * voice notes' speaker seam. All of it was wired to exactly one place — the round bubble —
+ * while the viewer two files away still refused to play anything.
+ *
+ * So nothing new was imported to make this work. The two differences from a note are both
+ * in [VideoNoteReader]: the picture is CONTAIN rather than centre-cropped to a square,
+ * because an ordinary clip is a rectangle somebody filmed and cropping it to a circle's
+ * shape would throw away a third of it; and the duration cap is the viewer's rather than a
+ * note's 15 seconds.
+ *
+ * The still is decoded once off the UI thread and cached, so opening the viewer does not
+ * block on a decode and closing and reopening it does not pay for one twice.
  */
 @Composable
-private fun NoPlayerPanel(target: MediaViewerTarget) {
+private fun VideoPlayerPanel(target: MediaViewerTarget) {
+    val player = remember(target.path) {
+        VideoNotePlayer(side = VIDEO_VIEWER_SIDE, fit = VideoNoteReader.Fit.CONTAIN, maxDurationMs = VIDEO_VIEWER_MAX_MS)
+    }
+    var thumb by remember(target.path) {
+        mutableStateOf(VideoNoteThumbnails.cached(target.path, VIDEO_VIEWER_SIDE, VideoNoteReader.Fit.CONTAIN))
+    }
+    var frame by remember(target.path) { mutableStateOf<ImageBitmap?>(null) }
+    var playing by remember(target.path) { mutableStateOf(false) }
+    var positionMs by remember(target.path) { mutableStateOf(0L) }
+    var note by remember(target.path) { mutableStateOf<String?>(null) }
+
+    // The first frame, off the UI thread. A LaunchedEffect keyed on the path so reopening
+    // the same video reuses the cache and a different one decodes again.
+    LaunchedEffect(target.path) {
+        if (thumb == null) {
+            thumb = withContext(Dispatchers.IO) {
+                VideoNoteThumbnails.load(target.path, VIDEO_VIEWER_SIDE, VideoNoteReader.Fit.CONTAIN)
+            }
+        }
+    }
+    // Leaving the viewer stops the sound. Without this the audio keeps playing over a
+    // closed panel, which is the one failure a person cannot ignore.
+    DisposableEffect(target.path) { onDispose { player.stop() } }
+
+    val still = remember(thumb) { thumb?.image?.toImageBitmap() }
+    val shown = frame ?: still
+
     Column(
         Modifier
             .fillMaxWidth()
@@ -738,28 +786,91 @@ private fun NoPlayerPanel(target: MediaViewerTarget) {
         verticalArrangement = Arrangement.spacedBy(OshiTheme.sm),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Spacer(Modifier.height(OshiTheme.sm))
-        GlyphIcon(Glyph.FILE, Ink.soft, 34.dp)
-        // NOT `cardLabel(kind)`: the header two lines above already says "Video — no player
-        // in this window", and the first render of this panel printed that sentence twice on
-        // one screen. Caught by looking at `build/screens/viewer-04-video.png`, which is the
-        // only thing that catches it — no assertion in this repository reads words.
+        if (shown != null) {
+            Image(
+                bitmap = shown,
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 420.dp)
+                    .clip(OshiTheme.radiusSm),
+            )
+        } else {
+            GlyphIcon(Glyph.FILE, Ink.soft, 34.dp)
+        }
+
+        // The decode failure is named rather than swallowed: a file this window cannot open
+        // is a different thing from one it has not been asked to open yet, and "Open in
+        // another app" below is the answer to the first.
+        thumb?.error?.let {
+            Text("This video could not be decoded here: $it", fontSize = 11.sp, color = Ink.soft)
+        }
+
+        val total = thumb?.durationMs
+        if (thumb?.error == null) {
+            TextAction(if (playing) "Stop" else "Play") {
+                if (playing) {
+                    player.stop()
+                    playing = false
+                } else {
+                    // One video at a time in this window, and that includes a note bubble
+                    // playing behind the viewer.
+                    VideoNotePlayer.stopAll()
+                    frame = null
+                    positionMs = 0
+                    note = null
+                    val failure = player.play(File(target.path), object : VideoNotePlayer.Listener {
+                        override fun onFrame(image: com.oshi.desktop.call.video.VideoImage, ms: Long) {
+                            val bmp = image.toImageBitmap()
+                            EventQueue.invokeLater { frame = bmp; positionMs = ms }
+                        }
+                        override fun onEnd(error: String?) {
+                            EventQueue.invokeLater {
+                                playing = false
+                                frame = null
+                                positionMs = 0
+                                note = error?.let { "Playback stopped: $it" }
+                            }
+                        }
+                    })
+                    if (failure == null) playing = true else note = "Could not play: $failure"
+                }
+            }
+        }
+
+        if (total != null) {
+            val at = if (playing) "${fmtMs(positionMs)} / ${fmtMs(total)}" else fmtMs(total)
+            Text(at, fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = Ink.soft)
+        }
+        note?.let { Text(it, fontSize = 11.sp, color = Ink.soft) }
         Text(
-            "Not played here",
-            style = OshiTheme.typography.bodyMedium,
-            fontWeight = FontWeight.SemiBold,
-            color = Ink.strong,
-        )
-        Text(
-            "Nothing in this window plays video, and it will not pretend otherwise " +
-                "with a play button that produces silence. The file is stored encrypted on " +
-                "this disk and is not touched by this panel; use \"Open in another app\" " +
-                "below for a player that has the codecs. PARITY.md rows 1.4 and 2.1.",
+            "Decoded in this window through the same FFmpeg natives the call pipeline uses. " +
+                "A sealed attachment is decrypted to a temporary file for the length of " +
+                "playback only and deleted afterwards.",
             fontSize = 11.sp,
             color = Ink.soft,
         )
-        Spacer(Modifier.height(OshiTheme.xxs))
     }
+}
+
+/**
+ * The longest edge the viewer decodes to. 720 rather than the source's own size: every frame
+ * becomes an `IntArray` of w×h, so a 1920×1080 clip would allocate 8 MB per frame and hand
+ * the compositor more pixels than the panel can draw — it is capped at 420.dp tall.
+ */
+private const val VIDEO_VIEWER_SIDE = 720
+
+/**
+ * The viewer's media ceiling: ten minutes. It is a CAP and not "no limit" — a container
+ * whose timestamps claim an hour must not be able to hold a decode thread that long on
+ * bytes a stranger chose.
+ */
+private const val VIDEO_VIEWER_MAX_MS = 10L * 60 * 1000
+
+private fun fmtMs(ms: Long): String {
+    val total = ms / 1000
+    return "%d:%02d".format(total / 60, total % 60)
 }
 
 /**

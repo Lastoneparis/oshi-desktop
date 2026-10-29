@@ -372,10 +372,35 @@ class DevSyncEndToEndTest {
         return null
     }
 
-    private fun nodeBinary(): String? = listOf("/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node")
-        .firstOrNull { File(it).canExecute() } ?: runCatching {
-            ProcessBuilder("which", "node").start().inputStream.bufferedReader().readLine()?.takeIf { it.isNotBlank() }
+    /**
+     * Where `node` is, or null — in which case the caller's `Assume` skips the test.
+     *
+     * __WINDOWS_WHICH_IS_MSYS_2026_10_29__ This probed with `which`, and on `windows-latest`
+     * that is NOT "no such command": GitHub's Windows image carries Git for Windows, so
+     * `which.exe` resolves and answers with an MSYS path — `/c/Program Files/nodejs/node`.
+     * Non-null, so the `Assume` below let the test proceed, and `ProcessBuilder.start()`
+     * then threw `IOException` because the JVM cannot run an MSYS path. The two relay tests
+     * were FAILING on Windows where they should have skipped, and the probe that was meant
+     * to make them portable is what made them fail.
+     *
+     * So: ask Windows with `where`, which answers with a real `C:\…\node.exe` and lets the
+     * test actually RUN there rather than skip; and whatever either probe says, hand back
+     * only a path that genuinely executes. "Found but unusable" becomes a skip, never an
+     * error — a test that cannot run must say so, not fail.
+     */
+    private fun nodeBinary(): String? {
+        listOf("/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node")
+            .firstOrNull { File(it).canExecute() }
+            ?.let { return it }
+        val windows = System.getProperty("os.name").lowercase().contains("win")
+        val probe = if (windows) listOf("where", "node") else listOf("which", "node")
+        // `where` can answer with several lines (node.exe and a shim); take the first that works.
+        return runCatching {
+            ProcessBuilder(probe).start().inputStream.bufferedReader().readLines()
+                .map { it.trim() }
+                .firstOrNull { it.isNotBlank() && File(it).canExecute() }
         }.getOrNull()
+    }
 
     private val harness = """
         'use strict';

@@ -357,7 +357,13 @@ class DesktopLlmManagerTest {
         assertFalse(m.status().canGenerate)
         val lines = AiConsole.render(m.status())
         assertTrue(lines.any { it.contains("would produce NO ANSWER") })
-        assertTrue("status must never imply inference has been verified", lines.any { it.contains("no inference has ever been verified") })
+        // Same correction as AiWiringTest: the guarantee is that status never CLAIMS a
+        // verified inference, not that it carries one particular sentence saying so.
+        assertTrue("status must say what ships", lines.any { it.contains("ships with this client") })
+        assertFalse(
+            "status must never imply inference has been verified",
+            lines.any { it.contains("inference has been verified") },
+        )
     }
 
     @Test

@@ -41,6 +41,7 @@ import com.oshi.desktop.gif.AnimatedGifImage
 import com.oshi.desktop.gif.GiphyClient
 import com.oshi.desktop.gif.LocalGifLibrary
 import com.oshi.desktop.i18n.dt
+import com.oshi.desktop.i18n.t
 import com.oshi.desktop.ui.OshiTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -119,18 +120,18 @@ fun GifPicker(
         verticalArrangement = Arrangement.spacedBy(OshiTheme.sm),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm)) {
-            Text(dt("desktop.gif.title"), fontWeight = FontWeight.SemiBold, color = Ink.strong, fontSize = 14.sp)
+            Text(t("gif.picker.title"), fontWeight = FontWeight.SemiBold, color = Ink.strong, fontSize = 14.sp)
             Box(Modifier.weight(1f))
             Segment(dt("desktop.gif.tab.gifs"), kind == LocalGifLibrary.Kind.GIF) { kind = LocalGifLibrary.Kind.GIF; category = null }
-            Segment(dt("desktop.gif.tab.stickers"), kind == LocalGifLibrary.Kind.STICKER) { kind = LocalGifLibrary.Kind.STICKER; category = null }
+            Segment(t("gif.tab.stickers"), kind == LocalGifLibrary.Kind.STICKER) { kind = LocalGifLibrary.Kind.STICKER; category = null }
             Box(Modifier.weight(1f))
-            Text(dt("desktop.gif.close"), color = OshiTheme.brand, fontSize = 13.sp, modifier = Modifier.clickable(onClick = onClose))
+            Text(t("accessibility.close_button"), color = OshiTheme.brand, fontSize = 13.sp, modifier = Modifier.clickable(onClick = onClose))
         }
         Box(
             Modifier.fillMaxWidth().clip(OshiTheme.radiusSm).background(OshiTheme.surface)
                 .padding(horizontal = OshiTheme.md, vertical = OshiTheme.sm),
         ) {
-            if (query.isEmpty()) Text(dt("desktop.gif.search"), color = Ink.soft, fontSize = 13.sp)
+            if (query.isEmpty()) Text(t("gif.picker.search"), color = Ink.soft, fontSize = 13.sp)
             BasicTextField(
                 value = query,
                 onValueChange = { query = it },
@@ -140,7 +141,7 @@ fun GifPicker(
             )
         }
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm)) {
-            Chip(dt("desktop.gif.category.all"), category == null) { category = null }
+            Chip(t("filter_all"), category == null) { category = null }
             // Category names are shown as iOS shows them: the manifest's own English labels.
             library.categories(kind).forEach { c -> Chip(c, category == c) { category = c } }
         }
@@ -187,7 +188,7 @@ fun GifPicker(
                 if (local.isEmpty() && remote.isEmpty() && !remoteLoading) {
                     item(span = { GridItemSpan(maxLineSpan) }) {
                         Text(
-                            if (library.isAvailable) dt("desktop.gif.empty") else dt("desktop.gif.pack_missing"),
+                            if (library.isAvailable) t("gif.picker.no_results") else dt("desktop.gif.pack_missing"),
                             color = Ink.soft, fontSize = 13.sp, modifier = Modifier.padding(OshiTheme.lg),
                         )
                     }

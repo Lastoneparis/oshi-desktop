@@ -43,6 +43,37 @@ fun runUiCli(args: Array<String>) {
     val withMesh = args.contains("--mesh")
     val passphrase = System.getenv("OSHI_PASSPHRASE")?.toCharArray()
 
+    // __DESKTOP_HOME_LOCK_2026_10_29__ One process per data directory, BEFORE any store is
+    // opened. Two instances doing read-modify-write on one ratchet blob corrupt the session
+    // permanently — see [com.oshi.desktop.store.HomeLock] for iOS's own statement of it.
+    //
+    // The lock is taken here and never released: the kernel drops it when this process ends,
+    // which is exactly the behaviour wanted, and an explicit release on a shutdown path would
+    // only create a window in which a second instance could start during teardown.
+    when (val lock = com.oshi.desktop.store.HomeLock.acquire(home)) {
+        is com.oshi.desktop.store.HomeLock.Outcome.Held -> Unit
+        com.oshi.desktop.store.HomeLock.Outcome.Busy -> {
+            // Said plainly and in one sentence, because the person who caused this just
+            // double-clicked an icon and is owed an explanation, not a stack trace.
+            System.err.println(
+                "OSHI is already running on this profile (${home.absolutePath}).\n" +
+                    "Two copies cannot share it: they would corrupt each other's encryption " +
+                    "sessions. Use the window that is already open, or pass --home to run a " +
+                    "second, separate profile.",
+            )
+            return
+        }
+        is com.oshi.desktop.store.HomeLock.Outcome.Unsupported -> {
+            // Proceed UNPROTECTED rather than refuse: some network filesystems cannot lock,
+            // and a client that would not start on such a home directory is broken for a real
+            // user in exchange for a hypothetical one. Said once, out loud.
+            System.err.println(
+                "warning: this filesystem cannot lock ${home.absolutePath} (${lock.reason}); " +
+                    "running a second copy on this profile could corrupt it.",
+            )
+        }
+    }
+
     val store = SecretStore.detect()
     // Recovery happens before OshiClient's loadOrCreate. An existing profile is NEVER
     // overwritten; on an empty profile the first window lets the person explicitly choose
