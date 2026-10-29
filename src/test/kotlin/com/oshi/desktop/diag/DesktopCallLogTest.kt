@@ -79,6 +79,19 @@ class DesktopCallLogTest {
         assertTrue(text.contains("] DIAG_PATH | txPrimary=UDP_RELAY | desktop-marker\n"))
 
         // Same vault, next start ⇒ same key ⇒ the previous run is still readable.
+        //
+        // __CLOSE_BEFORE_THE_NEXT_RUN_2026_10_30__ `close()` is not tidiness here, it is the
+        // thing being modelled. `CallFileLogger`'s init rotates with `fileURL.renameTo(prevURL)`
+        // and the contract is "a NEW RUN, after the previous process exited" — so a test that
+        // leaves the first logger open is not describing the next start, it is describing two
+        // live loggers on one file.
+        //
+        // POSIX hides the difference: you may rename a file somebody still holds open, so this
+        // passed on macOS and Linux for as long as it has existed. Windows does not, the rename
+        // silently returns false, no `call_debug.prev.log` is ever written, and `.first { … }`
+        // throws NoSuchElementException — which is exactly how it failed on `windows-latest`
+        // and nowhere else. The sibling test below always closed, and always passed there.
+        l.close()
         val again = logger(vaultKey(File(home, KeyVault.FILE_NAME)))
         assertTrue(again.decryptedLogs().first { it.first == CallFileLogger.PREVIOUS_LOG_NAME }.second.contains("desktop-marker"))
     }
