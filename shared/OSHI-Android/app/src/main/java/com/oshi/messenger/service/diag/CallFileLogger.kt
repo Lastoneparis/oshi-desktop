@@ -212,9 +212,26 @@ class CallFileLogger(
         return runCatching { dest.writeText(text, Charsets.UTF_8); dest }.getOrNull()
     }
 
-    /** For tests: stop the logger thread after draining. */
+    /**
+     * Stop the logger thread after draining, and RELEASE THE FILE.
+     *
+     * __CLOSE_RELEASES_THE_HANDLE_2026_10_30__ This drained the queue and shut the executor
+     * down but left `channel` open, so the process kept a handle on `call_debug.log` after
+     * the logger said it had stopped. `deleteLog` has always closed it; `close` never did.
+     *
+     * On POSIX that is invisible: a file may be renamed or unlinked while somebody holds it
+     * open, so the next run's rotation (`fileURL.renameTo(prevURL)` in `init`) worked anyway
+     * and nothing on macOS, Linux or Android ever complained. On Windows a held file cannot
+     * be renamed — `renameTo` just returns false — so the previous run was silently never
+     * kept, and `call_debug.prev.log` never appeared. Found on `windows-latest`, where
+     * `DesktopCallLogTest` asked for the previous run and got NoSuchElementException.
+     *
+     * The channel is closed ON THE WRITER THREAD and before `shutdown()`, so it cannot race
+     * a write that is still queued behind the flush.
+     */
     fun close() {
         runCatching { flushAndWait() }
+        runCatching { onQueue { channel?.close(); channel = null } }
         executor.shutdown()
     }
 

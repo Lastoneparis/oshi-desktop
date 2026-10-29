@@ -179,7 +179,40 @@ internal class WindowsDpapiStore(private val service: String) : SecretStore {
     private val dir get() = File(DesktopPaths.dataDir, "dpapi").also { DesktopPaths.ensurePrivateDir(it) }
     private fun blob(account: String) = File(dir, "${service}.${account.replace(Regex("[^A-Za-z0-9._-]"), "_")}.dpapi")
 
-    fun isUsable(): Boolean = powershell() != null
+    /**
+     * __DPAPI_PROBE_2026_10_30__ Does DPAPI actually work here, not merely "is PowerShell
+     * installed".
+     *
+     * This asked `powershell() != null`, which answers a different question. On a Windows
+     * box where `ProtectedData.Protect` fails — a service account, no loaded user profile,
+     * which is the normal shape of a CI runner — PowerShell is present, so `detect()` chose
+     * this store and the FIRST `put` of the master key threw. The app should have degraded
+     * to a passphrase, which is exactly what this class's own doc says happens "on a machine
+     * where the OS store is unavailable".
+     *
+     * Caught on `windows-latest`, where `SecretStoreTest` says in its own comment that a
+     * skip here would be "how an unrun backend gets reported as working" — and the other
+     * half of that is a backend reported as working because its probe was too weak.
+     * `LinuxSecretToolStore` has always probed the live keyring rather than the binary.
+     *
+     * A full Protect→Unprotect round trip of three constant bytes, never a secret. `lazy`
+     * because `detect()` runs at startup and this spawns a process: at most one, once.
+     */
+    private val dpapiRoundTrips: Boolean by lazy {
+        val shell = powershell() ?: return@lazy false
+        val r = Proc.run(
+            listOf(shell, "-NoProfile", "-NonInteractive", "-Command",
+                "Add-Type -AssemblyName System.Security; " +
+                    "\$b=[Convert]::FromBase64String('AAEC'); " +
+                    "\$p=[Security.Cryptography.ProtectedData]::Protect(\$b,\$null,'CurrentUser'); " +
+                    "[Convert]::ToBase64String(" +
+                    "[Security.Cryptography.ProtectedData]::Unprotect(\$p,\$null,'CurrentUser'))"),
+            timeoutSeconds = 15,
+        )
+        r.exitCode == 0 && r.stdout.trim() == "AAEC"
+    }
+
+    fun isUsable(): Boolean = dpapiRoundTrips
 
     private fun powershell(): String? = resolvePowerShell(
         System.getenv("SystemRoot") ?: System.getenv("WINDIR"),
