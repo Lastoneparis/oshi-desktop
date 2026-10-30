@@ -72,6 +72,32 @@ jobs:
         shell: bash
         run: ./gradlew test --no-daemon
 
+      # __WINDOW_SCREENS_ON_THIS_PLATFORM_2026_10_30__ PARITY row 1.1 said, in its own
+      # words: "'did not exit' is not 'looks right', and no screenshot of this window on
+      # Windows exists". The package job proves OSHI.exe is still alive 25 s after launch,
+      # which is a liveness check and says nothing about what it LOOKS like.
+      #
+      # `renderScreens` rasterises the real composables through ImageComposeScene with no
+      # display server, so it runs on a bare runner and uses THIS platform's font stack —
+      # which is the part that cannot be checked from a Mac. It is not a photograph of the
+      # running process; it is every screen drawn with Windows (or Linux) fonts and metrics,
+      # uploaded so a person can look at them. `continue-on-error` deliberately: a rendering
+      # problem must not turn a green test suite red, it must produce something to look at.
+      - name: Render the window's screens, on THIS platform's fonts
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: ./gradlew renderScreens --no-daemon
+
+      - name: Upload the rendered screens
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: window-screens-${{ matrix.os }}
+          path: build/screens/*.png
+          if-no-files-found: warn
+
       # A SKIPPED TEST LOOKS LIKE A PASSING ONE. 22 wire-parity tests read the iOS and
       # Android trees, which are not in this repository, and guard themselves into
       # skipping. Printing the count means a reader of this log knows what did NOT run.
