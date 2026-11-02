@@ -215,7 +215,23 @@ class StringsFileTest {
         // The desktop cannot originate a beacon — it has no position of its own, only its
         // radio's — so it ships the strings without a switch; they arrive here because the
         // catalogs are extracted from iOS wholesale, not cherry-picked.
-        assertEquals("en Localizable key count", 4235, en.localizable.size)
+        // 4235 → 4255 on 2026-11-02, twenty keys from three changes on the iOS
+        // side, and this assertion is how we found out the catalogs had been
+        // stale since that morning:
+        //   * `group.receipts.*` (5) — __GROUP_RECEIPTS_2026_11_02__ (N8), the
+        //     "who has seen this" sheet for a group message.
+        //   * `guide.add_contact.*` (5) and `guide.cashu.*` (10) —
+        //     __IN_APP_GUIDES_2026_11_02__ plus
+        //     __CASHU_GUIDE_SIX_STEPS_2026_11_02__: the bitcoin guide used to
+        //     open at "get a token from a Cashu wallet", which assumes the
+        //     wallet a first-timer does not have, so two steps went in front of
+        //     it — get a wallet, then fund it.
+        // Catalogs regenerated with
+        // `./gradlew i18nExtract -PoshiIosRoot=<repo>/OSHI` in this change.
+        // NOTE the root: pointing it at the repository instead of `OSHI/` wrote
+        // 29 files instead of 69 and emptied half the locales — the sibling
+        // CatalogFreshnessTest and CatalogAuditTest caught it immediately.
+        assertEquals("en Localizable key count", 4255, en.localizable.size)
         assertEquals("en InfoPlist key count", 16, en.infoPlist.size)
         assertEquals("Messages", en.localizable["tab.messages"])
         // Spot-check a value with an escape and one with a bare percent.

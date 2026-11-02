@@ -991,7 +991,15 @@ private fun SealedMediaActions(target: MediaViewerTarget, onProblem: (String?) -
             TextAction("Open in another app") {
                 if (!working) {
                     working = true
-                    MediaExport.inBackground({ MediaExport.openExternally(File(target.path)) }) {
+                    MediaExport.inBackground({
+                        // The kind the bubble DISPLAYED and the name on disk: the
+                        // two sides of the confusion, checked against each other.
+                        MediaExport.openExternally(
+                            File(target.path),
+                            displayedKind = target.kind.wire,
+                            displayName = target.fileName,
+                        )
+                    }) {
                         working = false; onProblem(it)
                     }
                 }
@@ -1031,12 +1039,30 @@ object MediaExport {
         }
     }
 
-    /** Null on success, or a sentence to put on screen. */
-    fun openExternally(file: File): String? = try {
-        val vault = com.oshi.desktop.store.MediaVault.current()
-            ?: return "No media key is loaded in this window, so the attachment cannot be decrypted."
-        java.awt.Desktop.getDesktop().open(vault.decryptToScratch(file))
-        null
+    /**
+     * Null on success, or a sentence to put on screen.
+     *
+     * __ATTACHMENT_TYPE_CONFUSION_2026_11_02__ The policy check comes FIRST,
+     * before the decrypt: `java.awt.Desktop.open` is the shell, the extension
+     * it acts on comes from the SENDER, and the kind the bubble displayed is a
+     * separate wire field. See `AttachmentOpenPolicy` for the mechanism — it
+     * is CVE-2025-30401's shape, and the two names must agree before anything
+     * is handed to the system.
+     */
+    fun openExternally(file: File, displayedKind: String? = null, displayName: String? = null): String? = try {
+        val shownName = displayName ?: file.name
+        val decision = com.oshi.desktop.store.AttachmentOpenPolicy.decide(shownName, displayedKind)
+        if (!decision.allowed) {
+            decision.reason
+        } else {
+            val vault = com.oshi.desktop.store.MediaVault.current()
+            if (vault == null) {
+                "No media key is loaded in this window, so the attachment cannot be decrypted."
+            } else {
+                java.awt.Desktop.getDesktop().open(vault.decryptToScratch(file))
+                null
+            }
+        }
     } catch (t: Throwable) {
         "Could not open a decrypted copy (${t.javaClass.simpleName}: ${t.message ?: "no detail"})."
     }

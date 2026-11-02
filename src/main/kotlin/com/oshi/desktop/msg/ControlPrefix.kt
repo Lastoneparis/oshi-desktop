@@ -106,6 +106,16 @@ object ControlPrefix {
     const val LINKS_VISIBILITY = "🔗LINKS_VISIBILITY🔗"
     const val PROFILE_REQUEST = "📸PROFILE_REQUEST📸"
     const val GROUP_UPDATE = "📢GROUP_UPDATE📢"
+    /**
+     * __GROUP_RECEIPTS_2026_11_02__ (N8) Per-message, per-member "received" and
+     * "read" for a GROUP message, sent to the sender alone.
+     *
+     * The desktop neither emits these nor keeps per-member state — the feature
+     * is a phone one. It is in this catalog because a sentinel missing from the
+     * catalog is a sentinel that renders as RAW JSON in the conversation, and
+     * iPhones and Androids in a shared group are already sending them.
+     */
+    const val GROUP_RECEIPT = "📑GROUP_RECEIPT📑"
     const val SESSION_RESET = "__SESSION_RESET__"
 
     const val CALL_SUMMARY = "📱CALL_SUMMARY📱"
@@ -161,6 +171,7 @@ object ControlPrefix {
         Entry(ACTION, Kind.SILENT),
         Entry(GROUP_UPDATE, Kind.SILENT),
         Entry(POLL_VOTE, Kind.SILENT),
+        Entry(GROUP_RECEIPT, Kind.SILENT),
         Entry(SESSION_RESET, Kind.SILENT),
 
         Entry(CALL_SUMMARY, Kind.RENDERED),
