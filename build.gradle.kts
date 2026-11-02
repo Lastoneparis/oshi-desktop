@@ -15,7 +15,7 @@ plugins {
 }
 
 group = "com.oshi.desktop"
-version = "1.4.0"
+version = "1.4.1"
 
 /**
  * Where the two shipped trees live.
@@ -747,6 +747,16 @@ application {
  * without this they can only ever be run non-interactively.
  */
 tasks.named<JavaExec>("run") {
+    // __RUN_FINDS_THE_NATIVE_2026_10_30__ PARITY row 2.5's last clause is "an answer on
+    // screen", and the console cannot give one unless `System.loadLibrary("llama_jni")`
+    // resolves. The test task has honoured `-PllamaLibDir` for a while; `run` never did,
+    // so the one entry point a person actually types could not load the library the build
+    // had just produced. Same property, same reason it must be a JVM ARGUMENT: the JVM
+    // reads `java.library.path` once, at startup.
+    providers.gradleProperty("llamaLibDir").orNull?.let { dir ->
+        jvmArgs("-Djava.library.path=${file(dir).absolutePath}")
+    }
+
     standardInput = System.`in`
 
     // macOS: the application menu's title, which is NOT settable from inside the process.

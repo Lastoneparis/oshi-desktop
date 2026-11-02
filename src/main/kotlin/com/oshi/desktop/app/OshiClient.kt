@@ -1914,6 +1914,7 @@ class OshiClient(
      */
     private fun groupFanOut(g: GroupDefinition, msgId: String, payloadFor: (String) -> ByteArray?): GroupSendReport {
         var sent = 0
+        var failedTransiently = 0
         val reached = ArrayList<String>()
         val blocked = ArrayList<String>()
         val unreachable = ArrayList<String>()
@@ -1926,10 +1927,26 @@ class OshiClient(
                 continue
             }
             val bytes = runCatching { payloadFor(member) }.getOrNull()
-            if (bytes != null && router.sendText(member, bytes, msgId, groupId = g.groupId)) { sent++; reached += member } else unreachable += member
+            if (bytes != null && router.sendText(member, bytes, msgId, groupId = g.groupId)) {
+                sent++; reached += member
+            } else {
+                // __NO_BUNDLE_IS_NOT_A_TIMEOUT_2026_11_02__ `unreachable` is NOT
+                // "the send failed". `mustUpdateTail` renders it as "<name> must
+                // update OSHI", so it may only hold members the SERVER said it has
+                // no bundle for. Every other cause lands here too — a relay that
+                // timed out, a 502, our own payload failing to encrypt — and
+                // naming a person for any of those is simply false. A user
+                // reported all five members of a group being told to update when
+                // every one of them was current; the relay was just slow.
+                if (router.v2Reach(member) == V2Router.V2Reach.NO_BUNDLE) unreachable += member
+                else failedTransiently++
+            }
         }
         if (unreachable.isNotEmpty()) {
             log("client: group ${g.groupId.take(8)}… ${unreachable.size} member(s) without a v2 path — nothing sent to them")
+        }
+        if (failedTransiently > 0) {
+            log("client: group ${g.groupId.take(8)}… $failedTransiently member(s) not reached this time (transient) — not reported as needing an update")
         }
         return GroupSendReport(g.groupId, recipients.size, sent, blocked, unreachable = unreachable, messageId = msgId, reached = reached)
     }

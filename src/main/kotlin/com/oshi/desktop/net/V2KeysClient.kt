@@ -142,13 +142,45 @@ class V2KeysClient(
         return body.toString().toByteArray(Charsets.UTF_8)
     }
 
-    /** Fetch a peer's bundle, verified. Null means "do not start a V2 session with them". */
-    fun fetchBundle(peerUserKey: String): FetchedBundle? {
+    /**
+     * The three answers `/v2/keys/<peer>` can give, kept apart.
+     *
+     * __NO_BUNDLE_IS_NOT_A_TIMEOUT_2026_11_02__ [fetchBundle] collapses them to
+     * `null`, and a caller that turns `null` into a sentence shown to a user
+     * ends up writing **"<name> must update OSHI"** about somebody whose only
+     * crime was that the relay did not answer in time. That is not theoretical:
+     * the production relay was rewriting a 347 MB state file on every message,
+     * so `/v2/keys` timed out constantly, and a user reported the group naming
+     * all five of its members when every one of them was up to date.
+     *
+     * [Missing] — the server answered 404 — is the ONLY one that may be shown.
+     */
+    sealed interface BundleFetch {
+        data class Found(val bundle: FetchedBundle) : BundleFetch
+        /** The server answered, and it holds no bundle for this key. */
+        data object Missing : BundleFetch
+        /** Transient: no network, a 5xx, a timeout, or an unusable body. */
+        data object Unknown : BundleFetch
+    }
+
+    /** Fetch a peer's bundle, keeping "there is none" apart from "I could not ask". */
+    fun fetchBundleOutcome(peerUserKey: String): BundleFetch {
         val path = "/v2/keys/${DesktopV2Signer.encodeIdentity(peerUserKey)}"
         val resp = http.get(path)
-        if (!resp.isSuccess) return null
-        return parseBundle(resp.body, peerUserKey)
+        if (resp.code == 404) return BundleFetch.Missing
+        if (!resp.isSuccess) return BundleFetch.Unknown
+        // A body we cannot verify is Unknown, never Missing: the peer may be
+        // perfectly current and the server may be the thing at fault.
+        return parseBundle(resp.body, peerUserKey)?.let { BundleFetch.Found(it) } ?: BundleFetch.Unknown
     }
+
+    /**
+     * Fetch a peer's bundle, verified. Null means "do not start a V2 session
+     * with them" — and says nothing about WHY, so anything that turns the
+     * answer into words for a user must call [fetchBundleOutcome] instead.
+     */
+    fun fetchBundle(peerUserKey: String): FetchedBundle? =
+        (fetchBundleOutcome(peerUserKey) as? BundleFetch.Found)?.bundle
 
     private fun parseBundle(body: String, peerUserKey: String): FetchedBundle? {
         return try {

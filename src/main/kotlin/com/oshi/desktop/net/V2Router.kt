@@ -117,13 +117,34 @@ class V2Router(
 
     // ------------------------------------------------------------------ capability
 
-    /** V2 enabled AND this peer is reachable over it (existing session, or a fetchable bundle). */
-    fun ensureCapable(peerUserKey: String): Boolean {
-        if (!config.isEnabledCached()) return false
-        if (activeDevices()?.peerDevices(peerUserKey)?.isNotEmpty() == true) return true
-        if (sessions.has(peerUserKey)) return true
-        return fetchBundleCached(peerUserKey) != null
+    /**
+     * Whether this peer can receive v2 at all.
+     *
+     * __NO_BUNDLE_IS_NOT_A_TIMEOUT_2026_11_02__ Three states, because the group
+     * screen turns one of them into **"<name> must update OSHI"** — a sentence
+     * naming a real person. [UNKNOWN] means "ask again on the next send" and is
+     * shown to nobody. The v2 gate being shut is a fact about THIS machine, so
+     * it is UNKNOWN too, never NO_BUNDLE.
+     */
+    enum class V2Reach { REACHABLE, NO_BUNDLE, UNKNOWN }
+
+    fun v2Reach(peerUserKey: String): V2Reach {
+        if (!config.isEnabledCached()) return V2Reach.UNKNOWN
+        if (activeDevices()?.peerDevices(peerUserKey)?.isNotEmpty() == true) return V2Reach.REACHABLE
+        if (sessions.has(peerUserKey)) return V2Reach.REACHABLE
+        bundleCache[peerUserKey]?.let { return V2Reach.REACHABLE }
+        return when (val r = keys.fetchBundleOutcome(peerUserKey)) {
+            is V2KeysClient.BundleFetch.Found -> {
+                bundleCache[peerUserKey] = r.bundle
+                V2Reach.REACHABLE
+            }
+            V2KeysClient.BundleFetch.Missing -> V2Reach.NO_BUNDLE
+            V2KeysClient.BundleFetch.Unknown -> V2Reach.UNKNOWN
+        }
     }
+
+    /** V2 enabled AND this peer is reachable over it (existing session, or a fetchable bundle). */
+    fun ensureCapable(peerUserKey: String): Boolean = v2Reach(peerUserKey) == V2Reach.REACHABLE
 
     fun refreshConfig() = config.refresh(myUserKey)
 

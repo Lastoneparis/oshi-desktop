@@ -107,7 +107,15 @@ class LiveShellBench {
                 am.send()
 
                 // 3. The sender's OWN thread shows it, and the draft is cleared.
-                until("the sent message appears in A's thread", a, b, timeoutMs = 30_000) {
+                // __BUDGET_BELOW_ONE_REQUEST_2026_10_30__ 30 s was this step's budget for a
+                // path that makes SEVERAL signed requests — `canReach` → `peerDevices`, then
+                // `sendText` → `sendBatch` — each of which may itself take up to `V2Http`'s
+                // 30 s `readTimeout`. A total budget equal to ONE request's timeout cannot
+                // reliably observe a chain of them, so this failed against a relay that was
+                // working: a thread dump showed the worker parked inside `V2Http.request`,
+                // which looks exactly like a hang and is a request still within its own
+                // deadline. Raised above the sum it can legitimately incur.
+                until("the sent message appears in A's thread", a, b, timeoutMs = 120_000) {
                     am.refresh(); am.state.thread?.messages?.any { it.body == text } == true
                 }
                 assertEquals("sending must clear the composer", "", am.state.draft)
