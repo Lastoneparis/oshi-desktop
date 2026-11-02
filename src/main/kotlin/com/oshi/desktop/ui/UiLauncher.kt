@@ -83,7 +83,9 @@ fun runUiCli(args: Array<String>) {
         val vault = try {
             KeyVault.open(File(home, KeyVault.FILE_NAME), store, passphrase)
         } catch (e: Exception) {
-            System.err.println("Cannot open this account for restore:\n${e.message}")
+            // __STARTUP_FAILURE_IS_SILENT_2026_11_02__ stderr is invisible to anyone who
+            // started this from the applications menu; say it in a window.
+            reportStartupFailure(e, home)
             return
         }
         if (IdentityStore.hasAnyAccountMaterial(vault)) {
@@ -96,7 +98,7 @@ fun runUiCli(args: Array<String>) {
         val vault = try {
             KeyVault.open(File(home, KeyVault.FILE_NAME), store, passphrase)
         } catch (e: Exception) {
-            System.err.println("Cannot open this account:\n${e.message}")
+            reportStartupFailure(e, home)
             return
         }
         if (IdentityStore.hasAnyAccountMaterial(vault)) false
@@ -120,7 +122,7 @@ fun runUiCli(args: Array<String>) {
         // up empty would look like an account with no history rather than an account that
         // could not be opened — which is the difference between "nothing happened yet" and
         // "your identity is behind a key this process does not have."
-        System.err.println("Cannot open this account:\n${e.message}")
+        reportStartupFailure(e, home)
         return
     }
 
@@ -161,4 +163,44 @@ fun runUiCli(args: Array<String>) {
 private fun flag(args: Array<String>, name: String): String? {
     val i = args.indexOf(name)
     return if (i >= 0 && i + 1 < args.size) args[i + 1] else null
+}
+
+/**
+ * __STARTUP_FAILURE_IS_SILENT_2026_11_02__ One place that turns a refusal into
+ * something the person can see, read and act on.
+ *
+ * Still prints to stderr — a terminal launch should keep its output, and so
+ * should any log a user pipes to us — and then opens a window, because the
+ * normal way to start a desktop app is from a menu where stderr is discarded.
+ *
+ * The "what to do" line is chosen from the failure, and the key-store case is
+ * the one worth naming: on Linux a locked keyring is a routine state, and the
+ * answer (set `OSHI_PASSPHRASE`, or unlock the keyring) is something a person
+ * can actually carry out.
+ */
+private fun reportStartupFailure(e: Exception, home: java.io.File) {
+    val detail = e.message ?: e.toString()
+    System.err.println("Cannot open this account:\n$detail")
+    val keyStore = detail.contains("key store", ignoreCase = true) ||
+        detail.contains("secret-tool", ignoreCase = true) ||
+        detail.contains("keyring", ignoreCase = true) ||
+        detail.contains("passphrase", ignoreCase = true)
+    val whatToDo = if (keyStore) {
+        "OSHI keeps your identity key in this computer's key store, and this machine's is " +
+            "not accepting it — on Linux that usually means the login keyring is locked or " +
+            "absent.\n\nYou can either unlock the keyring and start OSHI again, or give OSHI " +
+            "a passphrase of its own by setting OSHI_PASSPHRASE before launching it. Your " +
+            "messages are not lost: nothing here was deleted or overwritten.\n\nProfile: " +
+            home.absolutePath
+    } else {
+        "Nothing was deleted or overwritten. If you reach us about this, the lines above are " +
+            "the ones to send.\n\nProfile: " + home.absolutePath
+    }
+    runCatching {
+        startupFailureWindow(
+            headline = "OSHI could not open this account",
+            detail = detail,
+            whatToDo = whatToDo,
+        )
+    }
 }

@@ -116,15 +116,54 @@ internal class LinuxSecretToolStore(private val service: String) : SecretStore {
 
     private fun secretTool(): String? = resolveSecretTool(Proc::which)
 
-    fun isUsable(): Boolean {
-        val tool = secretTool() ?: return false
-        // A keyring daemon that is not running makes every call hang or fail; a lookup
-        // of a key we do not have is the cheapest way to find out, and its "not found"
-        // (exit 1, empty stderr) is success for this purpose.
-        return Proc.run(
-            listOf(tool, "lookup", "service", service, "account", "__probe__"),
-            timeoutSeconds = 5,
-        ).timedOut.not()
+    fun isUsable(): Boolean = keyringAcceptsAWrite
+
+    /**
+     * __SECRET_TOOL_PROBE_2026_11_02__ Does this keyring accept a WRITE, not merely
+     * answer a question.
+     *
+     * The old probe was a `lookup` of a key we do not have, and it treated anything
+     * other than a timeout as success. A **locked** collection answers a lookup
+     * perfectly well — "not found", exit 1, instantly — so the probe passed, `detect()`
+     * chose this store, and the FIRST `put` of the master key threw:
+     *
+     *     Cannot open this account:
+     *     secret-tool store failed: secret-tool: Cannot create an item in a locked collection
+     *
+     * On a GUI launch that text goes to stderr, where nobody sees it, and the launcher
+     * returns. The app simply does not open. Measured on Ubuntu 24.04 by extracting the
+     * published .deb and running it under Xvfb: the published 1.4.1 cannot create an
+     * account on a machine whose keyring is locked or unwritable — a headless box, a
+     * minimal install, an auto-login desktop whose login keyring was never unlocked.
+     *
+     * This is the SAME defect as `__DPAPI_PROBE_2026_10_30__` on Windows, and the note
+     * there says "`LinuxSecretToolStore` has always probed the live keyring rather than
+     * the binary". It did — and asking the keyring whether it is alive is not asking
+     * whether it will take a secret.
+     *
+     * So: store three constant bytes, read them back, clear them. Never a real secret,
+     * and `lazy` because `detect()` runs at startup and this spawns processes.
+     *
+     * A keyring that is merely LOCKED may prompt here, or time out and send us to the
+     * passphrase path. That is the right trade: `KeyVault.open` records the protection
+     * scheme in the vault file, so the choice is made once on a fresh profile and never
+     * flips underneath an existing one — and a passphrase a user can type beats an app
+     * that will not start.
+     */
+    private val keyringAcceptsAWrite: Boolean by lazy {
+        val tool = secretTool() ?: return@lazy false
+        val probe = "__probe__"
+        val value = "AAEC"   // three constant bytes, base64
+        val put = Proc.run(
+            listOf(tool, "store", "--label=OSHI key store probe", "service", service, "account", probe),
+            stdin = value, timeoutSeconds = 8,
+        )
+        if (!writeProbePassed(put, null, value)) return@lazy false
+        val got = Proc.run(
+            listOf(tool, "lookup", "service", service, "account", probe), timeoutSeconds = 8,
+        )
+        Proc.run(listOf(tool, "clear", "service", service, "account", probe), timeoutSeconds = 8)
+        writeProbePassed(put, got, value)
     }
 
     override fun get(account: String): ByteArray? {
@@ -149,6 +188,19 @@ internal class LinuxSecretToolStore(private val service: String) : SecretStore {
     }
 
     internal companion object {
+        /**
+         * The probe's verdict, separated from the processes that produce it so the
+         * cases that matter can be asserted without a keyring.
+         *
+         * [lookup] is null on the first call, when only the WRITE has happened: a
+         * locked collection fails there, and there is no point reading back.
+         */
+        internal fun writeProbePassed(put: Proc.Result, lookup: Proc.Result?, expected: String): Boolean {
+            if (put.timedOut || put.exitCode != 0) return false
+            if (lookup == null) return true
+            return !lookup.timedOut && lookup.exitCode == 0 && lookup.stdout.trim() == expected
+        }
+
         private const val SYSTEM_SECRET_TOOL = "/usr/bin/secret-tool"
 
         /** Prefer the system binary so a writable PATH entry cannot receive the vault key. */
@@ -193,7 +245,9 @@ internal class WindowsDpapiStore(private val service: String) : SecretStore {
      * Caught on `windows-latest`, where `SecretStoreTest` says in its own comment that a
      * skip here would be "how an unrun backend gets reported as working" — and the other
      * half of that is a backend reported as working because its probe was too weak.
-     * `LinuxSecretToolStore` has always probed the live keyring rather than the binary.
+     * `LinuxSecretToolStore` probed the live keyring rather than the binary — which, as
+     * __SECRET_TOOL_PROBE_2026_11_02__ found, still answered "alive" for a keyring that
+     * would refuse the write. Both probes are now round trips.
      *
      * A full Protect→Unprotect round trip of three constant bytes, never a secret. `lazy`
      * because `detect()` runs at startup and this spawns a process: at most one, once.

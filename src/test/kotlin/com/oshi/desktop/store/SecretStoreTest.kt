@@ -4,6 +4,7 @@ import java.io.File
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -182,6 +183,42 @@ class SecretStoreTest {
             isExecutable = { false },
         )
         assertEquals("/opt/minimal/bin/secret-tool", resolved)
+    }
+
+    // __SECRET_TOOL_PROBE_2026_11_02__ The Linux probe asked the keyring whether it
+    // was ALIVE, and a locked collection is very much alive. These are the four answers
+    // it has to tell apart, written from what Ubuntu 24.04 actually returns.
+    private fun res(exit: Int, out: String = "", err: String = "", timedOut: Boolean = false) =
+        Proc.Result(exit, out, err, timedOut)
+
+    @Test
+    fun `a locked keyring is not a usable key store`() {
+        // The measured failure: `store` exits non-zero with this on stderr, and the OLD
+        // probe never issued a store at all — it issued a lookup, which SUCCEEDS here.
+        val put = res(1, err = "secret-tool: Cannot create an item in a locked collection")
+        assertFalse(LinuxSecretToolStore.writeProbePassed(put, null, "AAEC"))
+    }
+
+    @Test
+    fun `a keyring that takes the write and gives it back is usable`() {
+        val put = res(0)
+        val got = res(0, out = "AAEC\n")
+        assertTrue(LinuxSecretToolStore.writeProbePassed(put, got, "AAEC"))
+    }
+
+    @Test
+    fun `a write that hangs is not usable`() {
+        assertFalse(LinuxSecretToolStore.writeProbePassed(res(0, timedOut = true), null, "AAEC"))
+        assertFalse(LinuxSecretToolStore.writeProbePassed(res(0), res(0, out = "AAEC", timedOut = true), "AAEC"))
+    }
+
+    @Test
+    fun `a keyring that returns something else is not usable`() {
+        // A daemon that accepts writes and serves a DIFFERENT value would hand the vault
+        // a master key that is not the one it stored. Never silently accept that.
+        assertFalse(LinuxSecretToolStore.writeProbePassed(res(0), res(0, out = "ZZZZ"), "AAEC"))
+        assertFalse(LinuxSecretToolStore.writeProbePassed(res(0), res(0, out = ""), "AAEC"))
+        assertFalse(LinuxSecretToolStore.writeProbePassed(res(0), res(1), "AAEC"))
     }
 
     @Test
