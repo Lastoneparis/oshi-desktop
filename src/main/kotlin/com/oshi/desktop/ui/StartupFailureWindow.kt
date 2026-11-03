@@ -4,9 +4,10 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.Button
-import androidx.compose.material.MaterialTheme
-import androidx.compose.material.Text
+import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
@@ -48,23 +49,37 @@ fun startupFailureWindow(headline: String, detail: String, whatToDo: String) {
             title = "OSHI — cannot open this account",
             state = rememberWindowState(width = 620.dp, height = 430.dp),
         ) {
-            Column(
-                modifier = Modifier.fillMaxSize().padding(28.dp).verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(14.dp),
-            ) {
-                Text(headline, fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
-                SelectionContainer {
-                    Text(
-                        detail,
-                        fontSize = 13.sp,
-                        fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colors.onSurface.copy(alpha = 0.75f),
-                    )
-                }
-                Text(whatToDo, fontSize = 14.sp)
-                Spacer(Modifier.weight(1f))
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(onClick = { exitApplication() }) { Text("Close") }
+            // The app's own palette and type, not Material's defaults: this window
+            // is often the FIRST thing a person sees of OSHI, and a screen that
+            // looks like a developer's error box reads as a broken download.
+            MaterialTheme(colorScheme = OshiTheme.colors, typography = OshiTheme.typography) {
+                Surface(modifier = Modifier.fillMaxSize()) {
+                    Column(
+                        modifier = Modifier.fillMaxSize().padding(32.dp).verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(16.dp),
+                    ) {
+                        Text(
+                            "OSHI",
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                brush = OshiTheme.brandGradient,
+                                fontWeight = FontWeight.Bold,
+                            ),
+                        )
+                        Text(headline, fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
+                        SelectionContainer {
+                            Text(
+                                detail,
+                                fontSize = 13.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = OshiTheme.textSecondary,
+                            )
+                        }
+                        Text(whatToDo, fontSize = 14.sp)
+                        Spacer(Modifier.weight(1f))
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Button(onClick = { exitApplication() }) { Text("Close") }
+                        }
+                    }
                 }
             }
         }

@@ -29,6 +29,10 @@ import com.oshi.desktop.store.IdentityStore
 import com.oshi.desktop.store.KeyVault
 import java.awt.FileDialog
 import java.io.File
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.font.FontWeight
 
 /**
  * A deliberately small, separate restore window.  It runs before [OshiClient] exists:
@@ -172,14 +176,46 @@ fun firstRunIdentityWindow(vault: KeyVault): FirstRunIdentityChoice {
             var error by remember { mutableStateOf<String?>(null) }
             MaterialTheme(colorScheme = OshiTheme.colors, typography = OshiTheme.typography) {
                 Surface {
+                    // __FIRST_RUN_IS_THE_FIRST_IMPRESSION_2026_11_03__ Seen on a real
+                    // Linux box for the first time, this screen was a headline, a line
+                    // of hint and two buttons jammed against the top edge of a 540x450
+                    // window, with the lower half empty and nothing identifying the
+                    // product. It is the first thing a new user ever sees of OSHI.
+                    //
+                    // Centred, with the name and the tagline above it. The three
+                    // strings used here — `identity.title`, `identity.tagline`,
+                    // `identity.subtitle` — ALREADY EXIST and are already translated in
+                    // all 34 locales, which is why they are reused rather than new copy
+                    // written: the guides shipped with 32 locales of untranslated
+                    // English this week and that is not a mistake worth repeating for
+                    // the sake of a nicer sentence.
                     Column(
-                        modifier = Modifier.padding(28.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                        modifier = Modifier.fillMaxSize().padding(horizontal = 36.dp, vertical = 28.dp),
+                        verticalArrangement = Arrangement.Center,
+                        horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
+                        Text(
+                            t("identity.title"),
+                            // The brand gradient the phone draws its own wordmark in.
+                            style = MaterialTheme.typography.headlineMedium.copy(
+                                brush = OshiTheme.brandGradient,
+                                fontWeight = FontWeight.Bold,
+                            ),
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            t("identity.tagline"),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = OshiTheme.textSecondary,
+                            textAlign = TextAlign.Center,
+                        )
+                        Spacer(Modifier.height(28.dp))
                         Text(
                             if (importing) t("identity.import_existing") else t("identity.create_new"),
                             style = MaterialTheme.typography.headlineSmall,
+                            textAlign = TextAlign.Center,
                         )
+                        Spacer(Modifier.height(8.dp))
                         Text(
                             if (importing) {
                                 t("identity.import_existing.hint")
@@ -187,7 +223,10 @@ fun firstRunIdentityWindow(vault: KeyVault): FirstRunIdentityChoice {
                                 t("identity.create_new.hint")
                             },
                             style = MaterialTheme.typography.bodyMedium,
+                            color = OshiTheme.textSecondary,
+                            textAlign = TextAlign.Center,
                         )
+                        Spacer(Modifier.height(20.dp))
                         if (!importing) {
                             Button(
                                 modifier = Modifier.fillMaxWidth(),
