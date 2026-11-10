@@ -12,7 +12,10 @@ package com.oshi.messenger.service
  *
  * The rules, in the order they are applied:
  *
- *  1. **Too short.** Under [MIN_SECONDS] there was no conversation to judge.
+ *  1. **Too short.** Under [MIN_SECONDS] there was no conversation to judge —
+ *     UNLESS the call ended on a fault (`wasFault`). See
+ *     `__SHORT_FAILURES_COULD_NEVER_BE_REPORTED_2026_11_07__` on [decide]: this
+ *     gate used to sit above rule 4 and quietly voided it.
  *  2. **Weekly ceiling.** At most [MAX_ASKS_PER_WEEK] asks in any rolling week,
  *     whatever else is true. This outranks every reason to ask.
  *  3. **Cooldown.** A quiet period after the previous ask, shorter when the call
@@ -45,6 +48,21 @@ object CallRatingPolicy {
     enum class Block { TOO_SHORT, ALREADY_RATED, WEEKLY_CEILING, COOLDOWN, NOT_SAMPLED }
 
     /**
+     * __SHORT_FAILURES_COULD_NEVER_BE_REPORTED_2026_11_07__
+     *
+     * THE BUG THIS CLOSES: rule 4 above promises "a call that dropped, errored
+     * or lost the peer is exactly the one worth hearing about", and the
+     * [MIN_SECONDS] gate sat above it — so the promise was void for any such
+     * call shorter than 8 s, which is most of them. Measured on the relay over
+     * 06-07/11: 17 calls, 8 of them 0-4 s, ONE rating returned in total.
+     *
+     * [wasFault] is deliberately NARROWER than `!endedNormally`: a DECLINED or
+     * ANSWERED_ELSEWHERE call is also "not normal" and is not a fault, and
+     * asking "how did that sound?" after one is how a sheet gets trained into
+     * reflex dismissal. The floor still applies to those.
+     *
+     * @param wasFault the call ended because something broke (ERROR,
+     *   CONNECTION_LOST), not because someone chose to end it.
      * @param askTimes every previous ask, in epoch millis; older entries are ignored.
      * @param goodCallCounter how many good calls have been counted so far.
      */
@@ -55,10 +73,13 @@ object CallRatingPolicy {
         alreadyRated: Boolean,
         lastAskAt: Long,
         askTimes: List<Long>,
-        goodCallCounter: Int
+        goodCallCounter: Int,
+        wasFault: Boolean = false
     ): Decision {
         if (alreadyRated) return Decision(false, null, Block.ALREADY_RATED)
-        if (durationSeconds < MIN_SECONDS) return Decision(false, null, Block.TOO_SHORT)
+        if (!wasFault && durationSeconds < MIN_SECONDS) {
+            return Decision(false, null, Block.TOO_SHORT)
+        }
 
         val recent = askTimes.filter { it > now - WEEK_MS }
         if (recent.size >= MAX_ASKS_PER_WEEK) return Decision(false, null, Block.WEEKLY_CEILING)

@@ -231,7 +231,51 @@ class StringsFileTest {
         // NOTE the root: pointing it at the repository instead of `OSHI/` wrote
         // 29 files instead of 69 and emptied half the locales — the sibling
         // CatalogFreshnessTest and CatalogAuditTest caught it immediately.
-        assertEquals("en Localizable key count", 4255, en.localizable.size)
+        // 4255 → 4335 on 2026-11-04, eighty keys, and the tripwire did its job twice
+        // over: it was ALREADY red when today's work started, which is how we learned
+        // the catalogs had gone stale upstream again — 77 of these 80 are other
+        // people's keys that had accumulated in the iOS tree with no regeneration
+        // behind them (`delivery_lora_unverified` and its neighbours showed up first
+        // in CatalogFreshnessTest's diff).
+        //
+        // The three that belong to this change are `alive.summary.{started,confirmed,
+        // stopped}` — __ALIVE_CHECK_IN_2026_11_04__, the recurring "I'm alive"
+        // liveness confirmation. They were written into the iOS source in all 34
+        // languages first, because this file's sibling
+        // (`CatalogAuditTest."every locale serves every key the desktop uses"`)
+        // refuses a key that only exists in English: hand-adding it to `en.json`
+        // alone ships it missing in thirty-three languages and nothing says so.
+        // Catalogs regenerated with
+        // `./gradlew i18nExtract -PoshiIosRoot=<repo>/OSHI` in this change.
+        // 4335 → 4353 on 2026-11-07, SEVENTEEN keys — and once again the tripwire
+        // was already red before this change started, for the same reason as last
+        // time: keys accumulate in the iOS tree and nobody re-extracts.
+        //
+        // SIX belong to recent work here:
+        //   chat_unread_divider              __UNREAD_HAD_NO_LINE_2026_11_07__
+        //   lora.error.channel_unknown       __CHANNEL_ROOMS_ALL_SENT_ON_SLOT_ZERO__
+        //   lora.node.message                __MESSAGE_THE_NODE_FROM_THE_MAP__
+        //   peers.connect.{dialing,already,searching}
+        //                                    __THE_CONNECT_BUTTON_WAS_REMOVED…__
+        //
+        // ELEVEN are older keys that had been sitting in the iOS source with no
+        // regeneration behind them: forward.{no_match,search_prompt},
+        // group.{block,report,unblock}_member, map_background_* (six).
+        //
+        // While re-extracting, `CatalogAuditTest` surfaced a REAL bug rather than
+        // a bookkeeping one: `edit.original_label` (2026-11-06) had shipped in en
+        // and fr ONLY, so the other thirty-two languages rendered the raw key in
+        // the message-edit sheet. Added to all 34 in the same change — which is
+        // exactly the failure that sibling test exists to prevent, catching a key
+        // that reached iOS without reaching its translations.
+        //
+        // Catalogs regenerated with
+        // `./gradlew i18nExtract -PoshiIosRoot=<repo>/OSHI` in this change.
+        //
+        // 4353 → 4383 on 2026-11-09 (30 keys): the production merge (Cashu send
+        // sheet + truthful no-wallet wording, LoRa interop/channel strings) plus
+        // the OHTTP "privacy relay" settings strings — re-extracted, not hand-added.
+        assertEquals("en Localizable key count", 4383, en.localizable.size)
         assertEquals("en InfoPlist key count", 16, en.infoPlist.size)
         assertEquals("Messages", en.localizable["tab.messages"])
         // Spot-check a value with an escape and one with a bare percent.

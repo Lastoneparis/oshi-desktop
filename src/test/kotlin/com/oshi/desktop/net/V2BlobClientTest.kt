@@ -79,6 +79,34 @@ class V2BlobClientTest {
         assertTrue("decrypted bytes do not match the original plaintext", out.readBytes().contentEquals(plaintext))
     }
 
+    /** __MEDIA_PADDING_2026_11_10__ a padded blob: the file on disk is exactly `size` bytes. */
+    @Test
+    fun `round trip - a padded blob lands on disk unpadded`() {
+        val plaintext = ByteArray(200 * 1024 + 777) { (it % 251).toByte() }
+        val enc = OSHICryptoV2.encryptFile(plaintext, "movie.mp4", "video/mp4", chunkSize = 64 * 1024, pad = true)
+        assertEquals(OSHICryptoV2.mediaChunkCount(plaintext.size.toLong(), padded = true, chunkSize = 64 * 1024), enc.chunks.size)
+        val blobId = client.uploadBlob("peer-recipient-key", enc.chunks)!!
+        val out = File(dir, "padded.bin")
+        val written = client.downloadAndDecryptToFile(blobId, enc.chunks.size, enc.fileKey, enc.fileNonce, enc.manifest, out)
+        assertEquals(plaintext.size.toLong(), written)
+        assertTrue(out.readBytes().contentEquals(plaintext))
+    }
+
+    /** __MEDIA_PADDING_2026_11_10__ non-zero padding: refused, and no partial file is left. */
+    @Test
+    fun `streaming receive rejects non-zero padding and removes the partial file`() {
+        val fileKey = ByteArray(32) { 3 }
+        val fileNonce = ByteArray(8) { 4 }
+        val sealed = ByteArray(4096).also { it[0] = 1; it[4095] = 7 }       // size 1, last byte not zero
+        val chunk = OSHICryptoV2.aesGcmSeal(fileKey, OSHICryptoV2.chunkNonce(fileNonce, 0), sealed, ByteArray(0))
+        val info = OSHICryptoV2.manifestJson("f.bin", "application/octet-stream", 1, 1, OSHICryptoV2.DEFAULT_CHUNK_SIZE, 4096)
+        val manifest = OSHICryptoV2.aesGcmSeal(fileKey, OSHICryptoV2.chunkNonce(fileNonce, OSHICryptoV2.MANIFEST_COUNTER), info, ByteArray(0))
+        val blobId = client.uploadBlob("peer-recipient-key", listOf(chunk))!!
+        val out = File(dir, "bad-padding.bin")
+        assertNull(client.downloadAndDecryptToFile(blobId, 1, fileKey, fileNonce, manifest, out))
+        assertFalse(out.exists())
+    }
+
     @Test
     fun `streaming receive refuses plaintext over its cap and removes any partial file`() {
         val plaintext = ByteArray(64 * 1024) { (it % 251).toByte() }

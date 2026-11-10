@@ -459,9 +459,23 @@ private fun Shell(
     // records it (`viewOnceOpened` is written by nobody) and inventing a persisted "opened"
     // would claim bookkeeping this client does not do.
     val revealed = remember { mutableStateMapOf<String, Unit>() }
-    // `LocalDate.now()` once per composition pass rather than per row; a window left open
-    // across midnight will relabel on its next recomposition, which any message causes.
-    val today = remember(state) { LocalDate.now() }
+    // `LocalDate.now()` once per composition pass rather than per row.
+    //
+    // __RELATIVE_TIMES_FROZE_2026_11_09__ The comment here used to accept "a window left
+    // open across midnight will relabel on its next recomposition, which any message
+    // causes" — i.e. a quiet window kept saying "23:50" for what had become yesterday,
+    // the desktop form of Android's frozen "Just now". The list labels are day-bucketed
+    // (`DayBreaks.compactStamp`), so a minute tick is plenty; `today` only CHANGES at
+    // midnight, so the tick recomposes nothing on the other 1 439 minutes.
+    var dayTick by remember { mutableStateOf(LocalDate.now()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(60_000L)
+            val d = LocalDate.now()
+            if (d != dayTick) dayTick = d
+        }
+    }
+    val today = remember(state, dayTick) { LocalDate.now() }
 
     var half by remember { mutableStateOf(ConversationFilter.Half.MESSAGES) }
 
@@ -658,6 +672,10 @@ private fun MessagesDestination(
                     radio = remember(client) { com.oshi.desktop.ui.components.loRaPaneHost(client) },
                     contacts = state.contacts,
                     onCopy = { copyToClipboard(it) },
+                    // __MESSAGE_THE_NODE_FROM_THE_MAP_2026_11_07__ Same two steps the
+                    // conversation list and More pane use, so a node opens exactly the way
+                    // any other thread does.
+                    onMessage = { key -> model.select(key); model.go(Destination.MESSAGES) },
                 )
                 // __DEVSYNC_DIRECT_2026_09_22__
                 Pane.DEVICES -> com.oshi.desktop.ui.components.LinkedDevicesPane(client.devSync, client.deviceMailbox)

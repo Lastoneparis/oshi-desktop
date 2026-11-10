@@ -1,6 +1,7 @@
 package com.oshi.desktop.net
 
 import com.oshi.desktop.store.AtomicFile
+import com.oshi.messenger.network.v2.V2PaddingPeers
 import com.oshi.messenger.network.v2.V2RetryBudget
 import java.io.File
 import org.json.JSONArray
@@ -67,6 +68,15 @@ class RouterState(private val file: File) {
      * nothing. This one number never can be.
      */
     private var stallSince: Long = 0
+
+    /**
+     * __V2_PADDING_2026_11_09__ The shared [V2PaddingPeers] map, serialized (per-session
+     * "strips padding" knowledge), and the `caps` last published in the account bundle — so a
+     * build that learns a new capability republishes it once instead of waiting for the
+     * one-time pool to run low.
+     */
+    private var paddingSlots: String? = null
+    private var publishedCaps: Int = -1
     private var dirty = false
 
     init {
@@ -152,6 +162,22 @@ class RouterState(private val file: File) {
         dirty = true
     }
 
+    /** __V2_PADDING_2026_11_09__ The persistence seam [V2PaddingPeers.attach] takes. */
+    fun paddingStore(): V2PaddingPeers.Store = object : V2PaddingPeers.Store {
+        override fun read(): String? = synchronized(this@RouterState) { paddingSlots }
+        override fun write(json: String) = synchronized(this@RouterState) {
+            if (paddingSlots != json) { paddingSlots = json; dirty = true }
+        }
+    }
+
+    @Synchronized
+    fun publishedCaps(): Int = publishedCaps
+
+    @Synchronized
+    fun setPublishedCaps(caps: Int) {
+        if (publishedCaps != caps) { publishedCaps = caps; dirty = true }
+    }
+
     /** Write, if anything changed. A quiet poll must not cost a file write. */
     @Synchronized
     fun flush() {
@@ -181,6 +207,8 @@ class RouterState(private val file: File) {
                 if (healSent.isNotEmpty()) put("healSent", JSONObject().apply {
                     healSent.forEach { (k, v) -> put(k, v) }
                 })
+                paddingSlots?.let { runCatching { put("paddingSlots", JSONObject(it)) } }
+                if (publishedCaps >= 0) put("publishedCaps", publishedCaps)
             }
         AtomicFile.write(file, json.toString().toByteArray(Charsets.UTF_8))
         dirty = false
@@ -189,7 +217,7 @@ class RouterState(private val file: File) {
     @Synchronized
     fun clear() {
         lastSeq = 0; deviceLastSeq = 0; seen.clear(); retries.clear(); stallSince = 0
-        healEvidence.clear(); healSent.clear(); dirty = true
+        healEvidence.clear(); healSent.clear(); paddingSlots = null; publishedCaps = -1; dirty = true
         flush()
     }
 
@@ -226,6 +254,8 @@ class RouterState(private val file: File) {
                 }
             }
             stallSince = o.optLong("cursorStalledSince", 0)
+            paddingSlots = o.optJSONObject("paddingSlots")?.toString()
+            publishedCaps = o.optInt("publishedCaps", -1)
         } catch (_: Exception) {
             // A corrupt cursor file degrades to "start from the beginning": the relay is
             // non-destructive until acked, so the worst case is re-pulling what is still

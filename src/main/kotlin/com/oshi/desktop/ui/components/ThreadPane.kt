@@ -612,7 +612,18 @@ private fun MessageLog(
                 onReveal = { onReveal(row.id) },
                 // __GROUP_E2E_V2_2026_09_23__ groups too (GROUP_E2E_V2_SPEC §2.3-2.4): edit own, delete own or as admin.
                 onReact = if (thread.kind == ConversationKind.DIRECT || thread.kind == ConversationKind.GROUP) { emoji -> onReact(row.id, emoji) } else null,
-                onEdit = if ((thread.kind == ConversationKind.DIRECT || thread.kind == ConversationKind.GROUP) && row.fromMe) { body -> onEditMessage(row.id, body) } else null,
+                // __EDIT_OFFERED_ON_THINGS_THE_PHONES_REFUSE_2026_11_05__
+                // `row.attachment == null && row.poll == null` added. This used
+                // to gate on ownership alone, so Edit appeared under a photo
+                // (whose `body` is its CAPTION) and under a poll (whose `body`
+                // is empty) — and `OshiClient.editMessage` does not re-check.
+                // Saving either sent an `editMessage` action that a receiving
+                // phone applies by assigning `plaintextContent = newContent` on
+                // a media row, rewriting a photo's body with caption text.
+                // iOS and Android both require `mediaType == nil`; this now
+                // matches them.
+                onEdit = if ((thread.kind == ConversationKind.DIRECT || thread.kind == ConversationKind.GROUP)
+                    && row.fromMe && row.attachment == null && row.poll == null) { body -> onEditMessage(row.id, body) } else null,
                 onDelete = if ((thread.kind == ConversationKind.DIRECT && row.fromMe) ||
                     (thread.kind == ConversationKind.GROUP && (row.fromMe || thread.groupAdmin))) { { onDeleteMessage(row.id) } } else null,
                 // __GROUP_PARITY_2026_09_23__ reply in 1:1 and groups; sender names in groups.

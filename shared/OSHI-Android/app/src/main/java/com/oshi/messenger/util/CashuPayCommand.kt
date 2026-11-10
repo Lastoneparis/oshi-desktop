@@ -74,4 +74,19 @@ object CashuPayCommand {
         if (isGroup && !confirmedPublic) return Outcome.NeedsPublicConfirm(summary)
         return Outcome.Send(token, summary)
     }
+
+    /**
+     * __CASHU_SEND_READY_2026_11_09__ What the Send-bitcoin sheet makes of
+     * whatever was pasted into it. The SAME rules as `/pay` — it literally is
+     * `/pay <text>` — so the sheet can never accept a string the command would
+     * refuse. A 1:1 decision: the sheet states the group risk itself.
+     */
+    fun parsePasted(text: String): Outcome {
+        val t = text.trim()
+        if (t.isEmpty()) return Outcome.Usage
+        return parse("$PREFIX $t", isGroup = false)
+    }
+
+    /** The first Cashu token in [text] (a clipboard with a sentence around it, a `cashu:` link), or null. */
+    fun firstToken(text: String): String? = CashuTokens.find(text).firstOrNull()?.token?.raw
 }

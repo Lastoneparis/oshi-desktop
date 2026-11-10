@@ -52,8 +52,13 @@ J="$SRC/OSHI-Android/app/src/main/java/com/oshi/messenger"
 A="$PUB/shared/OSHI-Android/app/src"
 M="$A/main/java/com/oshi/messenger"
 mkdir -p "$M/network/v2/devsync" "$M/network/encryption" "$M/service/diag" "$M/util" "$A/test/resources" "$A/main/assets"
-cp "$J"/network/v2/{OSHICryptoV2,OSHICryptoV2Streaming,OSHIRatchetV2,V2Session,V2FileKeyMessage,V2RetryBudget,RatchetHealSignal}.kt "$M/network/v2/"
+cp "$J"/network/v2/{OSHICryptoV2,OSHICryptoV2Streaming,OSHIRatchetV2,V2Session,V2FileKeyMessage,V2RetryBudget,RatchetHealSignal,V2Padding}.kt "$M/network/v2/"
 cp "$J"/network/v2/devsync/*.kt "$M/network/v2/devsync/"
+# __OHTTP_DESKTOP_2026_11_10__ the OHTTP client is SHARED source (network/ohttp srcDir in
+# build.gradle.kts), plus Android's BHTTP test which the desktop runs unchanged.
+mkdir -p "$M/network/ohttp" "$A/test/java/com/oshi/messenger/network/ohttp"
+cp "$J"/network/ohttp/{Bhttp,Ohttp,OhttpConfig}.kt "$M/network/ohttp/"
+cp "$SRC"/OSHI-Android/app/src/test/java/com/oshi/messenger/network/ohttp/BhttpTest.kt "$A/test/java/com/oshi/messenger/network/ohttp/"
 # __RATCHET_IS_SHARED_SOURCE_2026_10_28__ DoubleRatchet + RatchetSeams (RatchetBase64)
 cp "$J"/network/encryption/{PostQuantumKEM,RatchetSecurityMode,DoubleRatchet,RatchetSeams}.kt "$M/network/encryption/"
 cp "$J"/service/{LlamaCpp,CallRatingPolicy}.kt "$M/service/"
@@ -89,7 +94,7 @@ while read -r want; do
   find "$A/main/java" -name "$want" -print -quit | grep -q . || missing="$missing $want"
 done <<EOF
 $(sed -n '/kotlin.include(/,/^        )/p' "$SRC/OSHI-Desktop/build.gradle.kts" \
-    | grep -oE '"\*\*/[A-Za-z0-9_]+\.kt"' | tr -d '"' | sed 's|\*\*/||' | sort -u)
+    | grep -oE '"(\*\*/)?[A-Za-z0-9_]+\.kt"' | tr -d '"' | sed 's|\*\*/||' | sort -u)
 EOF
 if [ -n "$missing" ]; then
   echo "ABORT: build.gradle.kts includes these shared sources and the copy list above does not carry them:$missing" >&2
@@ -97,11 +102,12 @@ if [ -n "$missing" ]; then
   exit 1
 fi
 
-if grep -l '^import android\.' "$M"/network/v2/{OSHICryptoV2,OSHICryptoV2Streaming,OSHIRatchetV2,V2Session,V2FileKeyMessage,V2RetryBudget}.kt "$M"/network/v2/devsync/*.kt \
+if grep -l '^import android\.' "$M"/network/v2/{OSHICryptoV2,OSHICryptoV2Streaming,OSHIRatchetV2,V2Session,V2FileKeyMessage,V2RetryBudget,V2Padding}.kt "$M"/network/v2/devsync/*.kt \
      "$M"/network/encryption/{PostQuantumKEM,RatchetSecurityMode}.kt \
      "$M"/service/{LlamaCpp,CallRatingPolicy,VideoReorderReassembler,VideoRateController}.kt \
      "$M"/service/media/VideoNote.kt "$M"/service/diag/CallFileLogger.kt \
-     "$M"/util/{CashuTokens,CashuCbor,CashuJson,CashuPayCommand}.kt; then
+     "$M"/util/{CashuTokens,CashuCbor,CashuJson,CashuPayCommand}.kt \
+     "$M"/network/ohttp/{Bhttp,Ohttp,OhttpConfig}.kt; then
   echo "ABORT: android.* import in a shared source the desktop compiles" >&2; exit 1; fi
 
 # __OPUS_CODEC_2026_09_23__ Concentus, the pure-Java Opus port the call codec compiles from

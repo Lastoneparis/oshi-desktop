@@ -1,6 +1,7 @@
 package com.oshi.desktop.app
 
 import com.oshi.desktop.group.GroupType
+import com.oshi.desktop.msg.AliveCheckInPayload
 import com.oshi.desktop.i18n.t
 import com.oshi.desktop.pairing.ContactQr
 import com.oshi.desktop.pairing.QrMatrix
@@ -730,6 +731,9 @@ object ClientCommands {
                     out("   " + e.userMessage())
                 }
 
+                // 💓 __ALIVE_CHECK_IN_2026_11_04__
+                input == "/alive" || input.startsWith("/alive ") ->
+                    alive(client, input.removePrefix("/alive").trim(), out)
                 input.startsWith("/bot") -> bot(client, input.removePrefix("/bot").trim(), out)
                 // __DEVSYNC_DIRECT_2026_09_22__ Once direct device sync is on, the stored-sync
                 // paths (V2 archive + legacy /api/sync) are closed: nothing is uploaded any more.
@@ -913,6 +917,57 @@ object ClientCommands {
  * warning. `OshiClient.BOT_CHANNEL_IS_PLAINTEXT` is the single owner of that sentence so
  * this surface cannot drift from any UI that appears later.
  */
+/**
+ * 💓 __ALIVE_CHECK_IN_2026_11_04__ `/alive <address> [every <hours>h | off]`
+ *
+ * The desktop's way to say "I'm alive" into one conversation. A command rather than a
+ * button because that is this client's shape — every other payload here is driven the
+ * same way — and because a button that promised a countdown this client does not yet
+ * watch would promise more than it keeps.
+ *
+ * Three forms, one per event, and the usage line names all three: a bare address
+ * confirms, `every <n>h` starts or re-times a schedule, `off` ends it.
+ */
+private fun alive(client: OshiClient, args: String, out: (String) -> Unit) {
+    val parts = args.split(' ').filter { it.isNotEmpty() }
+    if (parts.isEmpty()) {
+        out("   usage: /alive <address> | /alive <address> every <hours>h | /alive <address> off")
+        return
+    }
+    val peer = resolve(client, parts[0]) ?: run { out("   unknown address"); return }
+
+    val (kind, interval) = when {
+        parts.size >= 2 && parts[1].equals("off", ignoreCase = true) ->
+            AliveCheckInPayload.Kind.DISABLED to 0L
+        parts.size >= 3 && parts[1].equals("every", ignoreCase = true) -> {
+            val hours = parts[2].removeSuffix("h").removeSuffix("H").toLongOrNull()
+            if (hours == null || hours <= 0) {
+                out("   usage: /alive <address> every <hours>h  (for example: every 24h)")
+                return
+            }
+            AliveCheckInPayload.Kind.ENABLED to hours * 3_600L
+        }
+        // A bare address is the common case and the one that must be shortest to type:
+        // it is the button, and it keeps whatever schedule the sender already announced.
+        else -> AliveCheckInPayload.Kind.CONFIRMED to AliveCheckInPayload.DEFAULT_INTERVAL_SECONDS
+    }
+
+    when (val outcome = client.sendAliveCheckIn(peer, kind, interval)) {
+        OshiClient.SendOutcome.BLOCKED -> out("   not sent — that contact is blocked")
+        else -> {
+            val what = when (kind) {
+                AliveCheckInPayload.Kind.ENABLED ->
+                    "check-in armed, every ${interval / 3_600}h"
+                AliveCheckInPayload.Kind.DISABLED -> "check-in stopped"
+                AliveCheckInPayload.Kind.CONFIRMED -> "confirmed alive"
+            }
+            out("   $what ($outcome)")
+            // Said once, every time, because it is the limit of what this client does.
+            out("   ! this desktop states a check-in; it does not yet watch a deadline — the phones do that")
+        }
+    }
+}
+
 private fun bot(client: OshiClient, args: String, out: (String) -> Unit) {
     val parts = args.split(" ", limit = 4).filter { it.isNotEmpty() }
     when (parts.firstOrNull()) {

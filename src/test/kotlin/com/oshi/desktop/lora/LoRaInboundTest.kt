@@ -37,6 +37,74 @@ class LoRaInboundTest {
             .data
     }
 
+    /**
+     * __LORA_CHANNEL_IS_A_ROOM_2026_11_04__ The same packet addressed to ONE node.
+     *
+     * The builder above always writes the broadcast address, which is right for most of
+     * this file — but it means nothing here ever exercised the direct case, and "a direct
+     * packet is still a private thread" is half the rule.
+     */
+    private fun directPacket(from: UInt, to: UInt, portnum: Long, payload: ByteArray, channel: Int = 0): ByteArray {
+        val data = ProtoWriter().varint(1, portnum).bytes(2, payload).data
+        return ProtoWriter()
+            .fixed32(1, from)
+            .fixed32(2, to)
+            .varint(3, channel.toLong())
+            .bytes(4, data)
+            .data
+    }
+
+    /** A broadcast on a given channel slot. */
+    private fun broadcastOnChannel(from: UInt, portnum: Long, payload: ByteArray, channel: Int): ByteArray {
+        val data = ProtoWriter().varint(1, portnum).bytes(2, payload).data
+        return ProtoWriter()
+            .fixed32(1, from)
+            .fixed32(2, LoRaProto.BROADCAST_ADDR)
+            .varint(3, channel.toLong())
+            .bytes(4, data)
+            .data
+    }
+
+    @Test
+    fun `a broadcast text belongs to the channel, a direct one stays private`() {
+        val inbound = LoRaInbound()
+        val hello = "hello".toByteArray()
+
+        // Everyone in range on the channel heard this, so it is a ROOM — and the
+        // speaker is still carried, which is what keeps them identifiable in it.
+        val bcast = inbound.route(
+            broadcastOnChannel(theirNode, LoRaProto.PORT_TEXT, hello, channel = 0),
+            myKey, t0,
+        ) as LoRaInbound.Decision.InteropText
+        assertEquals("lorachan#0", bcast.channelKey)
+        assertEquals("lora!1234abcd", bcast.conversationKey)
+
+        // Addressed to this node alone: nobody else heard it, so it is not a room.
+        val direct = inbound.route(
+            directPacket(theirNode, to = 0x1111u, portnum = LoRaProto.PORT_TEXT, payload = hello),
+            myKey, t0,
+        ) as LoRaInbound.Decision.InteropText
+        assertNull(direct.channelKey)
+        assertEquals("lora!1234abcd", direct.conversationKey)
+    }
+
+    @Test
+    fun `the room is named from the radio's own channel table`() {
+        val inbound = LoRaInbound()
+        val packet = broadcastOnChannel(theirNode, LoRaProto.PORT_TEXT, "hi".toByteArray(), channel = 2)
+
+        // Before the handshake has reported the table, the slot form is the honest
+        // answer — and it is also what a room would be called if the slot were unnamed.
+        val unnamed = inbound.route(packet, myKey, t0) as LoRaInbound.Decision.InteropText
+        assertEquals("lorachan#2", unnamed.channelKey)
+
+        // Once the name is known, the room keys on it — the same key the phones build,
+        // which is the whole reason the name wins over the index.
+        val named = inbound.route(packet, myKey, t0) { i -> if (i == 2) "manif" else null }
+                as LoRaInbound.Decision.InteropText
+        assertEquals("lorachan!manif", named.channelKey)
+    }
+
     private fun envelope(recipient: String = myKey) = LoRaSecureMessage(
         id = "11111111-2222-3333-4444-555555555555",
         senderAddress = theirKey,
@@ -63,6 +131,29 @@ class LoRaInboundTest {
         val d = last as LoRaInbound.Decision.Envelope
         assertEquals("11111111-2222-3333-4444-555555555555", d.message.id)
         assertEquals("the node number rides along for the LATER bind", theirNode, d.nodeNum)
+    }
+
+    /** OSHI Mesh firmware hands the message over as OMP DATA frames with a deflated body (0x02). */
+    @Test
+    fun `an OMP message from OSHI Mesh firmware is delivered with its ORIGIN node`() {
+        val inbound = LoRaInbound()
+        val origin = 0x0BADF00Du
+        val body = OshiMeshProtocol.encodeBody(envelope().toWireJson())
+        val frames = OshiMeshProtocol.dataFrames(0xCAFEu, 0x42u, body)!!.map { f ->
+            // As the radio delivers it: origin stamped in the OMP header.
+            f.copyOf().also { b -> b[7] = origin.toByte(); b[8] = (origin shr 8).toByte(); b[9] = (origin shr 16).toByte(); b[10] = (origin shr 24).toByte() }
+        }
+        var last: LoRaInbound.Decision = LoRaInbound.Decision.Ignored
+        for (f in frames) last = inbound.route(meshPacket(0x42u, LoRaProto.PORT_OSHI, f), myKey, t0)
+        assertTrue(last is LoRaInbound.Decision.Envelope)
+        assertEquals(origin, (last as LoRaInbound.Decision.Envelope).nodeNum)
+    }
+
+    @Test
+    fun `OMP status and beacon frames are not envelopes`() {
+        val inbound = LoRaInbound()
+        val status = byteArrayOf(0x4F, 0x53, 0x16, 1, 0, 0, 0, 3, 0, 0, 0, 0)
+        assertTrue(inbound.route(meshPacket(0x42u, LoRaProto.PORT_OSHI, status), myKey, t0) is LoRaInbound.Decision.Ignored)
     }
 
     /** Partial frames are Ignored, not errors. */

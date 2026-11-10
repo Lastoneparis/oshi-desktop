@@ -1862,6 +1862,7 @@ class ChatShellModel(
         edited = m.editedAtMs != null,
         deleted = m.isDeletedForEveryone,
         reactions = m.reactions.keys.sorted().joinToString(""),
+        reactionKeys = m.reactions.keys.sorted(),
         // __DESKTOP_POLLS_2026_10_29__ Decoded on every publish; see [PollCardRow].
         poll = if (m.isDeletedForEveryone) null else pollCard(m.content),
         videoNote = !m.isDeletedForEveryone && m.videoNote && m.mediaType == com.oshi.desktop.store.MediaType.VIDEO,
@@ -2367,6 +2368,13 @@ data class MessageRow(
      * comparing presentation, and would mean something different in another locale.
      */
     val sentAtMs: Long = 0L,
+    /**
+     * __OSHI_SMILE_REACTION_2026_11_09__ The reaction keys, one per element, in the order
+     * [reactions] joins them. The bubble needs them SEPARATE: in the joined string a "⭕"
+     * reaction next to a "😊" one is the byte sequence of the OSHI reaction, and only the
+     * exact key `⭕😊` may be drawn as the OSHI mark.
+     */
+    val reactionKeys: List<String> = emptyList(),
 )
 
 /** A reply's quote block, and the composer's "replying to" banner. */

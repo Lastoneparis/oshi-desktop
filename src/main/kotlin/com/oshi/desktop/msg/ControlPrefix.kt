@@ -124,6 +124,21 @@ object ControlPrefix {
     const val SCHEDULED_CALL = "📅SCHEDULED_CALL📅"
     const val CHECK_IN = "🛡️CHECK_IN🛡️"
     const val CHECKIN = "🛡️CHECKIN🛡️"
+
+    /**
+     * __ALIVE_CHECK_IN_2026_11_04__ `💓ALIVE💓` — a recurring liveness
+     * confirmation scoped to one conversation, carrying one timestamp and no location.
+     *
+     * A SEPARATE sentinel from the two above, and the distinction matters here as much
+     * as on the phones: `🛡️CHECK_IN🛡️` is a journey with an ETA and a position,
+     * this is a heartbeat with neither. Sharing a prefix would route these through
+     * [com.oshi.desktop.place.CheckInPayload]'s seven-type renderer.
+     *
+     * RENDERED, like its siblings. Without the entry this client has no idea the text
+     * is a control payload at all, and a check-in from a phone prints as raw JSON in
+     * the conversation — the exact failure __DESKTOP_CATALOG_DRIFT_2026_10_27__ names.
+     */
+    const val ALIVE_CHECK_IN = "💓ALIVE💓"
     const val PROFILE_UPDATE = "📸PROFILE_UPDATE📸"
     const val WALLPAPER_UPDATE = "🎨WALLPAPER_UPDATE🎨"
     const val KEY_ROTATION = "🔑KEY_ROTATION🔑"
@@ -180,6 +195,7 @@ object ControlPrefix {
         Entry(SCHEDULED_CALL, Kind.RENDERED),
         Entry(CHECK_IN, Kind.RENDERED),
         Entry(CHECKIN, Kind.RENDERED),
+        Entry(ALIVE_CHECK_IN, Kind.RENDERED),
         Entry(PROFILE_UPDATE, Kind.RENDERED),
         Entry(WALLPAPER_UPDATE, Kind.RENDERED),
         Entry(REACTION, Kind.RENDERED),

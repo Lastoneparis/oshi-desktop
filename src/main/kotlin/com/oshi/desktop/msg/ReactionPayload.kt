@@ -142,6 +142,10 @@ data class ReactionPayload(
             "\u262A\uFE0F",  // ☪️ muslim
             "\u2721\uFE0F",  // ✡️ jewish
             "\u2638\uFE0F",  // ☸️ buddhist
+            // __OSHI_SMILE_REACTION_2026_11_09__ iOS `case oshiSmile` — the OSHI mark
+            // (`OshiReaction.OSHI_SMILE`), appended last in the Swift enum too. iPhones
+            // that predate it still rewrite it to 👍 (see point 4 above).
+            "\u2B55\uD83D\uDE0A",  // ⭕😊 oshiSmile
         )
 
         /** iOS's fallback when the emoji is unknown — `?? .thumbsUp` (`swift:165`). */

@@ -7,6 +7,7 @@
   "desktop.account.gate.closed.value": "CLOSED — sends are refused before they reach the network (PARITY.md row 0.8)",
   "desktop.account.gate.label": "V2 rollout gate",
   "desktop.account.gate.open.value": "OPEN — this account may publish a prekey bundle and send",
+  "desktop.account.ohttp.footer": "When on, everything this app sends to or fetches from OSHI's server — messages, keys and media files — goes through an independent relay: the relay sees your IP address but not your data, and OSHI's server no longer sees your IP address. If the relay is unreachable, requests wait and retry; they are never sent directly instead. Calls, device sync and legacy /api requests still connect directly.",
   "desktop.background.body": "Closing the window keeps OSHI running in the menu bar or tray, so calls ring and messages arrive. Quit from that icon to stop it. A computer has no push service for OSHI: nothing reaches this machine while OSHI is not running.",
   "desktop.background.login": "Open OSHI at login (in the background)",
   "desktop.background.login.failed": "Could not change Open at login: %@",

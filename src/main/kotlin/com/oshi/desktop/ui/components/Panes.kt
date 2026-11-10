@@ -20,6 +20,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -141,6 +143,9 @@ fun AccountPane(
             }
 
             Spacer(Modifier.height(OshiTheme.xl))
+            PrivacyRelayCard()
+
+            Spacer(Modifier.height(OshiTheme.xl))
             Card {
                 Column(Modifier.padding(OshiTheme.lg), verticalArrangement = Arrangement.spacedBy(OshiTheme.sm)) {
                     Text("Device sync", style = OshiTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, color = Ink.strong)
@@ -175,6 +180,51 @@ fun AccountPane(
                 dt("desktop.account.fact.plaintext.body"),
             )
             Spacer(Modifier.height(OshiTheme.xl))
+        }
+    }
+}
+
+/**
+ * __OHTTP_DESKTOP_2026_11_10__ "Privacy relay (beta)" — the phones' keys
+ * (`settings.privacy.section.network`, `settings.privacy.ohttp.*`), so the title, subtitle and
+ * "not available yet" line arrive translated in every locale. The footer is the desktop's own
+ * (`desktop.account.ohttp.footer`, English): the phones' footers say media connects directly,
+ * which is not true here — on desktop media blobs go through the relay too.
+ *
+ * OFF by default; greyed while the build carries no relay URL ([DesktopOhttp.isAvailable]).
+ */
+@Composable
+private fun PrivacyRelayCard() {
+    val available = com.oshi.desktop.net.DesktopOhttp.isAvailable()
+    var enabled by androidx.compose.runtime.remember {
+        androidx.compose.runtime.mutableStateOf(com.oshi.desktop.net.DesktopOhttp.isEnabled())
+    }
+    Card {
+        Column(Modifier.padding(OshiTheme.lg), verticalArrangement = Arrangement.spacedBy(OshiTheme.sm)) {
+            Text(t("settings.privacy.section.network"), fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Ink.soft)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        t("settings.privacy.ohttp.title"),
+                        style = OshiTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (available) Ink.strong else Ink.soft,
+                    )
+                    Text(t("settings.privacy.ohttp.subtitle"), fontSize = 11.sp, color = Ink.soft)
+                }
+                androidx.compose.material3.Switch(
+                    checked = available && enabled,
+                    enabled = available,
+                    onCheckedChange = { want ->
+                        com.oshi.desktop.net.DesktopOhttp.setEnabled(want)
+                        enabled = com.oshi.desktop.net.DesktopOhttp.isEnabled()
+                    },
+                )
+            }
+            if (!available) {
+                Text(t("settings.privacy.ohttp.unavailable"), fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Ink.soft)
+            }
+            Text(dt("desktop.account.ohttp.footer"), fontSize = 11.sp, color = Ink.soft)
         }
     }
 }

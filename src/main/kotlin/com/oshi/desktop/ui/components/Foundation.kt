@@ -132,11 +132,16 @@ fun Hairline(modifier: Modifier = Modifier, inset: Dp = 0.dp) {
 /**
  * The circular gradient monogram from the capture.
  *
- * `OshiTheme.avatarBrush` derives the hue from the address, so the same peer is the same
- * colour on every launch and on every machine with nothing stored. The shipped app indexes a
- * six-entry palette by `publicKey.hashValue.magnitude % 6`; `hashValue` is salted per process
- * on Apple platforms, so that palette is stable within a launch and not across them. The
- * theme's function is the deterministic version of the same idea and is what this draws.
+ * `OshiTheme.avatarBrush` derives the colour from the address, so the same peer is the same
+ * colour on every launch, on every machine — and, since
+ * `__ONE_AVATAR_NOT_THREE_2026_11_07__`, on every PLATFORM: it is the same fourteen-entry
+ * palette and the same FNV-1a slot the iPhone and Android apps use, pinned by shared test
+ * vectors in `AvatarParityTest`.
+ *
+ * (The text here used to say the shipped app indexed "a six-entry palette by
+ * `publicKey.hashValue.magnitude % 6`", salted per process. That was true of a version of
+ * iOS two revisions old and had quietly stopped being true. A note describing another
+ * platform is not a check of it — this one was wrong for weeks.)
  *
  * There is no profile photo here and there is not going to be one: PARITY.md row 0.18 records
  * that an Android peer's picture rides the legacy lane and never arrives.

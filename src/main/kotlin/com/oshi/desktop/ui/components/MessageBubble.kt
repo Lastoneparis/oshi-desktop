@@ -1,5 +1,8 @@
 package com.oshi.desktop.ui.components
 
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -99,6 +102,7 @@ fun MessageBubbleRow(
 ) {
     var forwarding by remember(row.id) { mutableStateOf(false) }
     var editing by remember(row.id) { mutableStateOf(false) }
+    val editFocus = remember { FocusRequester() }
     var editedBody by remember(row.id, row.body) { mutableStateOf(row.body) }
     var confirmingDelete by remember(row.id) { mutableStateOf(false) }
     val media = remember(row.attachment, viewOnce, revealed) {
@@ -125,7 +129,22 @@ fun MessageBubbleRow(
             }
             BubbleBody(row, lastInRun, wallpaper, media, onReveal, onVote)
 
-            if (row.reactions.isNotEmpty()) {
+            if (row.reactionKeys.isNotEmpty()) {
+                // __OSHI_SMILE_REACTION_2026_11_09__ one glyph per KEY, so the exact
+                // `⭕😊` reaction is drawn as the OSHI mark and a "⭕" beside a "😊" is not.
+                Spacer(Modifier.height(OshiTheme.xs))
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clip(OshiTheme.pill)
+                        .background(OshiTheme.surfaceElevated)
+                        .border(Metrics.hairline, OshiTheme.separator, OshiTheme.pill)
+                        .padding(horizontal = OshiTheme.sm, vertical = OshiTheme.xxs),
+                ) {
+                    row.reactionKeys.forEach { key -> ReactionGlyph(key, fontSize = 13.sp) }
+                }
+            } else if (row.reactions.isNotEmpty()) {
                 Spacer(Modifier.height(OshiTheme.xs))
                 Text(
                     row.reactions,
@@ -151,7 +170,11 @@ fun MessageBubbleRow(
                         TextAction("👍") { react("👍") }
                         TextAction("😂") { react("😂") }
                     }
-                    onEdit?.let { TextAction("Edit") { editing = true } }
+                    // __DESKTOP_EDIT_STRINGS_WERE_ENGLISH_2026_11_05__ `t(...)`,
+                    // like the Reply and Forward actions beside it. These four
+                    // keys already ship in every locale in Desktop's own bundle;
+                    // they were unlocalized by omission, not by absence.
+                    onEdit?.let { TextAction(t("message.action.edit")) { editing = true } }
                     onDelete?.let { delete ->
                         TextAction(if (confirmingDelete) "Confirm delete" else "Delete") {
                             if (confirmingDelete) delete() else confirmingDelete = true
@@ -172,16 +195,67 @@ fun MessageBubbleRow(
 
             if (editing && onEdit != null) {
                 Spacer(Modifier.height(OshiTheme.xs))
+
+                // __SHOW_WHAT_IS_BEING_EDITED_2026_11_05__ The BEFORE text,
+                // labelled, and only once the draft has diverged from it.
+                //
+                // The original bubble does sit directly above this field, which
+                // is better than the phones managed — but it is unlabelled, and
+                // the moment the user starts typing, the field below it is the
+                // only copy of what they are replacing. Keeping the "before"
+                // explicitly means they can still check the change.
+                if (editedBody != row.body && row.body.isNotEmpty()) {
+                    Text(
+                        t("edit.original_label"),
+                        style = OshiTheme.typography.labelMedium,
+                        color = Ink.soft,
+                    )
+                    Text(
+                        row.body,
+                        style = OshiTheme.typography.bodySmall,
+                        color = Ink.soft,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.height(OshiTheme.xs))
+                }
+
+                // __DESKTOP_EDIT_FIELD_HAD_NO_AFFORDANCE_2026_11_05__ A bare
+                // `BasicTextField` with no border, background or placeholder
+                // read as the bubble's own text with a caret somewhere in it —
+                // the user could not tell an edit box had opened, and had to
+                // guess where to click. Given a surface, a border and focus.
                 BasicTextField(
                     value = editedBody,
                     onValueChange = { editedBody = it },
                     textStyle = OshiTheme.typography.bodyMedium.copy(color = OshiTheme.textPrimary),
                     cursorBrush = SolidColor(OshiTheme.brand),
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(OshiTheme.textPrimary.copy(alpha = 0.06f), RoundedCornerShape(8.dp))
+                        .border(1.dp, OshiTheme.brand.copy(alpha = 0.45f), RoundedCornerShape(8.dp))
+                        .padding(horizontal = OshiTheme.sm, vertical = OshiTheme.xs)
+                        .focusRequester(editFocus),
                 )
+                // Focus on open, so the caret is in the box the user just asked
+                // for rather than requiring a second click to find it.
+                LaunchedEffect(editing) { if (editing) runCatching { editFocus.requestFocus() } }
+
                 Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm)) {
-                    TextAction("Save") { onEdit(editedBody); editing = false }
-                    TextAction("Cancel") { editedBody = row.body; editing = false }
+                    // Save refuses an empty or unchanged body, matching
+                    // `MessageEditSheet` on iOS: an unchanged save still
+                    // broadcasts an edit and stamps "edited" on everyone's copy.
+                    val canSave = editedBody.isNotBlank() && editedBody != row.body
+                    if (canSave) {
+                        TextAction(t("common.save")) { onEdit(editedBody); editing = false }
+                    } else {
+                        Text(
+                            t("common.save"),
+                            style = OshiTheme.typography.labelMedium,
+                            color = Ink.soft.copy(alpha = 0.4f),
+                        )
+                    }
+                    TextAction(t("common.cancel")) { editedBody = row.body; editing = false }
                 }
             }
 

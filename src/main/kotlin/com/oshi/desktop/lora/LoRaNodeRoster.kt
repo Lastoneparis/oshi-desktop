@@ -84,6 +84,17 @@ class LoRaNodeRoster {
          * water and through a town.
          */
         val distanceKm: Double? = null,
+        /**
+         * __DESKTOP_NODE_REACH_2026_11_07__ `MeshPacket.rx_rssi`, field 12, and
+         * `NodeInfo.hops_away`, field 9. Field numbers taken from the Android
+         * parser, which runs against real radios, rather than guessed from the
+         * proto — a wrong number here reads plausible garbage, not an error.
+         *
+         * Both feed [LoRaCoverage]: the phones draw a reach ring from them, and
+         * this client — which has no map — states the same estimate in words.
+         */
+        val rssi: Int? = null,
+        val hopsAway: Int? = null,
     )
 
     /** Fold one raw `FromRadio`. Anything it does not recognise is ignored. */
@@ -95,7 +106,17 @@ class LoRaNodeRoster {
                     LoRaProto.field(f.payload, 1, wire = 0)?.let { synchronized(lock) { myNodeNum = it.varintValue.toUInt() } }
                 f.number == 4 && f.wire == 2 -> observeNodeInfo(f.payload, nowMs)
                 f.number == 2 && f.wire == 2 -> {
-                    LoRaProto.field(f.payload, 1, wire = 5)?.asUInt32()?.let { heard(it, nowMs) }
+                    LoRaProto.field(f.payload, 1, wire = 5)?.asUInt32()?.let { from ->
+                        heard(from, nowMs)
+                        // __DESKTOP_NODE_REACH_2026_11_07__ rx_rssi is field 12,
+                        // a varint int32 and always negative in practice. Kept
+                        // only when it is a plausible reading: 0 means "the
+                        // radio did not say", and a positive value is not an
+                        // RSSI at all.
+                        LoRaProto.field(f.payload, 12, wire = 0)?.varintValue
+                            ?.toInt()?.takeIf { it < 0 }
+                            ?.let { synchronized(lock) { rssiByNode[from] = it } }
+                    }
                     observePacketForPosition(f.payload)
                 }
             }
@@ -105,6 +126,10 @@ class LoRaNodeRoster {
     private fun observeNodeInfo(nodeInfo: ByteArray, nowMs: Long) {
         val num = LoRaProto.field(nodeInfo, 1, wire = 0)?.varintValue?.toUInt() ?: return
         if (num == 0u) return
+        // __DESKTOP_NODE_REACH_2026_11_07__ `NodeInfo.hops_away`, field 9. Zero
+        // is meaningful — "heard directly" — so it is stored, not discarded.
+        LoRaProto.field(nodeInfo, 9, wire = 0)?.varintValue?.toInt()
+            ?.let { synchronized(lock) { hopsByNode[num] = it } }
         // __LORA_NODEINFO_FIELDS_2026_10_28__ `last_heard` is field 5 and it is a plain
         // `uint32`, so on the wire it is a VARINT. This asked for wire 5 (fixed32) only,
         // found nothing, and recorded every node as heard-never — which is why the roster's
@@ -157,6 +182,9 @@ class LoRaNodeRoster {
         }
     }
 
+    private val rssiByNode = mutableMapOf<UInt, Int>()
+    private val hopsByNode = mutableMapOf<UInt, Int>()
+
     private fun heard(num: UInt, nowMs: Long) {
         if (num == 0u) return
         synchronized(lock) { lastHeardMs[num] = maxOf(lastHeardMs[num] ?: 0L, nowMs) }
@@ -189,6 +217,8 @@ class LoRaNodeRoster {
                     latitude = pos?.first,
                     longitude = pos?.second,
                     distanceKm = distanceFromUs(pos),
+                    rssi = rssiByNode[num],
+                    hopsAway = hopsByNode[num],
                 )
             }
             .sortedByDescending { it.lastHeardMs }
@@ -261,6 +291,15 @@ class LoRaNodeRoster {
     }
 
     /** Our own radio's position, when it has a fix. */
+    /**
+     * Where OUR radio last said it was, or null.
+     *
+     * __DESKTOP_NODE_PERIMETER_2026_11_07__ Exposed because the perimeter view
+     * is drawn in a frame centred on us: without this there is no origin, and a
+     * range diagram with a guessed centre is worse than none.
+     */
+    fun myPosition(): Pair<Double, Double>? = synchronized(lock) { positions[myNodeNum] }
+
     private fun ourPosition(): Pair<Double, Double>? = positions[myNodeNum]
 
     private fun distanceFromUs(there: Pair<Double, Double>?): Double? {

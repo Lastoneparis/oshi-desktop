@@ -19,6 +19,7 @@ import com.oshi.desktop.group.GroupUpdateWire
 import com.oshi.desktop.group.MinimalGroupUpdate
 import com.oshi.desktop.i18n.t
 import com.oshi.desktop.mesh.MeshNode
+import com.oshi.desktop.msg.AliveCheckInPayload
 import com.oshi.desktop.msg.ControlEvent
 import com.oshi.desktop.msg.ControlPayloadRouter
 import com.oshi.desktop.msg.ControlPrefix
@@ -599,6 +600,13 @@ class OshiClient(
     val loraRadioState = com.oshi.desktop.lora.LoRaRadioState()
 
     /**
+     * __LORA_CHANNEL_IS_A_ROOM_2026_11_04__ The radio's channel table, so a NAMED channel
+     * keys the same room here as on the phones. Filled from the handshake burst, which
+     * sends all eight slots unprompted.
+     */
+    val loraChannelTable = com.oshi.desktop.lora.LoRaChannelThread.Table()
+
+    /**
      * __DESKTOP_LORA_REFUSAL_2026_10_29__ Why the last radio send did not happen, or null.
      * Android's `lastRefusal`; the pane shows it and the next send clears it.
      */
@@ -895,6 +903,7 @@ class OshiClient(
         }
         mesh.stop()
         loraDetach()
+        meshCoreDetach()
         if (devSyncLazy.isInitialized()) runCatching { devSync.stop() }
         routerState.flush()
     }
@@ -1496,7 +1505,8 @@ class OshiClient(
         // nothing, and doing it through sendText's own fetch pops a second one-time prekey.
         if (!router.ensureSession(peerAddress)) return SendOutcome.NO_V2_PATH
 
-        val enc = OSHICryptoV2.encryptFile(bytes, filename, mime)
+        // __MEDIA_PADDING_2026_11_10__ padded only when every device of the peer reads it.
+        val enc = OSHICryptoV2.encryptFile(bytes, filename, mime, pad = router.mediaPaddingAllowed(peerAddress))
         val blobId = blobs.uploadBlob(peerAddress, enc.chunks) ?: return SendOutcome.NO_V2_PATH
         val key = V2FileKeyMessage(
             blobId = blobId,
@@ -1919,6 +1929,8 @@ class OshiClient(
         val blocked = ArrayList<String>()
         val unreachable = ArrayList<String>()
         val recipients = GroupFanout.plan(g, address)
+        // __V2_PADDING_2026_11_09__ one member that cannot strip padding ⇒ no member's copy is padded.
+        val padGate = router.groupPaddingAllowed(recipients)
         for (member in recipients) {
             // A blocked member is skipped, not silently included. iOS delivers group
             // messages from and to blocked members (PARITY.md 0.21 defect 2); this does not.
@@ -1927,7 +1939,7 @@ class OshiClient(
                 continue
             }
             val bytes = runCatching { payloadFor(member) }.getOrNull()
-            if (bytes != null && router.sendText(member, bytes, msgId, groupId = g.groupId)) {
+            if (bytes != null && router.sendText(member, bytes, msgId, groupId = g.groupId, padGate = padGate)) {
                 sent++; reached += member
             } else {
                 // __NO_BUNDLE_IS_NOT_A_TIMEOUT_2026_11_02__ `unreachable` is NOT
@@ -2067,7 +2079,9 @@ class OshiClient(
                 videoNote = note,
             )
         )
-        val enc = OSHICryptoV2.encryptFile(bytes, file.name, mime)
+        // __MEDIA_PADDING_2026_11_10__ ONE encryption for every member ⇒ padded only if all read it.
+        val padMedia = router.groupMediaPaddingAllowed(GroupFanout.plan(g, address))
+        val enc = OSHICryptoV2.encryptFile(bytes, file.name, mime, pad = padMedia)
         val report = groupFanOut(g, msgId) { member ->
             if (!router.ensureSession(member)) return@groupFanOut null
             val blobId = blobs.uploadBlob(member, enc.chunks) ?: return@groupFanOut null
@@ -2387,6 +2401,14 @@ class OshiClient(
         if (loraAttached) loraRoster.onlineNodes(nowMs) else emptyList()
 
     /**
+     * __DESKTOP_NODE_PERIMETER_2026_11_07__ Our own radio's last position, the
+     * origin of the range diagram. Null when detached or without a fix — the
+     * diagram then says so rather than drawing a guessed centre.
+     */
+    fun loraMyPosition(): Pair<Double, Double>? =
+        if (loraAttached) loraRoster.myPosition() else null
+
+    /**
      * OUR OWN radio's node number, or 0 before the handshake has delivered `my_info`.
      *
      * Exposed because "the reach badge excludes our own radio" is a claim about a specific
@@ -2550,6 +2572,14 @@ class OshiClient(
 
     /** Node key (8 hex) → the identity a person attached to it. */
     fun loraManualLinks(): Map<String, String> = loraBindings.manualLinks()
+
+    /**
+     * __MESSAGE_THE_NODE_FROM_THE_MAP_2026_11_07__ The conversation a message to [node]
+     * belongs in: the PROVED identity when there is one, the `lora!<nodehex>` thread when
+     * there is not. Delegates to the one function that owns that rule, so the UI cannot
+     * invent a second answer.
+     */
+    fun loraConversationKey(node: UInt): String = loraBindings.conversationKey(node)
 
     /**
      * The identity this node PROVED, by sending an envelope that decrypted — never one a
@@ -3045,7 +3075,54 @@ class OshiClient(
         com.oshi.desktop.lora.LoRaPositionBeacon.reset()
         // What the OLD node said about itself is not true of the next one.
         loraRadioState.clear()
+        // The channel names belonged to the OLD node; the next one's slots may differ.
+        loraChannelTable.clear()
         loraTraffic.clear()
+    }
+
+    @Volatile private var meshCore: com.oshi.desktop.lora.MeshCoreLink? = null
+    private val meshCoreRx = com.oshi.desktop.lora.OmpReassembler()
+
+    val meshCoreAttached: Boolean get() = meshCore?.isReady == true
+
+    /**
+     * Attach to a MeshCore companion radio over TCP (its WiFi firmware; see
+     * [com.oshi.desktop.lora.MeshCoreLink]). The same receive lane as [loraAttach]: OSHI traffic rides
+     * the "#oshi-bridge" channel as OMP frames, and an envelope addressed to us is REPORTED, not opened —
+     * it is sealed with the legacy Double Ratchet this client does not implement.
+     */
+    fun meshCoreAttach(host: String, port: Int = com.oshi.desktop.lora.MeshCoreLink.TCP_PORT): Boolean {
+        val endpoint = com.oshi.desktop.lora.LoRaAttach.tcpEndpoint(host, port)
+        if (endpoint == null) {
+            onLoRa("meshcore: refused invalid TCP endpoint")
+            return false
+        }
+        meshCoreDetach()
+        val link = com.oshi.desktop.lora.MeshCoreLink(
+            host = endpoint.host,
+            port = endpoint.port,
+            onOmpFrame = { _, f -> onMeshCoreFrame(f) },
+            log = { log(it); onLoRa(it) },
+        )
+        meshCore = link
+        link.start()
+        return true
+    }
+
+    fun meshCoreDetach() {
+        meshCore?.stop()
+        meshCore = null
+    }
+
+    private fun onMeshCoreFrame(f: com.oshi.desktop.lora.OshiMeshProtocol.DataFrame) {
+        val body = meshCoreRx.accept(f) ?: return
+        val json = com.oshi.desktop.lora.OshiMeshProtocol.decodeBody(body) ?: return
+        val message = com.oshi.desktop.lora.LoRaSecureMessage.fromWireJson(json) ?: return
+        if (!com.oshi.desktop.lora.LoRaSecureMessage.isAddressedToMe(message, address)) return
+        onLoRa(
+            "OSHI envelope via MeshCore from ${f.origin.toString(16)} — UNREADABLE by this client " +
+                "(legacy Double Ratchet, PARITY.md rows 0.16 / 0.27)"
+        )
     }
 
     /**
@@ -3059,15 +3136,35 @@ class OshiClient(
     private fun onFromRadio(fromRadio: ByteArray) {
         // Counts only — node_info/my_info are read for WHO was heard WHEN, nothing else.
         loraRoster.observeFromRadio(fromRadio, System.currentTimeMillis())
+        // __LORA_CHANNEL_IS_A_ROOM_2026_11_04__ `FromRadio.channel` (10) arrives in the same
+        // stream as the node info above, unprompted, so learning the channel names costs
+        // one more read of a frame already in hand.
+        loraChannelTable.observeFromRadio(fromRadio)
         val packetField = com.oshi.desktop.lora.LoRaProto.field(fromRadio, 2, wire = 2) ?: return
-        when (val d = loraInbound.route(packetField.payload, address, System.currentTimeMillis())) {
+        when (
+            val d = loraInbound.route(
+                packetField.payload,
+                address,
+                System.currentTimeMillis(),
+                channelNameFor = { index -> loraChannelTable.name(index) },
+            )
+        ) {
             is com.oshi.desktop.lora.LoRaInbound.Decision.InteropText -> {
                 // Stock Meshtastic text: nothing ratcheted it and no peer authenticated it,
                 // so it is filed under its own conversation key and never beside a real
                 // message — the same rule row 0.26 applies to a bot post.
+                // __LORA_CHANNEL_IS_A_ROOM_2026_11_04__ A broadcast belongs to the CHANNEL,
+                // not to a private thread with whoever happened to speak. Everyone in range
+                // on that channel heard it, so filing it per-speaker produced one
+                // one-to-one thread per person talking and no channel anywhere.
+                //
+                // `conversationId` is the ROOM and `senderAddress` stays the AUTHOR, which
+                // is what those two fields mean — so every speaker in the room remains
+                // individually identifiable with no new column. A DIRECT packet keeps both
+                // set to the speaker, because it was addressed to this node alone.
                 val stored = Message(
                     id = UUID.randomUUID().toString(),
-                    conversationId = d.conversationKey,
+                    conversationId = d.channelKey ?: d.conversationKey,
                     senderAddress = d.conversationKey,
                     recipientAddress = address,
                     fromMe = false,
@@ -3084,7 +3181,10 @@ class OshiClient(
                 // may show its privacy-preserving local notification. A duplicate radio
                 // retransmission must not create another alert.
                 if (outcome != MessageStore.AppendOutcome.DUPLICATE) onMessage(stored)
-                onLoRa("interop text from node ${d.nodeNum} (UNVERIFIED — not authenticated): ${d.text.take(200)}")
+                val where = d.channelKey
+                    ?.let { " on " + com.oshi.desktop.lora.LoRaChannelThread.displayName(it) }
+                    ?: " (direct)"
+                onLoRa("interop text from node ${d.nodeNum}$where (UNVERIFIED — not authenticated): ${d.text.take(200)}")
             }
             is com.oshi.desktop.lora.LoRaInbound.Decision.Envelope -> openLoRaEnvelope(d)
             is com.oshi.desktop.lora.LoRaInbound.Decision.Routing ->
@@ -3588,6 +3688,40 @@ class OshiClient(
                         // header did not flip until something else repainted. iOS lets the
                         // request fall through to ordinary handling for the same reason it
                         // renders at all — a conversation being taken off the relay is news.
+                        suppressNotification = false,
+                    )
+                    return
+                }
+                // 💓 __ALIVE_CHECK_IN_2026_11_04__ A peer's liveness confirmation.
+                //
+                // Stored as the LOCALISED sentence, exactly as the offline-only request
+                // above is, and for the same reason: without this branch the catalog
+                // entry alone only stops the text being treated as prose — the row
+                // would still carry the raw payload. The three sentences already exist
+                // in the catalogs.
+                //
+                // No ack and no echo: a check-in is a STATEMENT, not a request. There
+                // is nothing for this side to answer, which is why this branch has
+                // neither the ack handling nor the reply the offline-only one needs.
+                //
+                // The confirming party is `inbound.from` — the sender the transport
+                // authenticated — never a field inside the JSON. A check-in that named
+                // its own author on the wire would let anyone confirm in anyone's name,
+                // which for this feature means switching someone else's alarm off.
+                if (AliveCheckInPayload.isEvent(text)) {
+                    val kind = AliveCheckInPayload.summaryKind(text)
+                    log("client: alive check-in from ${inbound.from.take(12)}… (${kind.wire})")
+                    storeInbound(
+                        inbound,
+                        // Switched on the ENUM, so each key sits inside its own `t(...)`
+                        // and nothing in this file is a bare catalog key. Both are
+                        // CatalogAuditTest's rules, and the second is the one that
+                        // would otherwise ship three keys missing in 33 languages.
+                        "\uD83D\uDC93 " + when (kind) {
+                            AliveCheckInPayload.Kind.ENABLED -> t("alive.summary.started")
+                            AliveCheckInPayload.Kind.DISABLED -> t("alive.summary.stopped")
+                            AliveCheckInPayload.Kind.CONFIRMED -> t("alive.summary.confirmed")
+                        },
                         suppressNotification = false,
                     )
                     return
@@ -4271,6 +4405,53 @@ class OshiClient(
         offlineOnly.set(on, peerAddress, atUnix)
         val req = com.oshi.desktop.msg.OfflineOnlyPayload.Request(on = on, atUnix = atUnix)
         return sendPlaintext(peerAddress, req.encode(), storeRow = false)
+    }
+
+    /**
+     * 💓 __ALIVE_CHECK_IN_2026_11_04__ Confirm, to one conversation, that you are alive.
+     *
+     * The third client learns to SPEAK this, having already learned to hear it. One
+     * entry point for all three events, because they differ only in the kind: starting a
+     * schedule, confirming against it, and ending it are the same sentence with a
+     * different verb, and three methods would be three places for the interval to be
+     * clamped differently.
+     *
+     * **[AliveCheckInPayload.Kind.ENABLED] counts as a confirmation**, which is why it
+     * carries the interval and why a schedule never starts overdue. A schedule whose
+     * first visible state was red — caused by the user turning the feature ON — is the
+     * one beginning that would make nobody turn it on twice.
+     *
+     * `storeRow = true`, unlike the offline-only request above: this is `.rendered` in
+     * the catalog on all three clients, and a confirmation the sender cannot find
+     * afterwards is one they have to take on trust. The inbound half stores the
+     * localised sentence; this stores the payload and lets the row render it, so both
+     * directions of the same conversation read the same way.
+     *
+     * No local schedule is kept here yet. This client can state that it is alive and can
+     * show that a peer did; the countdown and the deadline alarm are the phones' halves
+     * and are not pretended at — a desktop that drew a countdown it never watched would
+     * be the worse failure.
+     *
+     * @param intervalSeconds how often the sender is promising to confirm. Clamped to the
+     *   same floor and ceiling the phones use, so a desktop cannot announce a schedule
+     *   they would refuse to display.
+     */
+    fun sendAliveCheckIn(
+        peerAddress: String,
+        kind: AliveCheckInPayload.Kind = AliveCheckInPayload.Kind.CONFIRMED,
+        intervalSeconds: Long = AliveCheckInPayload.DEFAULT_INTERVAL_SECONDS,
+    ): SendOutcome {
+        val interval = if (kind == AliveCheckInPayload.Kind.DISABLED) {
+            0L
+        } else {
+            intervalSeconds.coerceIn(AliveCheckInPayload.MIN_INTERVAL_SECONDS, AliveCheckInPayload.MAX_INTERVAL_SECONDS)
+        }
+        val event = AliveCheckInPayload.Event(
+            kind = kind,
+            atUnix = System.currentTimeMillis() / 1000.0,
+            intervalSeconds = interval,
+        )
+        return sendPlaintext(peerAddress, event.encode(), storeRow = true)
     }
 
     /**

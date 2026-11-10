@@ -97,6 +97,7 @@ object PaneHarness {
         com.oshi.desktop.ui.components.LoRaPane(
             radio = object : com.oshi.desktop.ui.components.LoRaPaneHost {
                 override val attached = true
+                override fun myPosition(): Pair<Double, Double>? = null
                 override fun devices() = listOf(
                     com.oshi.desktop.lora.LoRaSerial.Device("/dev/cu.usbmodem21201", "cu.usbmodem21201"),
                 )
@@ -112,6 +113,8 @@ object PaneHarness {
                 override fun link(node: UInt, address: String) =
                     com.oshi.desktop.lora.LoRaNodeBindings.LearnResult.BOUND
                 override fun unlink(node: UInt) = true
+                override fun conversationKeyFor(node: UInt) =
+                    com.oshi.desktop.lora.LoRaNodeBindings.fallbackConversationKey(node)
                 override fun prefs() = com.oshi.desktop.store.TransportPreferences.Values()
                 override fun setPrefs(values: com.oshi.desktop.store.TransportPreferences.Values) {}
                 override fun fixedPosition() = 46.2044 to 6.1432

@@ -4,6 +4,7 @@ import com.oshi.desktop.DesktopIdentity
 import com.oshi.desktop.DesktopV2Signer
 import com.oshi.desktop.store.PrekeyStore
 import com.oshi.messenger.network.v2.FetchedBundle
+import com.oshi.messenger.network.v2.V2PaddingPeers
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Base64
@@ -75,6 +76,8 @@ class V2KeysClient(
     fun peerDevices(peerUserKey: String): List<String>? {
         val resp = http.get("/v2/keys/${DesktopV2Signer.encodeIdentity(peerUserKey)}/devices")
         if (!resp.isSuccess) return null
+        // __ACCOUNT_CAPS_IN_DEVICE_LIST_2026_11_10__ shared rule (V2Padding.kt): accountCaps + device caps.
+        com.oshi.messenger.network.v2.V2PaddingPeers.learnFromDeviceList(peerUserKey, resp.body)
         return runCatching {
             val o = JSONObject(resp.body)
             if (!o.optBoolean("enabled", false)) return emptyList()
@@ -92,7 +95,7 @@ class V2KeysClient(
         val path = "/v2/keys/${DesktopV2Signer.encodeIdentity(peerUserKey)}"
         val resp = http.get(path, query = "device=$deviceId")
         if (!resp.isSuccess) return null
-        return parseBundle(resp.body, peerUserKey)?.takeIf {
+        return parseBundle(resp.body, peerUserKey, deviceId)?.takeIf {
             runCatching { JSONObject(resp.body).optString("deviceId") }.getOrNull() == deviceId
         }
     }
@@ -137,7 +140,8 @@ class V2KeysClient(
             })
             deviceId?.let { put("deviceId", it) }
             // __LEGACY_COMPAT_2026_09_23__ "reads v2 groups": phones skip the legacy group copy for us.
-            put("caps", V2ConfigGate.CAP_GROUP_V2)
+            // __V2_PADDING_2026_11_09__ + "strips v2 plaintext padding".
+            put("caps", V2ConfigGate.MY_CAPS)
         }
         return body.toString().toByteArray(Charsets.UTF_8)
     }
@@ -182,7 +186,8 @@ class V2KeysClient(
     fun fetchBundle(peerUserKey: String): FetchedBundle? =
         (fetchBundleOutcome(peerUserKey) as? BundleFetch.Found)?.bundle
 
-    private fun parseBundle(body: String, peerUserKey: String): FetchedBundle? {
+    /** @param deviceId the device whose bundle this is, null for the account bundle. */
+    private fun parseBundle(body: String, peerUserKey: String, deviceId: String? = null): FetchedBundle? {
         return try {
             val json = JSONObject(body)
             val identityKey = unb64(json.getString("identityKey"))
@@ -195,6 +200,8 @@ class V2KeysClient(
             if (b64(identityKey) != peerUserKey) return null      // TOFU, exact string
 
             val opk = json.optJSONObject("oneTimePreKey")
+            // __V2_PADDING_2026_11_09__ the session slot this bundle builds (absent caps ⇒ not capable).
+            V2PaddingPeers.noteBundle(peerUserKey, deviceId, if (json.has("caps")) json.optInt("caps", 0) else null)
             FetchedBundle(
                 identityKey = identityKey,
                 signingKey = signingKey,

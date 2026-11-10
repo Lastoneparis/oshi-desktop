@@ -220,10 +220,42 @@ object OSHICryptoV2 {
      * formatting — iOS OSHICryptoV2.swift:503-508. EXACT key order, no whitespace:
      * {"filename":…,"mime":…,"size":N,"chunkCount":N,"chunkSize":N}
      */
-    fun manifestJson(filename: String, mime: String, size: Int, chunkCount: Int, chunkSize: Int): ByteArray =
+    fun manifestJson(filename: String, mime: String, size: Int, chunkCount: Int, chunkSize: Int, paddedSize: Int? = null): ByteArray =
         ("{\"filename\":\"${jsonEscape(filename)}\",\"mime\":\"${jsonEscape(mime)}\"," +
-            "\"size\":$size,\"chunkCount\":$chunkCount,\"chunkSize\":$chunkSize}")
+            "\"size\":$size,\"chunkCount\":$chunkCount,\"chunkSize\":$chunkSize" +
+            // __MEDIA_PADDING_2026_11_10__ ONE extra key, appended LAST, only for a padded file:
+            // an unpadded manifest stays byte-identical to every earlier build's.
+            (if (paddedSize != null) ",\"paddedSize\":$paddedSize" else "") + "}")
             .toByteArray(Charsets.UTF_8)
+
+    // ---- __MEDIA_PADDING_2026_11_10__ (docs/MEDIA_PADDING_AND_OHTTP_MEDIA_SPEC.md §2) ----
+
+    /** Floor of the padded size: every file up to 4 KiB looks the same. */
+    const val MEDIA_PAD_MIN: Long = 4096L
+
+    /** The 200 MiB plaintext ceiling (iOS `V2.maxPlaintextBytes`): padding never crosses it. */
+    const val MEDIA_PAD_MAX: Long = 200L * 1024 * 1024
+
+    /**
+     * Padmé (PURBs paper): leaks O(log log L) bits of the length, overhead ≤ ~12 %, typically
+     * 1–6 %. 4 KiB floor; never above [MEDIA_PAD_MAX] for an L that fits under it; never
+     * shrinks. Pinned by the spec's vectors on Android, desktop and iOS.
+     */
+    fun mediaPaddedSize(length: Long): Long {
+        require(length >= 0) { "negative length" }
+        if (length <= MEDIA_PAD_MIN) return MEDIA_PAD_MIN
+        val e = 63 - java.lang.Long.numberOfLeadingZeros(length)          // floor(log2 L)
+        val s = 64 - java.lang.Long.numberOfLeadingZeros(e.toLong())      // bit length of E
+        val mask = (1L shl (e - s)) - 1
+        val p = (length + mask) and mask.inv()
+        return if (length <= MEDIA_PAD_MAX) minOf(p, MEDIA_PAD_MAX) else length
+    }
+
+    /** Chunks a file of [plaintextLength] bytes is sealed into, padded or not. */
+    fun mediaChunkCount(plaintextLength: Long, padded: Boolean, chunkSize: Int = DEFAULT_CHUNK_SIZE): Int {
+        val total = if (padded) mediaPaddedSize(plaintextLength) else plaintextLength
+        return ((total + chunkSize - 1) / chunkSize).toInt()
+    }
 
     /**
      * Chunked per-file AEAD — iOS OSHICryptoV2.swift:545-582 (`encryptFile`).
@@ -243,6 +275,14 @@ object OSHICryptoV2 {
         chunkSize: Int = DEFAULT_CHUNK_SIZE,
         reuseFileKey: ByteArray? = null,
         reuseFileNonce: ByteArray? = null,
+        /**
+         * __MEDIA_PADDING_2026_11_10__ Seal `bytes ‖ zeros(P − L)` with P = [mediaPaddedSize]
+         * and announce P as `paddedSize`. ONLY when every recipient device reads padded media
+         * (caps bit [V2Padding.CAP_MEDIA_PADDING]); an older reader rejects the file. False ⇒
+         * byte-identical to every earlier build. A resume MUST pass the same value it was
+         * reserved with: the same key/nonce over a different tail is GCM nonce reuse.
+         */
+        pad: Boolean = false,
     ): EncryptedFile {
         require(chunkSize > 0) { "chunkSize must be > 0" }
         require((reuseFileKey == null) == (reuseFileNonce == null)) { "reuse key/nonce is both-or-neither" }
@@ -250,17 +290,26 @@ object OSHICryptoV2 {
         val fileKey = reuseFileKey ?: ByteArray(32).also { rnd.nextBytes(it) }
         val fileNonce = reuseFileNonce ?: ByteArray(8).also { rnd.nextBytes(it) }
 
-        val chunks = ArrayList<ByteArray>((bytes.size + chunkSize - 1) / chunkSize)
-        var off = 0
+        // The AEAD sees a virtual plaintext of [total] bytes: the file, then zeros. Built one
+        // chunk at a time so a 200 MB video never gets a second full-size copy.
+        val paddedSize: Int? = if (pad) mediaPaddedSize(bytes.size.toLong()).toInt() else null
+        val total = paddedSize ?: bytes.size
+        val chunks = ArrayList<ByteArray>(((total.toLong() + chunkSize - 1) / chunkSize).toInt())
+        var off = 0L
         var i = 0L
-        while (off < bytes.size) {
-            val end = minOf(off + chunkSize, bytes.size)
-            chunks.add(aesGcmSeal(fileKey, chunkNonce(fileNonce, i), bytes.copyOfRange(off, end), EMPTY_AAD))
+        while (off < total) {
+            val end = minOf(off + chunkSize, total.toLong())
+            val slice = if (end <= bytes.size) bytes.copyOfRange(off.toInt(), end.toInt()) else {
+                ByteArray((end - off).toInt()).also { buf ->              // zero-filled tail
+                    if (off < bytes.size) System.arraycopy(bytes, off.toInt(), buf, 0, bytes.size - off.toInt())
+                }
+            }
+            chunks.add(aesGcmSeal(fileKey, chunkNonce(fileNonce, i), slice, EMPTY_AAD))
             off += chunkSize
             i++
         }
 
-        val info = manifestJson(filename, mime, bytes.size, chunks.size, chunkSize)
+        val info = manifestJson(filename, mime, bytes.size, chunks.size, chunkSize, paddedSize)
         val manifest = aesGcmSeal(fileKey, chunkNonce(fileNonce, MANIFEST_COUNTER), info, EMPTY_AAD)
         return EncryptedFile(fileKey, fileNonce, chunks, manifest, info)
     }
@@ -281,14 +330,23 @@ object OSHICryptoV2 {
         val info = org.json.JSONObject(String(infoBytes, Charsets.UTF_8))
         val chunkCount = info.getInt("chunkCount")
         val size = info.getInt("size")
+        // __MEDIA_PADDING_2026_11_10__ absent ⇒ today's behaviour exactly.
+        val paddedSize: Int? = if (info.has("paddedSize")) info.getInt("paddedSize") else null
+        if (paddedSize != null) require(size in 0..paddedSize) { "manifest size=$size above paddedSize=$paddedSize" }
         require(chunkCount == chunks.size) { "manifest chunkCount=$chunkCount but got ${chunks.size} chunks" }
-        val out = java.io.ByteArrayOutputStream(size)
+        val total = paddedSize ?: size
+        val out = java.io.ByteArrayOutputStream(total)
         for ((idx, c) in chunks.withIndex()) {
             out.write(aesGcmOpen(fileKey, chunkNonce(fileNonce, idx.toLong()), c, EMPTY_AAD))
         }
         val bytes = out.toByteArray()
-        require(bytes.size == size) { "manifest size=$size but reassembled ${bytes.size}" }
-        return bytes
+        if (paddedSize == null) {
+            require(bytes.size == size) { "manifest size=$size but reassembled ${bytes.size}" }
+            return bytes
+        }
+        require(bytes.size == paddedSize) { "manifest paddedSize=$paddedSize but reassembled ${bytes.size}" }
+        for (k in size until paddedSize) require(bytes[k] == 0.toByte()) { "non-zero media padding at $k" }
+        return bytes.copyOf(size)
     }
 
     private val EMPTY_AAD = ByteArray(0)

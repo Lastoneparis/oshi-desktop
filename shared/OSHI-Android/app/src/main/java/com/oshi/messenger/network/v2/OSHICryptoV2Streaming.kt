@@ -18,6 +18,9 @@ import java.io.OutputStream
  * assertions — a truncated or reordered download still fails loudly instead of yielding
  * corrupt media. For any blob, [decryptToStream] writes exactly the bytes
  * [OSHICryptoV2.decryptFile] would have returned.
+ *
+ * __MEDIA_PADDING_2026_11_10__ A padded file (`paddedSize` in the manifest) is accepted
+ * too: only its first `size` bytes are written; the zero tail is verified, never emitted.
  */
 object OSHICryptoV2Streaming {
 
@@ -30,7 +33,15 @@ object OSHICryptoV2Streaming {
         val size: Long,
         val chunkCount: Int,
         val chunkSize: Int,
-    )
+        /**
+         * __MEDIA_PADDING_2026_11_10__ Length the AEAD actually sealed (`size` bytes of file,
+         * then zeros), or null for an unpadded file — every file before CAP_MEDIA_PADDING.
+         */
+        val paddedSize: Long? = null,
+    ) {
+        /** Bytes the chunks reassemble to: [paddedSize] when padded, else [size]. */
+        val sealedSize: Long get() = paddedSize ?: size
+    }
 
     /** Supplies chunk [index]'s opaque `ct‖tag`, or null when it could not be fetched. */
     fun interface ChunkSource {
@@ -49,6 +60,7 @@ object OSHICryptoV2Streaming {
             size = o.getLong("size"),
             chunkCount = o.getInt("chunkCount"),
             chunkSize = o.optInt("chunkSize", OSHICryptoV2.DEFAULT_CHUNK_SIZE),
+            paddedSize = if (o.has("paddedSize")) o.getLong("paddedSize") else null,
         )
     }
 
@@ -83,15 +95,34 @@ object OSHICryptoV2Streaming {
                 "manifest chunkCount=${info.chunkCount} but the payload announced $expectedChunkCount"
             }
         }
-        var written = 0L
+        val padded = info.paddedSize
+        if (padded == null) {
+            var written = 0L
+            for (i in 0 until info.chunkCount) {
+                val ct = source.chunk(i) ?: throw IOException("chunk $i unavailable")
+                val pt = openChunk(fileKey, fileNonce, i, ct)
+                out.write(pt)
+                written += pt.size.toLong()
+            }
+            out.flush()
+            require(written == info.size) { "manifest size=${info.size} but reassembled $written" }
+            return written
+        }
+        // __MEDIA_PADDING_2026_11_10__ Padded: write ONLY the first `size` bytes, but still open
+        // every chunk, require the rest to be zeros and the total to be exactly `paddedSize`.
+        require(info.size in 0..padded) { "manifest size=${info.size} above paddedSize=$padded" }
+        var pos = 0L
         for (i in 0 until info.chunkCount) {
             val ct = source.chunk(i) ?: throw IOException("chunk $i unavailable")
             val pt = openChunk(fileKey, fileNonce, i, ct)
-            out.write(pt)
-            written += pt.size.toLong()
+            require(pos + pt.size <= padded) { "manifest paddedSize=$padded but reassembled more" }
+            val keep = (info.size - pos).coerceIn(0L, pt.size.toLong()).toInt()
+            if (keep > 0) out.write(pt, 0, keep)
+            for (k in keep until pt.size) require(pt[k] == 0.toByte()) { "non-zero media padding at ${pos + k}" }
+            pos += pt.size.toLong()
         }
         out.flush()
-        require(written == info.size) { "manifest size=${info.size} but reassembled $written" }
-        return written
+        require(pos == padded) { "manifest paddedSize=$padded but reassembled $pos" }
+        return info.size
     }
 }

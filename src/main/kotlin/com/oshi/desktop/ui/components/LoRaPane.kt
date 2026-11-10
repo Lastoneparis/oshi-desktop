@@ -79,8 +79,24 @@ interface LoRaPaneHost {
     fun send(text: String): Boolean
     /** The ENCRYPTED lane: an OSHI envelope to one contact. Returns false with a reason logged. */
     fun sendOshi(recipient: String, text: String): Boolean
+    /**
+     * __DESKTOP_NODE_PERIMETER_2026_11_07__ Our own radio's position, the origin
+     * the range diagram is drawn around. Null until it has a fix.
+     */
+    fun myPosition(): Pair<Double, Double>?
     fun link(node: UInt, address: String): LoRaNodeBindings.LearnResult
     fun unlink(node: UInt): Boolean
+
+    /**
+     * __MESSAGE_THE_NODE_FROM_THE_MAP_2026_11_07__ (desktop half) The conversation a
+     * message to [node] belongs in.
+     *
+     * The PROVED identity when the node has one, so the message is ratchet-encrypted to
+     * that contact; the `lora!<nodehex>` thread only when nothing has been proved. The
+     * same routing decision the phones make — never hard-code the fallback, or every
+     * proved peer is silently downgraded to cleartext.
+     */
+    fun conversationKeyFor(node: UInt): String
     /** The two switches. See [com.oshi.desktop.lora.DesktopTransportPolicy] for why two. */
     fun prefs(): com.oshi.desktop.store.TransportPreferences.Values
     fun setPrefs(values: com.oshi.desktop.store.TransportPreferences.Values)
@@ -153,6 +169,7 @@ fun loRaPaneHost(client: OshiClient): LoRaPaneHost = object : LoRaPaneHost {
     override val attached: Boolean get() = client.loraAttached
     override fun devices() = client.loraSerialDevices()
     override fun nodes() = client.loraOnlineNodeList()
+    override fun myPosition() = client.loraMyPosition()
     override fun links() = client.loraManualLinks()
     override fun attachSerial(path: String) = client.loraAttachSerial(path)
     override fun attachTcp(host: String) = client.loraAttach(host)
@@ -161,6 +178,7 @@ fun loRaPaneHost(client: OshiClient): LoRaPaneHost = object : LoRaPaneHost {
     override fun sendOshi(recipient: String, text: String) = client.loraSendOshiMessage(recipient, text)
     override fun link(node: UInt, address: String) = client.loraLinkNode(node, address)
     override fun unlink(node: UInt) = client.loraUnlinkNode(node)
+    override fun conversationKeyFor(node: UInt) = client.loraConversationKey(node)
     override fun prefs() = client.transportPrefs()
     override fun setPrefs(values: com.oshi.desktop.store.TransportPreferences.Values) = client.setTransportPrefs(values)
     override fun fixedPosition() = com.oshi.desktop.lora.LoRaFixedPosition.position
@@ -205,6 +223,8 @@ fun LoRaPane(
     radio: LoRaPaneHost,
     contacts: List<ContactRow>,
     onCopy: (String) -> Unit = {},
+    /** __MESSAGE_THE_NODE_FROM_THE_MAP_2026_11_07__ Open a conversation by key. */
+    onMessage: (String) -> Unit = {},
 ) {
     var attached by remember { mutableStateOf(false) }
     var devices by remember { mutableStateOf(emptyList<LoRaSerial.Device>()) }
@@ -213,6 +233,10 @@ fun LoRaPane(
     var notice by remember { mutableStateOf<String?>(null) }
     var prefs by remember { mutableStateOf(com.oshi.desktop.store.TransportPreferences.Values()) }
     var fixedPos by remember { mutableStateOf<Pair<Double, Double>?>(null) }
+    // __DESKTOP_NODE_PERIMETER_2026_11_07__ OUR radio's position: the origin of
+    // the range diagram. Distinct from `fixedPos`, which is the position the
+    // user PINS for a radio with no GPS.
+    var myPos by remember { mutableStateOf<Pair<Double, Double>?>(null) }
     var beaconOn by remember { mutableStateOf(false) }
     var beaconWhy by remember {
         mutableStateOf(com.oshi.desktop.lora.LoRaPositionBeacon.Decision.DISABLED)
@@ -254,6 +278,10 @@ fun LoRaPane(
             attached = radio.attached
             devices = runCatching { radio.devices() }.getOrDefault(emptyList())
             nodes = runCatching { radio.nodes() }.getOrDefault(emptyList())
+            // __DESKTOP_NODE_PERIMETER_2026_11_07__ Polled with the roster, not
+            // read during composition: the roster takes a lock, and a lock held
+            // on the composition thread is a frame dropped.
+            myPos = runCatching { radio.myPosition() }.getOrNull()
             links = runCatching { radio.links() }.getOrDefault(emptyMap())
             prefs = runCatching { radio.prefs() }.getOrDefault(com.oshi.desktop.store.TransportPreferences.Values())
             fixedPos = runCatching { radio.fixedPosition() }.getOrNull()
@@ -290,6 +318,38 @@ fun LoRaPane(
             notice?.let {
                 Spacer(Modifier.height(OshiTheme.md))
                 PaneCard { Text(it, style = OshiTheme.typography.bodySmall, color = Ink.soft) }
+            }
+
+            // ------------------------------------------------- where to get one
+            // __LORA_BUY_LINK_2026_11_04__ This pane explains attaching a radio
+            // at length and never said where a radio comes from. The page lists
+            // the nine boards verified on real hardware with the vendor's own
+            // prices, so this points at measured information rather than a shop.
+            //
+            // "from US$18" is the cheapest VERIFIED board (Heltec V3, read off
+            // heltec.org at $17.90). If that page stops agreeing, this number is
+            // wrong and must change with it.
+            Spacer(Modifier.height(OshiTheme.lg))
+            PaneCard {
+                Text("No radio yet?", style = OshiTheme.typography.titleSmall, color = Ink.strong)
+                Spacer(Modifier.height(OshiTheme.sm))
+                Text(
+                    "Nine boards verified on real hardware, with prices and where to buy them. " +
+                        "From about US$18.",
+                    style = OshiTheme.typography.bodySmall,
+                    color = Ink.soft,
+                )
+                Spacer(Modifier.height(OshiTheme.sm))
+                TextAction("Open oshi-messenger.com/lora") {
+                    runCatching {
+                        val d = java.awt.Desktop.getDesktop()
+                        if (java.awt.Desktop.isDesktopSupported() &&
+                            d.isSupported(java.awt.Desktop.Action.BROWSE)
+                        ) {
+                            d.browse(java.net.URI("https://oshi-messenger.com/lora/"))
+                        }
+                    }.onFailure { notice = "Could not open the browser." }
+                }
             }
 
             // ---------------------------------------------------------------- attach
@@ -942,6 +1002,16 @@ fun LoRaPane(
                     else "Attach the radio above, then the nodes it hears appear here.",
                 )
             } else {
+                // __DESKTOP_NODE_PERIMETER_2026_11_07__ The circle that was
+                // asked for, above the list it annotates. It draws nothing and
+                // says why when we have no fix of our own, because a range
+                // diagram with a guessed centre is worse than none.
+                LoRaNodeMap(
+                    nodes = nodes,
+                    myLat = myPos?.first,
+                    myLon = myPos?.second,
+                    modifier = Modifier.padding(bottom = OshiTheme.sm),
+                )
                 for (node in nodes) {
                     val nodeKey = "%08x".format(node.num.toLong())
                     val linked = links[nodeKey]
@@ -956,6 +1026,26 @@ fun LoRaPane(
                                 // here: a distance to a node that never said where it is
                                 // would be a made-up number, and so would one measured from
                                 // a radio that has no lock of its own.
+                                // __DESKTOP_NODE_REACH_2026_11_07__ What the phones
+                                // draw as a ring round the node, stated instead.
+                                // This client has no map renderer, so there is no
+                                // circle to draw — but the circle's value is the
+                                // number behind it, and an operator planning where
+                                // to walk needs that here too.
+                                //
+                                // `reachLabel` returns null for a RELAYED node: the
+                                // RSSI then belongs to the last hop, not to this
+                                // node, and quoting it would be a confident figure
+                                // measured from someone else.
+                                com.oshi.desktop.lora.LoRaCoverage
+                                    .reachLabel(node.rssi, node.hopsAway)?.let { reach ->
+                                        Spacer(Modifier.height(OshiTheme.xxs))
+                                        Text(
+                                            reach,
+                                            style = OshiTheme.typography.bodySmall,
+                                            color = Ink.soft,
+                                        )
+                                    }
                                 node.distanceKm?.let { km ->
                                     Spacer(Modifier.height(OshiTheme.xxs))
                                     Text(
@@ -966,7 +1056,24 @@ fun LoRaPane(
                                     )
                                 }
                             }
-                            TextAction("Copy id") { onCopy("!$nodeKey") }
+                            Row {
+                                // __MESSAGE_THE_NODE_FROM_THE_MAP_2026_11_07__ This list,
+                                // and now the range diagram above it, are where you see a
+                                // radio's name and distance — and until this landed the
+                                // only thing you could do with one was copy its id. Same
+                                // action the phones put on the map card, same routing: a
+                                // proved node opens its contact's ENCRYPTED thread, an
+                                // unproved one the cleartext `lora!` thread the chat
+                                // already labels.
+                                //
+                                // HOPS come free, as on both phones: a unicast is addressed
+                                // to the node number and Meshtastic routes it through the
+                                // mesh, so a RELAYED node is reachable exactly like a direct
+                                // one. That is why this is offered whatever `hopsAway` says.
+                                TextAction("Message") { onMessage(radio.conversationKeyFor(node.num)) }
+                                Spacer(Modifier.width(OshiTheme.sm))
+                                TextAction("Copy id") { onCopy("!$nodeKey") }
+                            }
                         }
 
                         Spacer(Modifier.height(OshiTheme.xs))

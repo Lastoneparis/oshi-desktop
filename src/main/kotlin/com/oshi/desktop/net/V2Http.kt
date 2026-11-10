@@ -38,6 +38,13 @@ class V2Http(
     val baseUrl: String = defaultBaseUrl(),
     connectTimeout: Duration = Duration.ofSeconds(15),
     private val readTimeout: Duration = Duration.ofSeconds(30),
+    /**
+     * __OHTTP_DESKTOP_2026_11_10__ "Privacy relay (beta)". Asked on EVERY request; non-null
+     * means an eligible `https://oshi-messenger.com/v2/...` call (blobs included) MUST be
+     * sent as Oblivious HTTP through the relay — see [DesktopOhttp]. A failure there is a
+     * failed call (code -1), never a direct send.
+     */
+    private val ohttp: () -> DesktopOhttpTransport? = DesktopOhttp::transport,
 ) {
 
     data class Response(val code: Int, val body: String) {
@@ -130,6 +137,13 @@ class V2Http(
             headers["x-oshi-device-signature"] = sig
         }
         val url = baseUrl + path + if (query.isNullOrEmpty()) "" else "?$query"
+        // __OHTTP_DESKTOP_2026_11_10__ THE choke point. Headers above were signed over the
+        // inner method/path/body exactly as for a direct send; they ride inside the BHTTP.
+        when (val o = viaOhttp(method, url, headers + listOfNotNull(contentType?.let { "Content-Type" to it }), body, readTimeout)) {
+            is OhttpOutcome.Answered -> return Response(o.inner.status, String(o.inner.body, Charsets.UTF_8))
+            is OhttpOutcome.Failed -> return Response(-1, o.why)
+            OhttpOutcome.Direct -> Unit
+        }
         val publisher = if (body == null) HttpRequest.BodyPublishers.noBody()
         else HttpRequest.BodyPublishers.ofByteArray(body)
 
@@ -138,6 +152,7 @@ class V2Http(
         contentType?.let { builder.header("Content-Type", it) }
         builder.method(method, publisher)
 
+        directSends.incrementAndGet()
         return try {
             val resp = http.send(builder.build(), HttpResponse.BodyHandlers.ofString())
             Response(resp.statusCode(), resp.body() ?: "")
@@ -172,13 +187,49 @@ class V2Http(
     ): Pair<Int, ByteArray> {
         val headers = signer.sign("GET", path, bodyToHash, withUserHeader)
         val url = baseUrl + path + if (query.isNullOrEmpty()) "" else "?$query"
+        // __OHTTP_DESKTOP_2026_11_10__ blob chunk GETs go through the relay too (spec §4).
+        when (val o = viaOhttp("GET", url, headers, null, timeout)) {
+            is OhttpOutcome.Answered -> return o.inner.status to o.inner.body
+            is OhttpOutcome.Failed -> return -1 to ByteArray(0)
+            OhttpOutcome.Direct -> Unit
+        }
         val builder = HttpRequest.newBuilder(URI.create(url)).timeout(timeout).GET()
         for ((k, v) in headers) builder.header(k, v)
+        directSends.incrementAndGet()
         return try {
             val resp = http.send(builder.build(), HttpResponse.BodyHandlers.ofByteArray())
             resp.statusCode() to (resp.body() ?: ByteArray(0))
         } catch (e: Exception) {
             -1 to ByteArray(0)
+        }
+    }
+
+    /** __OHTTP_DESKTOP_2026_11_10__ What [viaOhttp] decided for one request. */
+    private sealed interface OhttpOutcome {
+        /** Setting off / unavailable, or not a `https://oshi-messenger.com/v2/` URL. */
+        data object Direct : OhttpOutcome
+        class Answered(val inner: DesktopOhttp.Inner) : OhttpOutcome
+        /** OHTTP was REQUIRED and failed. The caller must not go direct. */
+        class Failed(val why: String) : OhttpOutcome
+    }
+
+    /** __OHTTP_DESKTOP_2026_11_10__ Requests that left DIRECT (not via OHTTP). For tests: proves "no fallback". */
+    internal val directSends = java.util.concurrent.atomic.AtomicInteger()
+
+    private fun viaOhttp(
+        method: String,
+        url: String,
+        headers: Map<String, String>,
+        body: ByteArray?,
+        timeout: Duration,
+    ): OhttpOutcome {
+        val uri = URI.create(url)
+        return try {
+            val t = DesktopOhttp.resolve(ohttp) ?: return OhttpOutcome.Direct
+            if (!DesktopOhttp.isEligible(uri, t)) return OhttpOutcome.Direct
+            OhttpOutcome.Answered(DesktopOhttp.exchange(http, t, method, uri, headers, body, timeout))
+        } catch (e: Exception) {
+            OhttpOutcome.Failed("${e.javaClass.simpleName}: ${e.message}")
         }
     }
 

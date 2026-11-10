@@ -73,6 +73,7 @@ package com.oshi.desktop.lora
 class LoRaInbound(
     private val bindings: LoRaNodeBindings = LoRaNodeBindings(),
     private val reassembler: LoRaReassembler = LoRaReassembler(),
+    private val ompReassembler: OmpReassembler = OmpReassembler(),
 ) {
 
     /** What the caller should do with a packet. */
@@ -109,6 +110,20 @@ class LoRaInbound(
             val conversationKey: String,
             val boundKey: String?,
             val unverified: Boolean = true,
+            /**
+             * __LORA_CHANNEL_IS_A_ROOM_2026_11_04__ The ROOM this belongs in, when the
+             * packet was a broadcast — everyone in range on the channel heard it.
+             *
+             * Null for a direct packet, which stays a private thread because it was
+             * addressed to this node alone.
+             *
+             * A separate field from [conversationKey] rather than a replacement for it,
+             * and that is the shape the other two clients use too: the room is WHERE the
+             * message goes, [conversationKey] is WHO said it, and a renderer needs both
+             * to draw a channel message attributed to its speaker. Collapsing them
+             * would lose the author — which is the thing a room most needs.
+             */
+            val channelKey: String? = null,
         ) : Decision()
 
         /** A `ROUTING_APP` reply — the fate of a `want_ack` packet. Carried, not parsed. */
@@ -129,30 +144,58 @@ class LoRaInbound(
      * @param nowMillis drives the reassembly TTL. A parameter, never a clock read inside,
      *   so the 180-second expiry can be watched happening.
      */
-    fun route(meshPacket: ByteArray, myPublicKey: String, nowMillis: Long): Decision {
+    fun route(
+        meshPacket: ByteArray,
+        myPublicKey: String,
+        nowMillis: Long,
+        channelNameFor: (Int) -> String? = { null },
+    ): Decision {
         val p = LoRaProto.parseMeshPacket(meshPacket) ?: return Decision.Ignored
         return when (p.portnum) {
             LoRaProto.PORT_OSHI -> oshiChunk(p, myPublicKey, nowMillis)
-            LoRaProto.PORT_TEXT -> interop(p)
+            LoRaProto.PORT_TEXT -> interop(p, channelNameFor)
             LoRaProto.PORT_ROUTING -> Decision.Routing(p.from, p.payload)
             else -> Decision.Ignored
         }
     }
 
     private fun oshiChunk(p: LoRaProto.Incoming, myPublicKey: String, nowMillis: Long): Decision {
+        // "OS" = OSHI Mesh firmware (OMP): the radio reassembled and acknowledged the message and hands it
+        // over whole; `origin` in the OMP header is the composing node even when a custodian delivered it.
+        if (OshiMeshProtocol.typeOf(p.payload) != null) {
+            val f = OshiMeshProtocol.parseData(p.payload) ?: return Decision.Ignored
+            val body = ompReassembler.accept(f, nowMillis) ?: return Decision.Ignored
+            val json = OshiMeshProtocol.decodeBody(body) ?: return Decision.Ignored
+            val message = LoRaSecureMessage.fromWireJson(json) ?: return Decision.Ignored
+            if (!LoRaSecureMessage.isAddressedToMe(message, myPublicKey)) return Decision.Ignored
+            return Decision.Envelope(message, f.origin)
+        }
         val whole = reassembler.accept(p.payload, nowMillis) ?: return Decision.Ignored
         val message = LoRaSecureMessage.fromWireJson(whole) ?: return Decision.Ignored
         if (!LoRaSecureMessage.isAddressedToMe(message, myPublicKey)) return Decision.Ignored
         return Decision.Envelope(message, p.from)
     }
 
-    private fun interop(p: LoRaProto.Incoming): Decision {
+    /**
+     * @param channelNameFor the name of a channel slot as THIS radio reports it, or null
+     *   when the slot is unknown. A function rather than a map so the caller owns the
+     *   radio's channel table and this class keeps no state about it; the default answers
+     *   null, which makes every room fall back to its slot form — correct, and the same
+     *   thing that happens on a fresh connection before the handshake has reported the
+     *   table.
+     */
+    private fun interop(p: LoRaProto.Incoming, channelNameFor: (Int) -> String?): Decision {
         val text = String(p.payload, Charsets.UTF_8)
         return Decision.InteropText(
             text = text,
             nodeNum = p.from,
             conversationKey = bindings.conversationKey(p.from),
             boundKey = bindings.boundKey(p.from),
+            // __LORA_CHANNEL_IS_A_ROOM_2026_11_04__ A broadcast belongs to the channel; a
+            // direct packet stays a private thread.
+            channelKey = if (p.isBroadcast) {
+                LoRaChannelThread.keyFor(p.channelIndex, channelNameFor(p.channelIndex))
+            } else null,
         )
     }
 

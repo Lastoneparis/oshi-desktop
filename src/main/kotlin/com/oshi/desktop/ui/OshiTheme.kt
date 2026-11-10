@@ -204,23 +204,69 @@ object OshiTheme {
     )
 
     /**
-     * The deterministic avatar gradient, mirroring the capture's circular monogram.
+     * __ONE_AVATAR_NOT_THREE_2026_11_07__ The deterministic avatar gradient — now the
+     * SAME one the phones draw.
      *
-     * Derived from the address so the same peer is the same colour on every launch and on
-     * every machine, with no stored state — the desktop has no avatar to show (row 0.18:
-     * an Android peer's profile picture rides the legacy lane and never arrives), and a
-     * grey circle for everyone is worse than a stable identifying one.
+     * What this used to be, and why it was replaced:
+     *
+     *  * the hue came from `h * 31 + c.code`, a different hash from the phones' FNV-1a,
+     *    so one person was one colour on an iPhone and a different colour here. An avatar
+     *    colour exists to be recognised, and three platforms disagreeing about it is the
+     *    same failure as everyone being blue, one step subtler;
+     *  * it spread hues at CONSTANT saturation and value (0.62/0.86). `AvatarIdentity`
+     *    documents exactly what that costs: at constant S/V the yellow-green-teal band
+     *    (45°-185°) lands between 2.85:1 and 3.77:1 against white, so the monogram on a
+     *    third of the palette was under WCAG AA and hard to read.
+     *
+     * The fourteen pairs below are copied from `OSHI/AvatarIdentity.swift` value for
+     * value, with the brightness solved per hue so white clears 5.2:1 everywhere. The
+     * index comes from the same FNV-1a over the key's UTF-8, so the slot a peer lands in
+     * is identical on iOS, Android and here. `AvatarParityTest` re-reads the Swift source
+     * and fails on drift.
+     *
+     * (The comment that stood here described iOS as indexing "a six-entry palette by
+     * `publicKey.hashValue.magnitude % 6`". That was true two revisions ago and had
+     * quietly stopped being true — a note about another platform is not a check of it.)
      */
+    val avatarGradients: List<Pair<Color, Color>> = listOf(
+        Color(0.458f, 0.247f, 0.950f) to Color(0.602f, 0.144f, 0.798f),  // 268°
+        Color(0.669f, 0.224f, 0.860f) to Color(0.723f, 0.130f, 0.663f),  // 292°
+        Color(0.829f, 0.216f, 0.727f) to Color(0.696f, 0.125f, 0.373f),  // 320°
+        Color(0.865f, 0.225f, 0.492f) to Color(0.727f, 0.131f, 0.141f),  // 345°
+        Color(0.806f, 0.210f, 0.230f) to Color(0.677f, 0.326f, 0.122f),  // 8°
+        Color(0.663f, 0.320f, 0.172f) to Color(0.557f, 0.420f, 0.100f),  // 28°
+        Color(0.540f, 0.394f, 0.140f) to Color(0.441f, 0.454f, 0.082f),  // 48°
+        Color(0.485f, 0.497f, 0.129f) to Color(0.269f, 0.417f, 0.075f),  // 72°
+        Color(0.331f, 0.526f, 0.137f) to Color(0.116f, 0.442f, 0.079f),  // 100°
+        Color(0.139f, 0.533f, 0.171f) to Color(0.081f, 0.448f, 0.258f),  // 135°
+        Color(0.136f, 0.522f, 0.361f) to Color(0.079f, 0.438f, 0.432f),  // 165°
+        Color(0.153f, 0.587f, 0.572f) to Color(0.089f, 0.345f, 0.493f),  // 188°
+        Color(0.200f, 0.598f, 0.768f) to Color(0.116f, 0.275f, 0.645f),  // 208°
+        Color(0.247f, 0.423f, 0.950f) to Color(0.242f, 0.144f, 0.798f),  // 235°
+    )
+
+    /**
+     * FNV-1a over the key's UTF-8 — seedless, and identical on every platform.
+     *
+     * The modulus is taken UNSIGNED. iOS does this arithmetic on `UInt64`
+     * throughout, so a signed modulus with a sign correction is a DIFFERENT
+     * number whenever the hash comes out negative — which is about half the
+     * time. The first version here did exactly that and put "hugo" in slot 12
+     * where the phones put it in slot 0; the shared vectors in
+     * `AvatarParityTest` are what caught it.
+     */
+    fun avatarSlot(key: String, modulo: Int = avatarGradients.size): Int {
+        if (modulo <= 0) return 0
+        var hash = -0x340d631b7bdddcdbL          // 0xcbf29ce484222325 as a signed Long
+        for (b in key.toByteArray(Charsets.UTF_8)) {
+            hash = (hash xor (b.toLong() and 0xff)) * 0x100000001b3L
+        }
+        return (hash.toULong() % modulo.toULong()).toInt()
+    }
+
     fun avatarBrush(address: String): Brush {
-        var h = 0
-        for (c in address) h = h * 31 + c.code
-        val hue = ((h % 360) + 360) % 360
-        return Brush.linearGradient(
-            listOf(
-                Color.hsv(hue.toFloat(), 0.62f, 0.86f),
-                Color.hsv(((hue + 38) % 360).toFloat(), 0.70f, 0.72f),
-            )
-        )
+        val (start, end) = avatarGradients[avatarSlot(address)]
+        return Brush.linearGradient(listOf(start, end))
     }
 
     /** The two-letter monogram the capture draws inside that circle. */

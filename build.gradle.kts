@@ -15,7 +15,7 @@ plugins {
 }
 
 group = "com.oshi.desktop"
-version = "1.4.3"
+version = "1.4.5"
 
 /**
  * Where the two shipped trees live.
@@ -166,6 +166,22 @@ val sharedCashuSources =
     "$oshiAndroidRoot/app/src/main/java/com/oshi/messenger/util"
 
 /*
+ * __OHTTP_DESKTOP_2026_11_10__ Oblivious HTTP (RFC 9458) — "Privacy relay (beta)".
+ *
+ * `Bhttp.kt` (RFC 9292 known-length BHTTP), `Ohttp.kt` (HPKE X25519/HKDF-SHA256/AES-128-GCM
+ * via BouncyCastle 1.81) and `OhttpConfig.kt` (relay URL + the PINNED gateway key config,
+ * key_id 1) are pure JVM. Shared rather than copied: the pinned key and the relay URL must be
+ * the phones' constants byte for byte — a copy that drifted would still compile and would
+ * route this client to a different relay, or seal to a key the gateway no longer has.
+ * NOT shared: `OhttpInterceptor.kt` (OkHttp) and `OhttpSettings.kt` (DataStore + Hilt);
+ * the desktop seams are `com.oshi.desktop.net.DesktopOhttp` and `store.PrivacyRelayPreferences`.
+ */
+val sharedOhttpSources =
+    "$oshiAndroidRoot/app/src/main/java/com/oshi/messenger/network/ohttp"
+val sharedOhttpTests =
+    "$oshiAndroidRoot/app/src/test/java/com/oshi/messenger/network/ohttp"
+
+/*
  * __GIF_PACK_2026_09_23__ The offline GIF + sticker library (1,718 GIFs, 1,454 stickers,
  * 15 categories, 15 languages) that iOS (`OSHI/GifPack`, `OSHI/StickerPack`) and Android
  * (`assets/GifPack`, `assets/StickerPack`) both ship — byte-identical, manifests included.
@@ -203,7 +219,12 @@ sourceSets {
         kotlin.srcDir(sharedServiceSources)
         kotlin.srcDir(sharedEncryptionSources)
         kotlin.srcDir(sharedCashuSources)
+        kotlin.srcDir(sharedOhttpSources)
         kotlin.include(
+            // __OHTTP_DESKTOP_2026_11_10__ (relative to the shared `network/ohttp/` srcDir)
+            "Bhttp.kt",
+            "Ohttp.kt",
+            "OhttpConfig.kt",
             // __CASHU_2026_10_24__ e-cash: the reader, its two parsers, the command.
             "**/CashuTokens.kt",
             "**/CashuCbor.kt",
@@ -215,6 +236,10 @@ sourceSets {
             "**/V2Session.kt",
             "**/V2FileKeyMessage.kt",
             "**/V2RetryBudget.kt",
+            // __V2_PADDING_2026_11_09__ Relay-path plaintext padding + per-session capability
+            // map. Pure JVM; shared so the phone and the desktop pad and unpad with ONE
+            // implementation (iOS is pinned to it by the shared vector in V2PaddingDesktopTest).
+            "**/V2Padding.kt",
             // __DESKTOP_RATCHET_HEAL_2026_10_29__ THE REPAIR OF A DEAD 1:1 SESSION — and it
             // is COMPILED, not ported.
             //
@@ -337,6 +362,12 @@ sourceSets {
          * the same way.
          */
         resources.srcDir("$oshiAndroidRoot/app/src/test/resources")
+        // __OHTTP_DESKTOP_2026_11_10__ Android's BHTTP test runs here unchanged (JUnit 4, no
+        // Android API). Its siblings use OkHttp/MockWebServer or the network and are NOT
+        // compiled; the RFC 9458 Appendix A vector is re-run in `DesktopOhttpTest`.
+        kotlin.srcDir(sharedOhttpTests)
+        val ohttpTestDir = file(sharedOhttpTests)
+        kotlin.exclude { it.file.parentFile == ohttpTestDir && it.name != "BhttpTest.kt" }
     }
 }
 

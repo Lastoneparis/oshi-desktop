@@ -321,8 +321,12 @@ class V2BlobClient(
             maxPlaintextBytes: Long,
         ): Boolean {
             if (info.size <= 0 || info.size > maxPlaintextBytes || info.chunkSize <= 0) return false
+            // __MEDIA_PADDING_2026_11_10__ a padded file is sealed (and chunked) at `paddedSize`,
+            // which never exceeds the plaintext ceiling and never undercuts `size`.
+            val sealed = info.paddedSize ?: info.size
+            if (sealed < info.size || sealed > maxPlaintextBytes) return false
             val chunkSize = info.chunkSize.toLong()
-            val expected = info.size / chunkSize + if (info.size % chunkSize == 0L) 0 else 1
+            val expected = sealed / chunkSize + if (sealed % chunkSize == 0L) 0 else 1
             return info.chunkCount == expectedChunkCount && expected == expectedChunkCount.toLong()
         }
 

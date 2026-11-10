@@ -193,12 +193,32 @@ object LoRaProto {
      * false. [toRadioPacket] does not enforce that, because a caller sending to a specific
      * node legitimately wants it; the rule is recorded so the caller can apply it.
      */
+    /**
+     * @param channel __CHANNEL_ROOMS_ALL_SENT_ON_SLOT_ZERO_2026_11_07__ `MeshPacket.channel`,
+     *   field 3 — the slot on THIS radio to transmit on.
+     *
+     *   This writer emitted fields 2, 4, 6 and 10 and never 3, exactly like the iOS and
+     *   Android builders did until that fix, even though [Incoming.channelIndex] three
+     *   hundred lines down has PARSED field 3 since 2026-11-04. On the phones that silently
+     *   broadcast every LoRa channel room on slot 0 — the primary, normally LongFast,
+     *   normally public.
+     *
+     *   This client is not currently affected, for a reason worth writing down rather than
+     *   relying on: [LoRaChannelThread.isChannelKey] exists here and is called by NOTHING,
+     *   so the desktop has no path that sends into a channel room at all — rooms are
+     *   receive-only. The parameter is here so that when a send path is added it cannot be
+     *   added wrong, and so this builder matches the other two.
+     *
+     *   Omitted when 0: that is the proto default, a stock Meshtastic encoder omits it, and
+     *   every frame this client sends today must stay byte-identical.
+     */
     fun toRadioPacket(
         to: UInt,
         portnum: Long,
         payload: ByteArray,
         wantAck: Boolean,
         packetId: UInt,
+        channel: Int = 0,
     ): ByteArray {
         val data = ProtoWriter()
             .varint(1, portnum)          // Data.portnum
@@ -207,7 +227,8 @@ object LoRaProto {
 
         val pkt = ProtoWriter()
             .fixed32(2, to)              // MeshPacket.to
-            .bytes(4, data)              // MeshPacket.decoded
+        if (channel != 0) pkt.varint(3, channel.toLong())  // MeshPacket.channel
+        pkt.bytes(4, data)               // MeshPacket.decoded
             .fixed32(6, packetId)        // MeshPacket.id
         if (wantAck) pkt.varint(10, 1)   // MeshPacket.want_ack — ONLY when true
 
@@ -329,7 +350,28 @@ object LoRaProto {
      * `from` is field 1 fixed32 on `MeshPacket` — filled in by the radio, never by the
      * sender, and therefore **not an authenticator**: see [LoRaNodeBindings].
      */
-    data class Incoming(val from: UInt, val portnum: Long, val payload: ByteArray) {
+    /**
+     * @param to `MeshPacket.to`, field 2. [LoRaFrame.BROADCAST_NODE] means the packet went
+     *   to everyone on the channel rather than to this node alone.
+     *
+     *   __LORA_CHANNEL_IS_A_ROOM_2026_11_04__ This field and [channelIndex] were simply not
+     *   read before, so this client could not tell a public broadcast from a private
+     *   message and filed every inbound text as private — three people talking on LongFast
+     *   became three one-to-one threads.
+     * @param channelIndex `MeshPacket.channel`, field 3. An index into the SENDING node's
+     *   own channel table, which is why [LoRaChannelThread] keys a room on the channel's
+     *   NAME wherever one is known.
+     */
+    data class Incoming(
+        val from: UInt,
+        val portnum: Long,
+        val payload: ByteArray,
+        val to: UInt = 0u,
+        val channelIndex: Int = 0,
+    ) {
+        /** Everyone on the channel heard this, not just us. */
+        val isBroadcast: Boolean get() = to == LoRaFrame.BROADCAST_NODE
+
         override fun equals(other: Any?): Boolean =
             other is Incoming && from == other.from && portnum == other.portnum &&
                 payload.contentEquals(other.payload)
@@ -350,6 +392,12 @@ object LoRaProto {
         val decoded = field(meshPacket, 4, wire = 2)?.payload ?: return null
         val portnum = field(decoded, 1, wire = 0)?.varintValue ?: return null
         val payload = field(decoded, 2, wire = 2)?.payload ?: return null
-        return Incoming(from, portnum, payload)
+        // __LORA_CHANNEL_IS_A_ROOM_2026_11_04__ `to` (2, fixed32) and `channel` (3, varint).
+        // Both default rather than refusing the packet: a firmware that omits either is
+        // still sending a readable message, and the old behaviour — treat it as a direct
+        // packet on slot 0 — is the right fallback for one that does.
+        val to = field(meshPacket, 2, wire = 5)?.asUInt32() ?: 0u
+        val channelIndex = field(meshPacket, 3, wire = 0)?.varintValue?.toInt() ?: 0
+        return Incoming(from, portnum, payload, to, channelIndex)
     }
 }

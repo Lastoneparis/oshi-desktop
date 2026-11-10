@@ -8,6 +8,8 @@ import com.oshi.desktop.store.SessionStore
 import com.oshi.messenger.network.v2.OSHICryptoV2
 import com.oshi.messenger.network.v2.OSHIRatchetV2
 import com.oshi.messenger.network.v2.RatchetHealSignal
+import com.oshi.messenger.network.v2.V2Padding
+import com.oshi.messenger.network.v2.V2PaddingPeers
 import com.oshi.messenger.network.v2.V2RetryBudget
 import com.oshi.messenger.network.v2.V2Session
 import java.util.Base64
@@ -115,6 +117,11 @@ class V2Router(
     private val myUserKey: String get() = identity.userKey
     private val myPair: OSHICryptoV2.X25519Pair get() = identity.identity
 
+    init {
+        // __V2_PADDING_2026_11_09__ per-session "strips padding" knowledge, kept in router-state.json.
+        V2PaddingPeers.attach(state.paddingStore())
+    }
+
     // ------------------------------------------------------------------ capability
 
     /**
@@ -169,16 +176,26 @@ class V2Router(
             val policy = devices
             if (!prekeys.hasPublished()) {
                 if (policy != null && !policy.mayPublishAccountBundle(null)) return true
-                return keys.publish(OPK_TARGET) != null
+                return (keys.publish(OPK_TARGET) != null).also { if (it) state.setPublishedCaps(V2ConfigGate.MY_CAPS) }
             }
             when (val remaining = keys.remainingCount()) {
                 // Count unavailable → do NOT mint. Guessing is what grew the pool; the
                 // bundle already on the server is still valid.
                 null -> true
                 else -> when {
-                    remaining >= OPK_LOW_WATER -> true
                     policy != null && !policy.mayPublishAccountBundle(remaining) -> true
-                    else -> keys.publish(OPK_TARGET - remaining) != null
+                    // __V2_PADDING_2026_11_09__ Caps drift (iOS `republishIfCapabilitiesDrifted`):
+                    // a healthy pool used to mean the bundle's `caps` never changed, so a new
+                    // capability stayed unannounced indefinitely. Republish ONCE with zero new
+                    // one-time pre-keys — same generation, the server keeps the pool.
+                    remaining >= OPK_LOW_WATER -> {
+                        if (state.publishedCaps() != V2ConfigGate.MY_CAPS && keys.publish(0) != null) {
+                            state.setPublishedCaps(V2ConfigGate.MY_CAPS)
+                            log("caps republished: ${V2ConfigGate.MY_CAPS}")
+                        }
+                        true
+                    }
+                    else -> (keys.publish(OPK_TARGET - remaining) != null).also { if (it) state.setPublishedCaps(V2ConfigGate.MY_CAPS) }
                 }
             }
         } catch (e: Exception) {
@@ -215,11 +232,17 @@ class V2Router(
          * Ignored outside device mode. A group send asks via [sendSelfCopy] once instead.
          */
         selfCopy: Boolean = false,
+        /**
+         * __V2_PADDING_2026_11_09__ The caller's GROUP rule: false when a member cannot strip
+         * padding ([groupPaddingAllowed]). 1:1 leaves it true; the per-session capability is
+         * checked at each encrypt, where the session slot is known.
+         */
+        padGate: Boolean = true,
     ): Boolean {
         if (!config.isEnabledCached()) return false
         activeDevices()?.let { dm ->
             return try {
-                sendDeviceMode(dm, peerUserKey, plaintext, msgId ?: UUID.randomUUID().toString(), groupId, selfCopy)
+                sendDeviceMode(dm, peerUserKey, plaintext, msgId ?: UUID.randomUUID().toString(), groupId, selfCopy, padGate)
             } catch (e: Exception) {
                 log("sendText (device mode) failed: ${e.javaClass.simpleName}: ${e.message}")
                 false
@@ -250,7 +273,7 @@ class V2Router(
                 }
                 val x3dh = session.pendingInitiatorHeader
                 session.pendingInitiatorHeader = null
-                val (header, ct) = OSHIRatchetV2.encrypt(session.ratchet, plaintext, EMPTY)
+                val (header, ct) = OSHIRatchetV2.encrypt(session.ratchet, sealForRelay(peerUserKey, null, plaintext, padGate), EMPTY)
                 // BEFORE the send. A failed send costs one skipped sequence number, which
                 // the peer ignores; a rewound chain costs a reused (key, nonce).
                 sessions.save(session)
@@ -272,6 +295,41 @@ class V2Router(
             false
         }
     }
+
+    /**
+     * __V2_PADDING_2026_11_09__ The relay seal's plaintext: padded only when the caller's group
+     * rule allows it AND this session's counterpart is known to strip padding. Everything this
+     * router encrypts goes to the relay — the mesh and LoRa paths never come through here.
+     */
+    private fun sealForRelay(peer: String, device: String?, plaintext: ByteArray, padGate: Boolean): ByteArray =
+        if (V2Padding.shouldPad(padGate, V2PaddingPeers.slotCapable(peer, device))) V2Padding.pad(plaintext) else plaintext
+
+    /** Same rule as `GroupEnvelopeV3.canUse`: pad a group message only if EVERY other member advertises it. */
+    fun groupPaddingAllowed(members: Collection<String>): Boolean = V2PaddingPeers.groupAllows(members, myUserKey)
+
+    /**
+     * __MEDIA_PADDING_2026_11_10__ Whether a v2 blob for [peer] may be padded. Not "the path
+     * routing picks today": [sendText] can fall back from per-device copies to the account
+     * envelope after the blob is sealed. So the peer's ACCOUNT slot AND every device on its
+     * server-side list must advertise `CAP_MEDIA_PADDING` — asked whatever our own device mode
+     * is. A list that cannot be fetched, or any unknown/old slot ⇒ false (unpadded). The relay
+     * blob path only: the mesh/LoRa/legacy paths never pad.
+     */
+    fun mediaPaddingAllowed(peer: String): Boolean = try {
+        if (!V2PaddingPeers.mediaSlotCapable(peer, null)) false      // no network for a known no
+        else {
+            val list = devices?.let { dm -> dm.peerDevices(peer) } ?: keys.peerDevices(peer)
+            // Our own other devices are never in a peer's list; a note-to-self excludes this one.
+            val others = if (isSelf(peer)) list?.filter { it != devices?.deviceId } else list
+            V2PaddingPeers.mediaAllows(peer, others)
+        }
+    } catch (e: Exception) {
+        false
+    }
+
+    /** Group media is sealed ONCE for every member: padded only if every other member allows it. */
+    fun groupMediaPaddingAllowed(members: Collection<String>): Boolean =
+        V2PaddingPeers.groupMediaAllows(members.filter { it.isNotBlank() }.distinct().associateWith { mediaPaddingAllowed(it) }, myUserKey)
 
     /** Establish an initiator session without sending; the X3DH header rides whatever goes first. */
     fun ensureSession(peerUserKey: String): Boolean {
@@ -335,7 +393,7 @@ class V2Router(
             if (route == null) { foreignDrops++; continue }
             if (!state.markSeen(env.msgId)) continue
 
-            val plaintext: ByteArray? = try {
+            val rawPlaintext: ByteArray? = try {
                 ratchetLock.withLock { decryptInbound(env, route.sessionDevice, route.pool) }
             } catch (e: Exception) {
                 // The ratchet was NOT advanced.
@@ -365,11 +423,35 @@ class V2Router(
                 }
                 continue
             }
-            if (plaintext == null) {                // undecryptable-forever → let it be acked
+            if (rawPlaintext == null) {                // undecryptable-forever → let it be acked
                 if (!route.addressed) foreignDrops++
                 continue
             }
             retryBudget.clear(env.msgId)
+
+            // __V2_PADDING_2026_11_09__ Stripped AFTER the ratchet, never inside decryptInbound
+            // (a throw there would be taken for a broken session). A malformed tail is
+            // authenticated bytes from the peer: acked and dropped, no retry, no heal.
+            val plaintext: ByteArray = when (val u = V2Padding.unpad(rawPlaintext)) {
+                is V2Padding.Unpadded.Plain -> {
+                    V2PaddingPeers.noteInbound(env.from, route.sessionDevice, padded = false, carriedX3DH = env.x3dh != null); u.bytes
+                }
+                is V2Padding.Unpadded.Padded -> {
+                    V2PaddingPeers.noteInbound(env.from, route.sessionDevice, padded = true, carriedX3DH = env.x3dh != null); u.bytes
+                }
+                V2Padding.Unpadded.Malformed -> {
+                    log("padded plaintext ${env.msgId.take(8)} from ${env.from.take(8)}… has a malformed tail — dropped")
+                    continue
+                }
+            }
+            // __MEDIA_PADDING_2026_11_10__ a file whose manifest carries `paddedSize` proves this
+            // slot's counterpart reads padded media (only such a build writes one).
+            com.oshi.messenger.network.v2.V2FileKeyMessage.parse(plaintext)?.let { key ->
+                val padded = runCatching {
+                    com.oshi.messenger.network.v2.OSHICryptoV2Streaming.openManifest(key.fileKey, key.fileNonce, key.manifest).paddedSize != null
+                }.getOrDefault(false)
+                if (padded) V2PaddingPeers.noteInboundPaddedMedia(env.from, route.sessionDevice)
+            }
 
             try {
                 if (env.fromDevice != null && isSelf(env.from)) {
@@ -655,6 +737,7 @@ class V2Router(
         msgId: String,
         routing: Map<String, String>?,
         fromDevice: String?,
+        padGate: Boolean = true,
     ): DesktopEnvelope? {
         val bundle = if (sessions.load(peer, device) == null) {
             (if (device == null) takeBundle(peer) else keys.fetchDeviceBundle(peer, device)) ?: return null
@@ -667,7 +750,7 @@ class V2Router(
             }
             val x3dh = session.pendingInitiatorHeader
             session.pendingInitiatorHeader = null
-            val (header, ct) = OSHIRatchetV2.encrypt(session.ratchet, plaintext, EMPTY)
+            val (header, ct) = OSHIRatchetV2.encrypt(session.ratchet, sealForRelay(peer, device, plaintext, padGate), EMPTY)
             sessions.save(session, device)
             DesktopEnvelope(
                 msgId = msgId, from = myUserKey, to = peer,
@@ -679,16 +762,16 @@ class V2Router(
     }
 
     /** One recipient identity of a fan-out: its device list, or null = one account envelope. */
-    private class Leg(val to: String, val plaintext: ByteArray, val routing: Map<String, String>?, var devices: List<String>?, val isSelfCopy: Boolean)
+    private class Leg(val to: String, val plaintext: ByteArray, val routing: Map<String, String>?, var devices: List<String>?, val isSelfCopy: Boolean, val padGate: Boolean = true)
 
-    private fun sendDeviceMode(dm: DeviceMailbox, peer: String, plaintext: ByteArray, msgId: String, groupId: String?, selfCopy: Boolean): Boolean {
+    private fun sendDeviceMode(dm: DeviceMailbox, peer: String, plaintext: ByteArray, msgId: String, groupId: String?, selfCopy: Boolean, padGate: Boolean = true): Boolean {
         val routing = groupId?.let { GroupFanout.envelopeFields(it) }
         val toSelf = isSelf(peer)
         // §3.5 step 1-2: the recipient's devices. Could not ask → today's path, unchanged.
         val peerDevices = (if (toSelf) dm.ownOtherDevices() else dm.peerDevices(peer))
-            ?: return sendLegacyOnly(peer, plaintext, msgId, routing)
+            ?: return sendLegacyOnly(peer, plaintext, msgId, routing, padGate)
         val legs = ArrayList<Leg>()
-        legs += Leg(peer, plaintext, routing, peerDevices.takeIf { it.isNotEmpty() }, isSelfCopy = false)
+        legs += Leg(peer, plaintext, routing, peerDevices.takeIf { it.isNotEmpty() }, isSelfCopy = false, padGate = padGate)
         if (selfCopy && !toSelf) {
             val mine = dm.ownOtherDevices().orEmpty()
             if (mine.isNotEmpty()) {
@@ -697,7 +780,7 @@ class V2Router(
                 legs += Leg(myUserKey, copy, null, mine, isSelfCopy = true)
             }
         }
-        return postFanout(dm, msgId, legs, fallback = { sendLegacyOnly(peer, plaintext, msgId, routing) })
+        return postFanout(dm, msgId, legs, fallback = { sendLegacyOnly(peer, plaintext, msgId, routing, padGate) })
     }
 
     /**
@@ -736,7 +819,7 @@ class V2Router(
                 val devs = leg.devices
                 if (devs == null) {
                     val k = "${leg.to}|"
-                    val env = built[k] ?: encryptFor(leg.to, null, leg.plaintext, msgId, leg.routing, null)?.also { built[k] = it }
+                    val env = built[k] ?: encryptFor(leg.to, null, leg.plaintext, msgId, leg.routing, null, leg.padGate)?.also { built[k] = it }
                     if (env == null) { if (!leg.isSelfCopy) return false else continue }
                     batch += env
                     continue
@@ -744,7 +827,7 @@ class V2Router(
                 val usable = ArrayList<String>()
                 for (d in devs) {
                     val k = "${leg.to}|$d"
-                    val env = built[k] ?: encryptFor(leg.to, d, leg.plaintext, msgId, leg.routing, dm.deviceId)?.also { built[k] = it }
+                    val env = built[k] ?: encryptFor(leg.to, d, leg.plaintext, msgId, leg.routing, dm.deviceId, leg.padGate)?.also { built[k] = it }
                     // No bundle for d: leave it out; if the server still counts it, it says so.
                     if (env == null) { dm.invalidatePeer(leg.to); continue }
                     batch += env; usable += d
@@ -786,8 +869,8 @@ class V2Router(
     }
 
     /** Today's path for one peer: one account envelope, session (peer, nil), no device fields. */
-    private fun sendLegacyOnly(peer: String, plaintext: ByteArray, msgId: String, routing: Map<String, String>?): Boolean {
-        val env = encryptFor(peer, null, plaintext, msgId, routing, null) ?: return false
+    private fun sendLegacyOnly(peer: String, plaintext: ByteArray, msgId: String, routing: Map<String, String>?, padGate: Boolean = true): Boolean {
+        val env = encryptFor(peer, null, plaintext, msgId, routing, null, padGate) ?: return false
         return messages.send(env).isNotEmpty()
     }
 

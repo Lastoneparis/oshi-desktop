@@ -33,6 +33,8 @@ class V2ConfigGate(
     private val ttlMillis: Long = 60_000L,
     private val clock: () -> Long = System::currentTimeMillis,
     private val log: (String) -> Unit = {},
+    /** __OHTTP_DESKTOP_2026_11_10__ Same rule as [V2Http]: when non-null, `/v2/config` goes via the relay. */
+    private val ohttp: () -> DesktopOhttpTransport? = DesktopOhttp::transport,
 ) {
     @Volatile private var cachedEnabled = false
     @Volatile private var cachedAt = 0L
@@ -177,11 +179,19 @@ class V2ConfigGate(
             // turns a slow lane into a closed one. The latency itself is a server defect and
             // is recorded as such; this only stops the client lying about it.
             .timeout(Duration.ofSeconds(30)).GET().build()
-        val resp = http.send(req, HttpResponse.BodyHandlers.ofString())
-        if (resp.statusCode() !in 200..299) {
-            Answer(decide(false, "HTTP ${resp.statusCode()} from $url"), reachedServer = true)
+        // __OHTTP_DESKTOP_2026_11_10__ An OHTTP failure throws into the catch below
+        // (reachedServer = false) — it is never retried direct.
+        val (status, text) = DesktopOhttp.resolve(ohttp)
+            ?.takeIf { DesktopOhttp.isEligible(req.uri(), it) }
+            ?.let { t ->
+                val inner = DesktopOhttp.exchange(http, t, "GET", req.uri(), emptyMap(), null, Duration.ofSeconds(30))
+                inner.status to String(inner.body, Charsets.UTF_8)
+            }
+            ?: http.send(req, HttpResponse.BodyHandlers.ofString()).let { it.statusCode() to (it.body() ?: "") }
+        if (status !in 200..299) {
+            Answer(decide(false, "HTTP $status from $url"), reachedServer = true)
         } else {
-            val json = JSONObject(resp.body())
+            val json = JSONObject(text)
             if (System.getenv("OSHI_DEVICE_MAILBOX_FORCE") != "1") {
                 deviceMailboxEnabled = json.optBoolean("device_mailbox_enabled", false)
             }
@@ -226,6 +236,16 @@ class V2ConfigGate(
 
         /** Prekey-bundle capability bit: "this build reads v2 groups" (iOS `Caps.groupV2`, Android `CAP_GROUP_V2`). */
         const val CAP_GROUP_V2 = 1 shl 1
+
+        /**
+         * __V2_PADDING_2026_11_09__ What this build announces in its bundles: v2 groups, and
+         * "strips v2 plaintext padding" (shared `V2Padding.CAP_PADDING`, iOS `Caps.padding`).
+         * Not the resend-list bit: this client keeps no unreadable-id store (see V2Router).
+         * __MEDIA_PADDING_2026_11_10__ + "reads padded v2 media" (`V2Padding.CAP_MEDIA_PADDING`);
+         * a changed value is republished once by `V2Router.publishBundleIfNeeded` (caps drift).
+         */
+        const val MY_CAPS = CAP_GROUP_V2 or com.oshi.messenger.network.v2.V2Padding.CAP_PADDING or
+            com.oshi.messenger.network.v2.V2Padding.CAP_MEDIA_PADDING
 
         fun isGroupLegacyCompatActive(flag: Boolean?, nowMs: Long): Boolean =
             flag == true && nowMs < GROUP_LEGACY_COMPAT_SUNSET_MS

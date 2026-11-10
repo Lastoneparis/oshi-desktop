@@ -479,6 +479,7 @@ object ScreenRenderer {
      */
     private fun demoRadio(linked: Boolean) = object : com.oshi.desktop.ui.components.LoRaPaneHost {
         override val attached = true
+        override fun myPosition(): Pair<Double, Double>? = null
         override fun devices() = listOf(
             com.oshi.desktop.lora.LoRaSerial.Device("/dev/cu.usbmodem21201", "cu.usbmodem21201"),
             com.oshi.desktop.lora.LoRaSerial.Device("/dev/cu.usbmodem21301", "cu.usbmodem21301"),
@@ -496,6 +497,8 @@ object ScreenRenderer {
         override fun sendOshi(recipient: String, text: String) = true
         override fun link(node: UInt, address: String) = com.oshi.desktop.lora.LoRaNodeBindings.LearnResult.BOUND
         override fun unlink(node: UInt) = true
+        override fun conversationKeyFor(node: UInt) =
+            com.oshi.desktop.lora.LoRaNodeBindings.fallbackConversationKey(node)
         override fun prefs() = com.oshi.desktop.store.TransportPreferences.Values(preferRadio = linked)
         override fun setPrefs(values: com.oshi.desktop.store.TransportPreferences.Values) {}
 
