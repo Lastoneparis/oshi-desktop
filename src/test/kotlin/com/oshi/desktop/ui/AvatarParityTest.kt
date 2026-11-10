@@ -53,7 +53,8 @@ class AvatarParityTest {
     fun `the gradients match the swift source`() {
         val swift = listOf(File("../OSHI/AvatarIdentity.swift"), File("../../OSHI/AvatarIdentity.swift"))
             .firstOrNull { it.exists() }
-        assertTrue("OSHI/AvatarIdentity.swift not found from ${File(".").absolutePath}", swift != null)
+        // The public desktop repo has no iOS tree: skip there (same rule as MeshWireFormatTest).
+        org.junit.Assume.assumeTrue("iOS tree not present on this machine", swift != null)
         val text = swift!!.readText()
         val open = text.indexOf("static let gradients")
         assertTrue("gradients missing from the Swift source", open >= 0)

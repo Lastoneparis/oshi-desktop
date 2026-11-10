@@ -78,7 +78,9 @@ class LoRaCoverageTest {
             File("../OSHI-Android/app/src/main/java/com/oshi/messenger/service/lora/LoRaCoverage.kt"),
             File("../../OSHI-Android/app/src/main/java/com/oshi/messenger/service/lora/LoRaCoverage.kt"),
         ).firstOrNull { it.exists() }
-        assertTrue("Android LoRaCoverage.kt not found from ${File(".").absolutePath}", f != null)
+        // The public desktop repo has no Android tree: skip there (same rule as MeshWireFormatTest);
+        // in the monorepo, where both live, this still catches drift.
+        org.junit.Assume.assumeTrue("Android tree not present on this machine", f != null)
         val text = f!!.readText()
         for ((name, value) in listOf(
             "MIN_USABLE_RSSI" to LoRaCoverage.MIN_USABLE_RSSI.toString(),
