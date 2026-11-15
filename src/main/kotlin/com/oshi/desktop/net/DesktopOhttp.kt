@@ -54,8 +54,51 @@ object DesktopOhttp {
         "connection", "keep-alive", "proxy-connection", "transfer-encoding", "upgrade", "te", "host", "content-length",
     )
 
-    /** False while the build carries no relay URL (today: `""`) — the toggle is greyed. */
-    fun isAvailable(): Boolean = OhttpConfig.isConfigured()
+    /**
+     * __OHTTP_RELAY_ADDRESS_2026_11_10__ False while there is no relay: none entered by the
+     * user and none built in ([OhttpConfig.RELAY_URL], still `""`) — the toggle is greyed.
+     */
+    fun isAvailable(): Boolean = OhttpConfig.isConfigured(relayUrl())
+
+    @Volatile private var cachedRelayUrl: String? = null
+
+    /** The relay used: the address the user entered, else the built-in one. */
+    fun relayUrl(): String =
+        (cachedRelayUrl ?: prefs().loadRelayUrl().also { cachedRelayUrl = it }).ifBlank { OhttpConfig.RELAY_URL }
+
+    /** The address the user entered ("" when none). */
+    fun customRelayUrl(): String = cachedRelayUrl ?: prefs().loadRelayUrl().also { cachedRelayUrl = it }
+
+    /**
+     * Save a relay address; false (nothing saved) when unacceptable. Blank clears it and,
+     * with no built-in relay, turns the switch off — never ON while routing nowhere.
+     */
+    fun setRelayUrl(input: String): Boolean {
+        val url = if (input.isBlank()) "" else normalizeRelayUrl(input) ?: return false
+        synchronized(this) {
+            prefs().saveRelayUrl(url)
+            cachedRelayUrl = url
+            if (url.isEmpty() && OhttpConfig.RELAY_URL.isBlank()) setEnabled(false)
+        }
+        return true
+    }
+
+    /**
+     * https only (the relay hop must be encrypted too), a real dotted host, and NOT OSHI's
+     * own domain — the party that decrypts cannot also be the one hiding the IP.
+     * Same rule as Android's `OhttpSettings.normalizeRelayUrl`.
+     */
+    fun normalizeRelayUrl(input: String): String? {
+        val t = input.trim()
+        if (t.isEmpty()) return null
+        val uri = runCatching { URI(t) }.getOrNull() ?: return null
+        if (!uri.scheme.equals("https", ignoreCase = true)) return null
+        val host = uri.host?.lowercase() ?: return null
+        val inner = OhttpConfig.INNER_AUTHORITY
+        if (host == inner || host.endsWith(".$inner")) return null
+        if (!host.contains('.')) return null
+        return if (uri.rawPath.isNullOrEmpty()) "$t/" else t
+    }
 
     @Volatile private var prefs: PrivacyRelayPreferences? = null
     @Volatile private var cachedEnabled: Boolean? = null
@@ -80,13 +123,17 @@ object DesktopOhttp {
      * unparsable pinned key throws — the call fails, it never quietly goes direct.
      */
     fun transport(): DesktopOhttpTransport? {
-        if (!OhttpConfig.isConfigured() || !isEnabled()) return null
-        return pinnedTransport ?: throw IOException("Privacy relay: pinned key config is invalid or unsupported")
+        if (!isEnabled()) return null
+        val relay = relayUrl()
+        if (!OhttpConfig.isConfigured(relay)) return null
+        transportCache?.let { (url, t) -> if (url == relay) return t }
+        val t = build(relay, OhttpConfig.PINNED_KEYS_HEX)
+            ?: throw IOException("Privacy relay: relay address or pinned key config is invalid")
+        transportCache = relay to t
+        return t
     }
 
-    private val pinnedTransport: DesktopOhttpTransport? by lazy {
-        build(OhttpConfig.RELAY_URL, OhttpConfig.PINNED_KEYS_HEX)
-    }
+    @Volatile private var transportCache: Pair<String, DesktopOhttpTransport>? = null
 
     fun build(relayUrl: String, keysHex: String): DesktopOhttpTransport? = runCatching {
         val cfg = Ohttp.selectFromKeysMedia(Ohttp.hex(keysHex)) ?: return null

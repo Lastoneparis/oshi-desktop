@@ -275,7 +275,8 @@ class StringsFileTest {
         // 4353 → 4383 on 2026-11-09 (30 keys): the production merge (Cashu send
         // sheet + truthful no-wallet wording, LoRa interop/channel strings) plus
         // the OHTTP "privacy relay" settings strings — re-extracted, not hand-added.
-        assertEquals("en Localizable key count", 4383, en.localizable.size)
+        // 4383 → 4387 on 2026-11-10 (4 keys): settings.privacy.ohttp.address{,.not_set,.hint,.invalid}.
+        assertEquals("en Localizable key count", 4387, en.localizable.size)
         assertEquals("en InfoPlist key count", 16, en.infoPlist.size)
         assertEquals("Messages", en.localizable["tab.messages"])
         // Spot-check a value with an escape and one with a bare percent.

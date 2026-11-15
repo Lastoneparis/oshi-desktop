@@ -15,7 +15,7 @@ plugins {
 }
 
 group = "com.oshi.desktop"
-version = "1.4.5"
+version = "1.4.6"
 
 /**
  * Where the two shipped trees live.

@@ -250,6 +250,7 @@ object ClientCommands {
     val HELP: String = """
         Commands:
           /whoami                            this account's address, and whether V2 is open to it
+          /privacyrelay [on|off|url <https://…>]  Oblivious HTTP relay: show, switch, set address
           /reach <address>                   can V2 reach this peer right now
           /send <address> <text>             send a message (address may be a prefix of a known one)
           /sendfile <address> <path>         encrypt a file, upload it, send the key message
@@ -385,6 +386,22 @@ object ClientCommands {
                         out("     ${i + 1}. ${r.label()}")
                     }
                     out("   ${t("call.rating.privacy")}")
+                }
+
+                // __OHTTP_RELAY_ADDRESS_2026_11_10__ the privacy relay, from the CLI.
+                input == "/privacyrelay" -> {
+                    val d = com.oshi.desktop.net.DesktopOhttp
+                    out("   relay: ${d.relayUrl().ifBlank { "(none)" }}  enabled: ${d.isEnabled()}  active: ${d.isAvailable() && d.isEnabled()}")
+                }
+                input == "/privacyrelay on" || input == "/privacyrelay off" -> {
+                    val d = com.oshi.desktop.net.DesktopOhttp
+                    if (input.endsWith("on") && !d.isAvailable()) out("   no relay address — /privacyrelay url <https://…> first")
+                    else { d.setEnabled(input.endsWith("on")); out("   privacy relay ${if (d.isEnabled()) "ON" else "OFF"}") }
+                }
+                input.startsWith("/privacyrelay url") -> {
+                    val arg = input.removePrefix("/privacyrelay url").trim()
+                    out(if (com.oshi.desktop.net.DesktopOhttp.setRelayUrl(arg)) "   relay address: ${arg.ifBlank { "(cleared)" }}"
+                        else "   refused: needs an https:// address that is not OSHI's server")
                 }
 
                 input == "/whoami" -> {

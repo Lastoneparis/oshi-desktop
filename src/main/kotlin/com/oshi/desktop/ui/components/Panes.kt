@@ -195,7 +195,13 @@ fun AccountPane(
  */
 @Composable
 private fun PrivacyRelayCard() {
-    val available = com.oshi.desktop.net.DesktopOhttp.isAvailable()
+    var available by androidx.compose.runtime.remember {
+        androidx.compose.runtime.mutableStateOf(com.oshi.desktop.net.DesktopOhttp.isAvailable())
+    }
+    var draft by androidx.compose.runtime.remember {
+        androidx.compose.runtime.mutableStateOf(com.oshi.desktop.net.DesktopOhttp.customRelayUrl())
+    }
+    var invalid by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
     var enabled by androidx.compose.runtime.remember {
         androidx.compose.runtime.mutableStateOf(com.oshi.desktop.net.DesktopOhttp.isEnabled())
     }
@@ -221,8 +227,31 @@ private fun PrivacyRelayCard() {
                     },
                 )
             }
+            // __OHTTP_RELAY_ADDRESS_2026_11_10__ the relay can be entered here: any https
+            // OHTTP relay works, content is sealed to OSHI's pinned gateway key.
+            Text(t("settings.privacy.ohttp.address"), style = OshiTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, color = Ink.strong)
+            Text(t("settings.privacy.ohttp.address.hint"), fontSize = 11.sp, color = Ink.soft)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm)) {
+                androidx.compose.material3.OutlinedTextField(
+                    value = draft,
+                    onValueChange = { draft = it; invalid = false },
+                    singleLine = true,
+                    isError = invalid,
+                    placeholder = { Text("https://") },
+                    modifier = Modifier.weight(1f),
+                )
+                androidx.compose.material3.TextButton(onClick = {
+                    if (com.oshi.desktop.net.DesktopOhttp.setRelayUrl(draft)) {
+                        available = com.oshi.desktop.net.DesktopOhttp.isAvailable()
+                        enabled = com.oshi.desktop.net.DesktopOhttp.isEnabled()
+                    } else invalid = true
+                }) { Text(t("save")) }
+            }
+            if (invalid) {
+                Text(t("settings.privacy.ohttp.address.invalid"), fontSize = 11.sp, color = OshiTheme.danger)
+            }
             if (!available) {
-                Text(t("settings.privacy.ohttp.unavailable"), fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Ink.soft)
+                Text(t("settings.privacy.ohttp.address.not_set"), fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Ink.soft)
             }
             Text(dt("desktop.account.ohttp.footer"), fontSize = 11.sp, color = Ink.soft)
         }

@@ -19,12 +19,33 @@ class PrivacyRelayPreferences(private val file: File) {
     }
 
     @Synchronized fun save(enabled: Boolean) {
-        AtomicFile.write(file, JSONObject().put(KEY, enabled).toString().toByteArray(Charsets.UTF_8))
+        write(read().put(KEY, enabled))
+    }
+
+    /** __OHTTP_RELAY_ADDRESS_2026_11_10__ the relay the user entered; "" = none. */
+    @Synchronized fun loadRelayUrl(): String = read().optString(KEY_RELAY_URL, "")
+
+    @Synchronized fun saveRelayUrl(url: String) {
+        val j = read()
+        if (url.isBlank()) j.remove(KEY_RELAY_URL) else j.put(KEY_RELAY_URL, url)
+        write(j)
+    }
+
+    private fun read(): JSONObject = try {
+        if (file.isFile) JSONObject(file.readText(Charsets.UTF_8)) else JSONObject()
+    } catch (_: Exception) {
+        JSONObject()
+    }
+
+    private fun write(j: JSONObject) {
+        AtomicFile.write(file, j.toString().toByteArray(Charsets.UTF_8))
     }
 
     companion object {
         const val FILE_NAME = "privacy-relay.json"
         /** Same name Android persists under (`OhttpSettings.KEY_ENABLED`). */
         const val KEY = "ohttp_relay_enabled"
+        /** Same name Android persists under (`OhttpSettings.KEY_RELAY_URL`). */
+        const val KEY_RELAY_URL = "ohttp_relay_url"
     }
 }
