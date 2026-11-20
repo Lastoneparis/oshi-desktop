@@ -121,7 +121,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$RUNNER_OS" = Windows ]; then
-            choco install wixtoolset --version=3.14.0 -y --no-progress | tail -2
+            choco install wixtoolset -y --no-progress | tail -2 || true   # the image already has 3.14.x
             candle="$(find '/c/Program Files (x86)' -name candle.exe 2>/dev/null | head -1)"
             export PATH="$(dirname "$candle"):$PATH"
             task=$([ "${{ matrix.installer }}" = exe ] && echo packageExe || echo packageMsi)
