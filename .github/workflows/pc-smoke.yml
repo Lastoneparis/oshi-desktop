@@ -26,9 +26,9 @@ concurrency:
 
 env:
   PUBLISHED_PREVIOUS: '1.4.5'
-  TEST_VERSION: '1.5.0'
+  TEST_VERSION: '1.5.1'
   # 'published' = download from oshi-messenger.com; 'build' = build this branch's installers.
-  SMOKE_SOURCE: 'published'
+  SMOKE_SOURCE: 'build'
   PYTHONIOENCODING: utf-8
   PYTHONUTF8: '1'
 
