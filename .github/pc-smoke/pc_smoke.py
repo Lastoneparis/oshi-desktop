@@ -169,13 +169,14 @@ def ocr_words(img_path):
         import pytesseract
         from PIL import Image, ImageOps
         base = Image.open(img_path).convert("L")
+        base = base.resize((base.width * 2, base.height * 2))      # small grey labels OCR better at 2x
         out = []
         for img in (base, ImageOps.invert(base)):
             d = pytesseract.image_to_data(img, lang=os.environ.get("OCR_LANGS", "eng"),
                                           output_type=pytesseract.Output.DICT)
             for i, w in enumerate(d["text"]):
                 if w and w.strip():
-                    out.append((w.strip(), d["left"][i] + d["width"][i] // 2, d["top"][i] + d["height"][i] // 2))
+                    out.append((w.strip(), (d["left"][i] + d["width"][i] // 2) // 2, (d["top"][i] + d["height"][i] // 2) // 2))
         (Path(str(img_path) + ".ocr.txt")).write_text(" ".join(w for w, *_ in out), encoding="utf-8")
         return out
     except Exception as e:
@@ -231,14 +232,15 @@ def key(name):
     time.sleep(0.5)
 
 
-def click_text(pattern, name, prefer_last=False):
-    """Screenshot, OCR, click the first word matching `pattern` (case-insensitive)."""
+def click_text(pattern, name, prefer_last=False, ignore_case=True):
+    """Screenshot, OCR, click the first word matching `pattern` inside the OSHI window area."""
     p = shot(name + "-before")
     if not p:
         return False
     words = ocr_words(p)
-    rx = re.compile(pattern, re.I)
-    hits = [w for w in words if rx.search(w[0])]
+    rx = re.compile(pattern, re.I if ignore_case else 0)
+    # never the taskbar / panel at the bottom of the screen
+    hits = [w for w in words if rx.search(w[0]) and w[2] < 1000]
     if not hits:
         print(f"   no OCR hit for /{pattern}/ in {p.name}: {' '.join(w for w, *_ in words)[:400]}")
         return False
@@ -644,7 +646,7 @@ def run_all(gui_exe, console_exe, homes, app):
             t = screen_text("bob-thread")
             record("thread shows Bob's text", re.search(r"fen[eê]tre|premier", t) is not None, t[:800], must=False)
             record("thread text is not mojibake (no Ã/â€ sequences)", re.search(r"Ã|â€", t) is None, t[:800])
-            if click_text(r"^Message|^Type|^Écrire|^Write", "focus-composer", prefer_last=True):
+            if click_text(r"^Message$|^Écrire", "focus-composer", prefer_last=True, ignore_case=False):
                 type_text("Réponse depuis Windows é 😀" if IS_WIN else "Reponse depuis Linux e")
                 key("enter")
                 time.sleep(8)
@@ -705,19 +707,28 @@ def voice_note_check(app, m4a):
     if not jars or not jshell:
         record("voice note: jshell + installed jars available", False, f"jars={len(jars)} jshell={jshell}", must=False)
         return
-    wav = m4a.with_suffix(".wav")
-    script = OUT / "voice.jsh"
-    script.write_text(
-        "var t = new com.oshi.desktop.media.SystemAudioTranscoder();\n"
-        f"System.out.println(\"probe=\" + t.probe());\n"
-        f"System.out.println(\"result=\" + t.toWav(new java.io.File({json.dumps(str(m4a))}), new java.io.File({json.dumps(str(wav))})));\n"
-        "/exit\n", encoding="utf-8")
     cp = os.pathsep.join(jars)
-    r = subprocess.run([jshell, "--class-path", cp, str(script)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
-    out = r.stdout + r.stderr
-    (OUT / "voice-note.log").write_text(out, encoding="utf-8")
-    record("voice note: the installed transcoder finds ffmpeg and decodes an m4a",
-           "Produced" in out and wav.is_file() and wav.stat().st_size > 1000, out[-1500:])
+    ff = shutil.which("ffmpeg")
+    no_ff_path = os.pathsep.join(d for d in os.environ.get("PATH", "").split(os.pathsep)
+                                 if not (Path(d) / ("ffmpeg.exe" if IS_WIN else "ffmpeg")).exists())
+    # with ffmpeg on PATH (a power user), and WITHOUT (almost every Windows user: the bundled one)
+    for tag, path in (("path", os.environ.get("PATH", "")), ("bundled", no_ff_path)):
+        wav = m4a.with_name(f"{m4a.stem}-{tag}.wav")
+        script = OUT / f"voice-{tag}.jsh"
+        script.write_text(
+            "System.out.println(\"which=\" + com.oshi.desktop.media.AudioProc.INSTANCE.which(\"ffmpeg\"));\n"
+            "System.out.println(\"bundled=\" + com.oshi.desktop.media.AudioProc.INSTANCE.getBundledFfmpeg());\n"
+            "var t = new com.oshi.desktop.media.SystemAudioTranscoder();\n"
+            "System.out.println(\"probe=\" + t.probe());\n"
+            f"System.out.println(\"result=\" + t.toWav(new java.io.File({json.dumps(str(m4a))}), new java.io.File({json.dumps(str(wav))})));\n"
+            "/exit\n", encoding="utf-8")
+        env = dict(os.environ); env["PATH"] = path
+        r = subprocess.run([jshell, "--class-path", cp, str(script)], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=300, env=env)
+        out = f"(python which ffmpeg = {ff})\n" + r.stdout + r.stderr
+        (OUT / f"voice-note-{tag}.log").write_text(out, encoding="utf-8")
+        record(f"voice note ({tag} ffmpeg): the installed transcoder decodes an m4a",
+               "Produced" in out and wav.is_file() and wav.stat().st_size > 1000, out[-1500:])
 
 
 if __name__ == "__main__":

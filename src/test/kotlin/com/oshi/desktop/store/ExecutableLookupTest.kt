@@ -29,10 +29,11 @@ class ExecutableLookupTest {
     fun `off Windows the name is used as is and must be executable`() {
         val f = File(dir, "ffmpeg").apply { writeText("") }
         assertNull(ExecutableLookup.which("ffmpeg", path = dir.path, windows = false, isExecutable = { false }))
-        // `/x:<dir>` only where a directory has no drive letter: on a real Windows host the temp
-        // dir is `C:\…`, and a ':'-separated PATH cannot carry it (this case failed there).
-        val path = if (File.pathSeparatorChar == ':') "/x:${dir.path}" else dir.path
-        assertEquals(f.absolutePath, ExecutableLookup.which("ffmpeg", path = path, windows = false, isExecutable = { it.isFile }))
+        // A ':'-separated PATH cannot carry a real Windows directory (`C:\…` splits at the drive
+        // letter), so the positive half only means something on a Unix host — on windows-latest
+        // it failed for exactly that reason (public build run 44642587644, and again 44717585112).
+        org.junit.Assume.assumeTrue(File.pathSeparatorChar == ':')
+        assertEquals(f.absolutePath, ExecutableLookup.which("ffmpeg", path = "/x:${dir.path}", windows = false, isExecutable = { it.isFile }))
     }
 }
 
