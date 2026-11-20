@@ -155,13 +155,26 @@ jobs:
         shell: bash
         run: |
           sudo apt-get install -y -qq ./prev/*.deb
-          echo "PREV_CONSOLE=/opt/oshi-desktop/bin/OSHI" >> "$GITHUB_ENV"
+          L="$(dpkg -L oshi-desktop | grep -E '/bin/OSHI$' | head -1)"; echo "launcher: $L"; test -x "$L"
+          echo "PREV_CONSOLE=$L" >> "$GITHUB_ENV"
 
       - name: Previous version makes a default profile
         shell: bash
         run: python .github/pc-smoke/pc_smoke.py --phase legacy --out smoke-out --state smoke-out/legacy.json --console "$PREV_CONSOLE"
 
       # ------------------------------------------------------------------ 2. version under test, over it
+      # The exe leg upgrades the way most people will: the previous OSHI still RUNNING in the
+      # notification area (closing the window only hides it there).
+      - name: Windows (exe leg) — leave the previous version running, as a user would
+        if: runner.os == 'Windows' && matrix.installer == 'exe'
+        shell: pwsh
+        run: |
+          $prev = Get-ChildItem -Path $env:LOCALAPPDATA -Filter OSHI.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          Start-Process $prev.FullName
+          Start-Sleep -Seconds 40
+          Get-Process OSHI -ErrorAction SilentlyContinue | Format-Table Id, ProcessName, StartTime
+          "UPGRADE_WHILE_RUNNING=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Windows — install the version under test OVER the previous one
         if: runner.os == 'Windows'
         shell: pwsh
@@ -175,14 +188,26 @@ jobs:
             $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @('/i', "`"$($msi.FullName)`"", '/qn', '/norestart', '/l*v', "`"$PWD/test-install.log`"")
           }
           Write-Host "installer exit code: $($p.ExitCode)"
-          if ($p.ExitCode -ne 0) { if (Test-Path test-install.log) { Get-Content test-install.log -Tail 80 }; exit 1 }
+          $log = if (Test-Path test-install.log) { Get-Content test-install.log -Encoding Unicode } else { @() }
+          $deferred = @($log | Select-String 'Scheduling reboot operation|Must reboot')
+          Write-Host "files deferred to the next reboot: $($deferred.Count)"
+          $deferred | Select-Object -First 10 | ForEach-Object { Write-Host "  $_" }
+          $log | Select-String 'RESTART MANAGER' | Select-Object -First 12 | ForEach-Object { Write-Host "  $_" }
+          Write-Host "OSHI processes right after the install: $(@(Get-Process OSHI -ErrorAction SilentlyContinue).Count)"
+          if ($p.ExitCode -eq 3010) { Write-Host "::error::the upgrade needs a REBOOT (3010): $($deferred.Count) files could not be replaced while OSHI was running" }
+          elseif ($p.ExitCode -ne 0) { $log | Select-Object -Last 80; exit 1 }
+          # the user then quits OSHI from the tray (or it is killed by a reboot); the new one must start
+          Get-Process OSHI -ErrorAction SilentlyContinue | Stop-Process -Force
+          Start-Sleep -Seconds 3
           $all = Get-ChildItem -Path $env:LOCALAPPDATA, $env:ProgramFiles -Filter OSHI.exe -Recurse -ErrorAction SilentlyContinue
           $all | ForEach-Object { Write-Host "OSHI.exe at $($_.FullName) $($_.VersionInfo.ProductVersion)" }
           if (@($all).Count -ne 1) { Write-Host "::error::expected exactly ONE installed OSHI.exe after the upgrade, found $(@($all).Count)"; exit 1 }
           $exe = $all | Select-Object -First 1
           "APP_DIR=$($exe.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           $cfg = Get-ChildItem -Path $exe.DirectoryName -Filter OSHI.cfg -Recurse | Select-Object -First 1
-          Get-Content $cfg.FullName | Select-String 'app.version|java-options|arguments|mainclass'
+          Get-Content $cfg.FullName | Select-String 'app.version|java-options|arguments|mainclass|classpath' | Select-Object -First 12
+          Get-Content (Join-Path $exe.DirectoryName 'runtime\release') -ErrorAction SilentlyContinue | Select-String 'JAVA_VERSION'
+          Write-Host "shortcuts:"; Get-ChildItem "$env:USERPROFILE\Desktop", "$env:PUBLIC\Desktop", "$env:APPDATA\Microsoft\Windows\Start Menu\Programs" -Recurse -Filter *.lnk -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*OSHI*' } | ForEach-Object { Write-Host "  $($_.FullName)" }
           Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue |
             ForEach-Object { Get-ItemProperty $_.PSPath } | Where-Object { $_.DisplayName -like '*OSHI*' } | Select-Object DisplayName, DisplayVersion, UninstallString | Format-List
 
@@ -192,7 +217,10 @@ jobs:
         run: |
           sudo apt-get install -y -qq ./test/*.deb
           dpkg -s oshi-desktop | grep -E '^(Version|Status)'
-          echo "APP_DIR=/opt/oshi-desktop" >> "$GITHUB_ENV"
+          L="$(dpkg -L oshi-desktop | grep -E '/bin/OSHI$' | head -1)"; echo "launcher: $L"; test -x "$L"
+          echo "APP_DIR=$(dirname "$(dirname "$L")")" >> "$GITHUB_ENV"
+          dpkg -L oshi-desktop | grep -E '\.desktop$' | xargs -r cat
+          grep JAVA_VERSION "$(dirname "$(dirname "$L")")/lib/runtime/release" || true
           xdg-mime query default x-scheme-handler/oshi || true
 
       # ------------------------------------------------------------------ 3. drive it
@@ -228,7 +256,7 @@ jobs:
         if: always() && runner.os == 'Linux'
         shell: bash
         run: |
-          /opt/oshi-desktop/bin/OSHI >/tmp/oshi-before-remove.log 2>&1 &
+          "$APP_DIR/bin/OSHI" >/tmp/oshi-before-remove.log 2>&1 &
           sleep 30
           echo "running before remove: $(pgrep -fc /opt/oshi-desktop/ || true)"
           sudo apt-get remove -y -qq oshi-desktop
@@ -278,14 +306,16 @@ jobs:
           got="$(sha256sum /tmp/oshi.rpm | awk '{print $1}')"
           echo "site=$got release=$want"; test "$got" = "$want"
           dnf install -y /tmp/oshi.rpm 2>&1 | tail -20
-          rpm -qi oshi-desktop | head -5
+          rpm -qi oshi-desktop | head -12
+          echo "files in the package: $(rpm -ql oshi-desktop | wc -l)"; rpm -ql oshi-desktop | grep -E '/bin/|\.desktop$' || true
       - name: Run it (probe + a console client on a passphrase vault, production relay)
         if: env.SMOKE_SOURCE == 'published'
         run: |
           set -eux
-          /opt/oshi-desktop/bin/OSHI --probe > /tmp/probe.log 2>&1 || true
+          L="$(rpm -ql oshi-desktop | grep -E '/bin/[^/]+$' | head -1)"; echo "launcher: $L"; test -x "$L"
+          "$L" --probe > /tmp/probe.log 2>&1 || true
           tail -5 /tmp/probe.log; grep -q 'known-answer vectors' /tmp/probe.log
-          printf '/whoami\n/quit\n' | OSHI_PASSPHRASE=ci-rpm timeout 120 /opt/oshi-desktop/bin/OSHI --client --home /tmp/rpmhome --name RPM > /tmp/client.log 2>&1 || true
+          printf '/whoami\n/quit\n' | OSHI_PASSPHRASE=ci-rpm timeout 120 "$L" --client --home /tmp/rpmhome --name RPM > /tmp/client.log 2>&1 || true
           cat /tmp/client.log | head -30
           grep -E '^\s*address\s*:' /tmp/client.log
           dnf remove -y oshi-desktop 2>&1 | tail -3

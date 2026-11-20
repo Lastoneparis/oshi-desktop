@@ -164,15 +164,18 @@ def shot(name):
 
 
 def ocr_words(img_path):
+    """Words + centres. Two passes: as is, and inverted (white text on the brand-blue buttons)."""
     try:
         import pytesseract
-        from PIL import Image
-        d = pytesseract.image_to_data(Image.open(img_path), lang=os.environ.get("OCR_LANGS", "eng"),
-                                      output_type=pytesseract.Output.DICT)
+        from PIL import Image, ImageOps
+        base = Image.open(img_path).convert("L")
         out = []
-        for i, w in enumerate(d["text"]):
-            if w and w.strip():
-                out.append((w.strip(), d["left"][i] + d["width"][i] // 2, d["top"][i] + d["height"][i] // 2))
+        for img in (base, ImageOps.invert(base)):
+            d = pytesseract.image_to_data(img, lang=os.environ.get("OCR_LANGS", "eng"),
+                                          output_type=pytesseract.Output.DICT)
+            for i, w in enumerate(d["text"]):
+                if w and w.strip():
+                    out.append((w.strip(), d["left"][i] + d["width"][i] // 2, d["top"][i] + d["height"][i] // 2))
         (Path(str(img_path) + ".ocr.txt")).write_text(" ".join(w for w, *_ in out), encoding="utf-8")
         return out
     except Exception as e:
@@ -245,6 +248,21 @@ def click_text(pattern, name, prefer_last=False):
     return True
 
 
+def click_create(name):
+    """'Create New Identity' is white on the brand gradient; OCR it, else click above 'Import'."""
+    if click_text(r"^Create$|^Créer$", name):
+        return True
+    p = shot(name + "-fallback")
+    words = ocr_words(p) if p else []
+    imp = [w for w in words if re.match(r"^Import", w[0])]
+    if imp:
+        x, y = imp[0][1], imp[0][2] - 98
+        print(f"   fallback click above 'Import' at {x},{y}")
+        click(x, y)
+        return True
+    return False
+
+
 def screen_text(name):
     p = shot(name)
     return " ".join(w for w, *_ in ocr_words(p)) if p else ""
@@ -252,7 +270,9 @@ def screen_text(name):
 
 # --------------------------------------------------------------------------- windows of a process
 def visible_windows(pid=None):
-    """[(id, title)] of VISIBLE top-level windows (of `pid` on Windows; titled OSHI* on Linux)."""
+    """[(id, title)] of VISIBLE top-level windows titled OSHI…  (`pid` is ignored: on Windows the
+    jpackage launcher re-executes itself, so the window belongs to a CHILD of the Popen'd pid)."""
+    pid = None
     out = []
     if IS_WIN:
         import ctypes
@@ -266,7 +286,7 @@ def visible_windows(pid=None):
                 n = u.GetWindowTextLengthW(hwnd)
                 buf = ctypes.create_unicode_buffer(n + 1)
                 u.GetWindowTextW(hwnd, buf, n + 1)
-                if (pid is None or p.value == pid) and buf.value:
+                if (pid is None or p.value == pid) and buf.value.startswith("OSHI"):
                     out.append((hwnd, buf.value))
             return True
         u.EnumWindows(cb_t(cb), 0)
@@ -274,7 +294,8 @@ def visible_windows(pid=None):
         r = subprocess.run(["xdotool", "search", "--onlyvisible", "--name", "OSHI"], capture_output=True, text=True)
         for wid in r.stdout.split():
             t = subprocess.run(["xdotool", "getwindowname", wid], capture_output=True, text=True).stdout.strip()
-            out.append((wid, t))
+            if t.startswith("OSHI"):
+                out.append((wid, t))
     return out
 
 
@@ -455,6 +476,7 @@ def upgraded(gui_exe, console_exe, state):
     else:
         record("found the main window to close", False, str(wins), must=False)
 
+    base_procs = count_app_processes()
     if g.alive():
         # second launch: brings the window back, then exits.
         g2 = Gui(gui_exe, None, "second-launch", plain=True)
@@ -469,8 +491,10 @@ def upgraded(gui_exe, console_exe, state):
         record("second launch brings the window back", bool([w for w in back if "OSHI" in w[1]]), str(back))
         g2.stop()
 
-        # oshi:// link, the way a browser starts it.
-        link = "oshi://add?key=" + urllib.parse.quote(want or "AAAA", safe="")
+        # oshi:// link, the way a browser starts it — to SOMEONE ELSE (a link to yourself is ignored).
+        import base64
+        other = base64.b64encode(os.urandom(32)).decode()
+        link = "oshi://add?key=" + urllib.parse.quote(other, safe="")
         if IS_WIN:
             try:
                 os.startfile(link)
@@ -480,10 +504,11 @@ def upgraded(gui_exe, console_exe, state):
             subprocess.Popen(["xdg-open", link], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(12)
         t = screen_text("after-oshi-link")
-        record("oshi:// link reaches the running window (something about the contact/link is shown)",
-               g.alive() and bool(visible_windows(g.p.pid if IS_WIN else None)), t[:600], must=False)
+        record("oshi:// link reaches the running window (an add-contact sheet with the key is shown)",
+               g.alive() and re.search(r"[Aa]dd|[Cc]ontact|" + re.escape(other[:6]), t) is not None, t[:600], must=False)
         procs = count_app_processes()
-        record("after second launch + link: exactly one OSHI process", procs == 1, f"{procs} processes", must=False)
+        record("after second launch + link: still ONE running copy", procs == base_procs, f"{procs} processes now, {base_procs} before", must=False)
+        key("esc")
     g.stop()
 
 
@@ -512,6 +537,10 @@ def run_all(gui_exe, console_exe, homes, app):
     a_addr, b_addr = alice.address(), bob.address()
     record("ALICE opens on the real OS key store (no passphrase)", bool(a_addr), alice.text_since(0)[-1500:])
     record("BOB opens on a passphrase vault", bool(b_addr), bob.text_since(0)[-800:])
+    hdr = alice.text_since(0)
+    m = re.search(r"^\s*data\s*:\s*(.*)$", hdr, re.M)
+    record("console prints an accented data path intact (stdout is not mis-encoded)",
+           bool(m) and "Profils OSHI été" in m.group(1), m.group(1) if m else hdr[-600:])
     if not (a_addr and b_addr):
         return
     vault = json.loads((alice_home / "keyvault.json").read_text())
@@ -574,8 +603,8 @@ def run_all(gui_exe, console_exe, homes, app):
     record("WINDOW up on a fresh profile (OS key store)", g.alive() and bool(wins), f"{wins}\n" + g.log()[-1500:])
     t = screen_text("first-run")
     record("first-run screen shows the identity choice", re.search(r"Create|Identity|Identit", t, re.I) is not None, t[:600], must=False)
-    clicked = click_text(r"^Create$|^Créer$", "click-create")
-    record("clicked 'Create New Identity'", clicked, must=False)
+    clicked = click_create("click-create")
+    record("clicked 'Create New Identity'", clicked)
     time.sleep(25)
     record("WINDOW alive after 'Create New Identity'", g.alive(), g.log()[-1500:])
     shot("after-create")
@@ -589,12 +618,19 @@ def run_all(gui_exe, console_exe, homes, app):
     w_addr = w.address()
     w.quit()
     record("window profile reopens from the OS key store (console)", bool(w_addr), w.text_since(0)[-800:])
-    if w_addr:
-        bob.cmd(f"/send {w_addr} Salut la fenêtre 👋 — premier message", r"[Ss]ent|NOT", 90)
     g = Gui(gui_exe, gui_home, "main")
     wins = g.wait_window(90)
-    time.sleep(15)
+    time.sleep(25)          # the window publishes its prekeys; a sender needs them
     record("WINDOW up on an existing profile", g.alive() and bool(wins), f"{wins}\n" + g.log()[-1500:])
+    if w_addr:
+        m = None
+        for _ in range(6):
+            m = bob.cmd(f"/send {w_addr} Salut la fenêtre 👋 — premier message", r"[Ss]ent|NOT|REFUSED|WAITING", 90)
+            if m and "NOT" not in m.string:
+                break
+            time.sleep(15)
+        record("BOB (console) sends to the WINDOW's address", bool(m) and "NOT" not in m.string, m.string if m else "")
+    time.sleep(15)
     shot("main-with-incoming")
     if w_addr and g.alive():
         bob.cmd(f"/sendfile {w_addr} {photo}", r"[Ss]ent|NOT", 120)
@@ -607,6 +643,7 @@ def run_all(gui_exe, console_exe, homes, app):
             time.sleep(5)
             t = screen_text("bob-thread")
             record("thread shows Bob's text", re.search(r"fen[eê]tre|premier", t) is not None, t[:800], must=False)
+            record("thread text is not mojibake (no Ã/â€ sequences)", re.search(r"Ã|â€", t) is None, t[:800])
             if click_text(r"^Message|^Type|^Écrire|^Write", "focus-composer", prefer_last=True):
                 type_text("Réponse depuis Windows é 😀" if IS_WIN else "Reponse depuis Linux e")
                 key("enter")
@@ -637,7 +674,7 @@ def run_all(gui_exe, console_exe, homes, app):
     g.wait_window(90); time.sleep(10)
     t = screen_text("first-run-french")
     record("French system language opens the window in French", re.search(r"Créer|Identité|Importer", t) is not None, t[:600])
-    if click_text(r"^Créer$", "fr-click-create"):
+    if click_create("fr-click-create"):
         time.sleep(25)
         shot("fr-main")
         if click_text(r"^Réglages$|^Paramètres$", "fr-open-settings"):
