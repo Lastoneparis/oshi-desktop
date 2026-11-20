@@ -653,6 +653,9 @@ def run_all(gui_exe, console_exe, homes, app):
                 record("BOB receives the reply typed in the WINDOW", ok, h[-600:], must=False)
                 record("the reply keeps accents/emoji", ok and ("é 😀" in h if IS_WIN else True), h[-300:], must=False)
     if g.alive():
+        # Settings live under the "More" destination of the top strip.
+        if click_text(r"^More$|^Plus$", "open-more"):
+            time.sleep(3); shot("more")
         if click_text(r"^Settings$|^Réglages$|^Paramètres$", "open-settings"):
             time.sleep(3); shot("settings")
             if click_text(r"^Language$|^Langue$", "open-language"):
