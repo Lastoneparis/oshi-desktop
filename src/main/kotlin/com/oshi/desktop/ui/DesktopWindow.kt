@@ -1043,7 +1043,7 @@ private fun copyToClipboard(text: String) {
  * reason a messenger fails to open.
  */
 @Composable
-private fun oshiWindowIcon(): Painter? = remember {
+internal fun oshiWindowIcon(): Painter? = remember {
     runCatching {
         val bytes = ChatShellModel::class.java.getResourceAsStream("/branding/oshi-256.png")
             ?.use { it.readBytes() } ?: return@runCatching null

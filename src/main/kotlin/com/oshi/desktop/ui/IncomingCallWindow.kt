@@ -56,6 +56,7 @@ fun IncomingCallWindow(screen: CallScreen, onAnswer: () -> Unit, onDecline: () -
         onCloseRequest = onDecline,
         state = state,
         title = if (screen.video) t("call.incoming.video") else t("call.incoming.voice"),
+        icon = oshiWindowIcon(),
         undecorated = true,
         resizable = false,
         alwaysOnTop = true,

@@ -46,6 +46,11 @@ rsync -a --delete \
   "$SRC/OSHI-Desktop/" "$PUB/"
 mkdir -p "$PUB/.github/workflows"
 cp "$SRC/OSHI-Desktop/.github/workflows/windows-calls.yml" "$PUB/.github/workflows/"
+# __RELEASE_ON_JDK_21_2026_11_20__ the tag-triggered installer build, kept here so the JDK it
+# builds with is reviewed with the code (it was JDK 17 in the public repo only, through 1.5.0),
+# and the PC smoke run that installs and drives those installers on Windows and Linux.
+cp "$SRC/OSHI-Desktop/.github/workflows/release.yml" "$SRC/OSHI-Desktop/.github/workflows/pc-smoke.yml" "$PUB/.github/workflows/"
+mkdir -p "$PUB/.github/pc-smoke" && cp "$SRC/OSHI-Desktop/.github/pc-smoke/pc_smoke.py" "$PUB/.github/pc-smoke/"
 
 echo "== 2/6 shared Android sources the desktop compiles (see build.gradle.kts include list)"
 J="$SRC/OSHI-Android/app/src/main/java/com/oshi/messenger"
@@ -134,6 +139,9 @@ rsync -a --exclude __pycache__ "$SRC/docs/fixtures/" "$PUB/docs/fixtures/"
 # STEGO-v1: the normative spec travels with its vectors, and StegoV1VectorTest locates the
 # fixtures by walking up to docs/stego/STEGO-v1.md.
 mkdir -p "$PUB/docs/stego" && cp "$SRC"/docs/stego/{STEGO-v1,PRIVACY_DISGUISE_SCOPE}.md "$PUB/docs/stego/"
+# The avatar palette spec AvatarParityTest re-reads (one file for iOS, Android, desktop). Not
+# carried before 1.5.1, so the public build's 3 AvatarParityTest cases failed on both legs.
+cp "$SRC/docs/avatar-palette.json" "$PUB/docs/avatar-palette.json"
 
 # The bot sealing vectors. BOT_SEAL_SPEC.md says "every client MUST pass the vectors", and
 # `BotSealFixtures` calls `error()` rather than skipping when they are absent — correctly,

@@ -1000,6 +1000,7 @@ private fun Composer(
                 // __MERGE_AB_LOCK_HIDES_POPUPS__ its own OS window: hidden (state kept) while locked.
                 visible = !com.oshi.desktop.store.AppLock.locked,
                 title = t("pc.markup.title"),
+                icon = com.oshi.desktop.ui.oshiWindowIcon(),
                 state = androidx.compose.ui.window.rememberDialogState(size = com.oshi.desktop.ui.ScreenFit.fitToScreen(androidx.compose.ui.unit.DpSize(1040.dp, 780.dp))),
             ) {
                 com.oshi.desktop.ui.OshiMaterialTheme {

@@ -65,6 +65,7 @@ fun restoreIdentityWindow(vault: KeyVault): Boolean {
             // the common catalog means the first Windows/Linux screen a restored user sees is
             // available in exactly the same 34 languages as iOS and macOS.
             title = t("identity.import_existing"),
+            icon = oshiWindowIcon(),
             state = rememberWindowState(size = ScreenFit.fitToScreen(androidx.compose.ui.unit.DpSize(960.dp, 640.dp))),
         ) {
             androidx.compose.runtime.DisposableEffect(window) {
@@ -143,6 +144,9 @@ fun firstRunIdentityWindow(vault: KeyVault): FirstRunIdentityChoice {
         Window(
             onCloseRequest = { exitApplication() },
             title = t("identity.app_name"),
+            // __FIRST_RUN_WINDOW_ICON_2026_11_20__ the first window a PC user ever sees showed
+            // the JVM's coffee cup in the title bar and taskbar (PC smoke run, windows-latest).
+            icon = oshiWindowIcon(),
             state = rememberWindowState(size = ScreenFit.fitToScreen(androidx.compose.ui.unit.DpSize(960.dp, 640.dp))),
         ) {
             androidx.compose.runtime.DisposableEffect(window) {

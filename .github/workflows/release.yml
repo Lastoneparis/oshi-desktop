@@ -36,17 +36,27 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref }}
 
-      - name: Set up JDK 17 (Temurin — includes jpackage)
+      # __RELEASE_ON_JDK_21_2026_11_20__ 1.5.0 was built HERE on JDK 17 while build.gradle.kts
+      # assumes 21 ("win-menu/win-shortcut=false ... honoured by jpackage 21+, ignored by 17 —
+      # the release builds on 21"). Measured on the installed 1.5.0 (PC smoke run): an
+      # OSHI-Console shortcut on the desktop, and a JDK 17 runtime whose default charset is
+      # windows-1252. The private desktop-release.yml and every local build use 21.
+      - name: Set up JDK 21 (Temurin — includes jpackage)
         uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
 
-      # Windows .msi needs WiX Toolset v3 on PATH (jpackage 17 does not understand WiX v4+).
+      # Windows .msi needs WiX Toolset v3 on PATH (jpackage 21 drives WiX 3; pin the version
+      # the private release workflow uses rather than whatever choco serves today).
       - name: Install WiX Toolset v3 (Windows)
         if: matrix.name == 'windows'
-        run: choco install wixtoolset -y --no-progress
+        run: choco install wixtoolset --version=3.14.0 -y --no-progress
         shell: pwsh
+
+      - name: Print the JDK that will build the installers
+        run: java -version
+        shell: bash
 
       - name: Make gradlew executable (Unix)
         if: matrix.name != 'windows'
