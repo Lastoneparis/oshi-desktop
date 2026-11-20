@@ -219,7 +219,7 @@ jobs:
           dpkg -s oshi-desktop | grep -E '^(Version|Status)'
           L="$(dpkg -L oshi-desktop | grep -E '/bin/OSHI$' | head -1)"; echo "launcher: $L"; test -x "$L"
           echo "APP_DIR=$(dirname "$(dirname "$L")")" >> "$GITHUB_ENV"
-          dpkg -L oshi-desktop | grep -E '\.desktop$' | while read -r f; do [ -f "$f" ] && cat "$f"; done; true
+          dpkg -L oshi-desktop | grep -E '\.desktop$' | while read -r f; do if [ -f "$f" ]; then cat "$f"; fi; done || true
           grep JAVA_VERSION "$(dirname "$(dirname "$L")")/lib/runtime/release" || true
           xdg-mime query default x-scheme-handler/oshi || true
 
