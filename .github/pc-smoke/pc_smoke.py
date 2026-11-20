@@ -707,19 +707,28 @@ def voice_note_check(app, m4a):
     if not jars or not jshell:
         record("voice note: jshell + installed jars available", False, f"jars={len(jars)} jshell={jshell}", must=False)
         return
-    wav = m4a.with_suffix(".wav")
-    script = OUT / "voice.jsh"
-    script.write_text(
-        "var t = new com.oshi.desktop.media.SystemAudioTranscoder();\n"
-        f"System.out.println(\"probe=\" + t.probe());\n"
-        f"System.out.println(\"result=\" + t.toWav(new java.io.File({json.dumps(str(m4a))}), new java.io.File({json.dumps(str(wav))})));\n"
-        "/exit\n", encoding="utf-8")
     cp = os.pathsep.join(jars)
-    r = subprocess.run([jshell, "--class-path", cp, str(script)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
-    out = r.stdout + r.stderr
-    (OUT / "voice-note.log").write_text(out, encoding="utf-8")
-    record("voice note: the installed transcoder finds ffmpeg and decodes an m4a",
-           "Produced" in out and wav.is_file() and wav.stat().st_size > 1000, out[-1500:])
+    ff = shutil.which("ffmpeg")
+    no_ff_path = os.pathsep.join(d for d in os.environ.get("PATH", "").split(os.pathsep)
+                                 if not (Path(d) / ("ffmpeg.exe" if IS_WIN else "ffmpeg")).exists())
+    # with ffmpeg on PATH (a power user), and WITHOUT (almost every Windows user: the bundled one)
+    for tag, path in (("path", os.environ.get("PATH", "")), ("bundled", no_ff_path)):
+        wav = m4a.with_name(f"{m4a.stem}-{tag}.wav")
+        script = OUT / f"voice-{tag}.jsh"
+        script.write_text(
+            "System.out.println(\"which=\" + com.oshi.desktop.media.AudioProc.INSTANCE.which(\"ffmpeg\"));\n"
+            "System.out.println(\"bundled=\" + com.oshi.desktop.media.AudioProc.INSTANCE.getBundledFfmpeg());\n"
+            "var t = new com.oshi.desktop.media.SystemAudioTranscoder();\n"
+            "System.out.println(\"probe=\" + t.probe());\n"
+            f"System.out.println(\"result=\" + t.toWav(new java.io.File({json.dumps(str(m4a))}), new java.io.File({json.dumps(str(wav))})));\n"
+            "/exit\n", encoding="utf-8")
+        env = dict(os.environ); env["PATH"] = path
+        r = subprocess.run([jshell, "--class-path", cp, str(script)], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=300, env=env)
+        out = f"(python which ffmpeg = {ff})\n" + r.stdout + r.stderr
+        (OUT / f"voice-note-{tag}.log").write_text(out, encoding="utf-8")
+        record(f"voice note ({tag} ffmpeg): the installed transcoder decodes an m4a",
+               "Produced" in out and wav.is_file() and wav.stat().st_size > 1000, out[-1500:])
 
 
 if __name__ == "__main__":
