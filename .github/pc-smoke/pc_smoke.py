@@ -169,13 +169,14 @@ def ocr_words(img_path):
         import pytesseract
         from PIL import Image, ImageOps
         base = Image.open(img_path).convert("L")
+        base = base.resize((base.width * 2, base.height * 2))      # small grey labels OCR better at 2x
         out = []
         for img in (base, ImageOps.invert(base)):
             d = pytesseract.image_to_data(img, lang=os.environ.get("OCR_LANGS", "eng"),
                                           output_type=pytesseract.Output.DICT)
             for i, w in enumerate(d["text"]):
                 if w and w.strip():
-                    out.append((w.strip(), d["left"][i] + d["width"][i] // 2, d["top"][i] + d["height"][i] // 2))
+                    out.append((w.strip(), (d["left"][i] + d["width"][i] // 2) // 2, (d["top"][i] + d["height"][i] // 2) // 2))
         (Path(str(img_path) + ".ocr.txt")).write_text(" ".join(w for w, *_ in out), encoding="utf-8")
         return out
     except Exception as e:
@@ -231,14 +232,15 @@ def key(name):
     time.sleep(0.5)
 
 
-def click_text(pattern, name, prefer_last=False):
-    """Screenshot, OCR, click the first word matching `pattern` (case-insensitive)."""
+def click_text(pattern, name, prefer_last=False, ignore_case=True):
+    """Screenshot, OCR, click the first word matching `pattern` inside the OSHI window area."""
     p = shot(name + "-before")
     if not p:
         return False
     words = ocr_words(p)
-    rx = re.compile(pattern, re.I)
-    hits = [w for w in words if rx.search(w[0])]
+    rx = re.compile(pattern, re.I if ignore_case else 0)
+    # never the taskbar / panel at the bottom of the screen
+    hits = [w for w in words if rx.search(w[0]) and w[2] < 1000]
     if not hits:
         print(f"   no OCR hit for /{pattern}/ in {p.name}: {' '.join(w for w, *_ in words)[:400]}")
         return False
@@ -644,7 +646,7 @@ def run_all(gui_exe, console_exe, homes, app):
             t = screen_text("bob-thread")
             record("thread shows Bob's text", re.search(r"fen[eê]tre|premier", t) is not None, t[:800], must=False)
             record("thread text is not mojibake (no Ã/â€ sequences)", re.search(r"Ã|â€", t) is None, t[:800])
-            if click_text(r"^Message|^Type|^Écrire|^Write", "focus-composer", prefer_last=True):
+            if click_text(r"^Message$|^Écrire", "focus-composer", prefer_last=True, ignore_case=False):
                 type_text("Réponse depuis Windows é 😀" if IS_WIN else "Reponse depuis Linux e")
                 key("enter")
                 time.sleep(8)
