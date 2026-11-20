@@ -47,11 +47,11 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      # Windows .msi needs WiX Toolset v3 on PATH (jpackage 21 drives WiX 3; pin the version
-      # the private release workflow uses rather than whatever choco serves today).
+      # Windows .msi needs WiX Toolset v3 on PATH (jpackage 21 drives WiX 3). Not pinned: the
+      # runner image already carries 3.14.1, and choco FAILS the step when asked for an older one.
       - name: Install WiX Toolset v3 (Windows)
         if: matrix.name == 'windows'
-        run: choco install wixtoolset --version=3.14.0 -y --no-progress
+        run: choco install wixtoolset -y --no-progress
         shell: pwsh
 
       - name: Print the JDK that will build the installers
