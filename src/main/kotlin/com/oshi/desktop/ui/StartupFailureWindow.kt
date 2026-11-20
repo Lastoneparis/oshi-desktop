@@ -48,6 +48,7 @@ fun startupFailureWindow(headline: String, detail: String, whatToDo: String) {
         Window(
             onCloseRequest = { exitApplication() },
             title = t("desktop.startup.title"),
+            icon = oshiWindowIcon(),
             state = rememberWindowState(width = 620.dp, height = 430.dp),
         ) {
             // The app's own palette and type, not Material's defaults: this window

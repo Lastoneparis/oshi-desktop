@@ -29,6 +29,10 @@ class ExecutableLookupTest {
     fun `off Windows the name is used as is and must be executable`() {
         val f = File(dir, "ffmpeg").apply { writeText("") }
         assertNull(ExecutableLookup.which("ffmpeg", path = dir.path, windows = false, isExecutable = { false }))
+        // A ':'-separated PATH cannot carry a real Windows directory (`C:\…` splits at the drive
+        // letter), so the positive half only means something on a Unix host — on windows-latest
+        // it failed for exactly that reason (public build run 44642587644, and again 44717585112).
+        org.junit.Assume.assumeTrue(File.pathSeparatorChar == ':')
         assertEquals(f.absolutePath, ExecutableLookup.which("ffmpeg", path = "/x:${dir.path}", windows = false, isExecutable = { it.isFile }))
     }
 }

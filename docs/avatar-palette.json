@@ -1,0 +1,227 @@
+{
+  "_comment": "Default-avatar palette for picture-less contacts and groups. ONE spec for iOS/Mac Catalyst (OSHI/AvatarIdentity.swift), Android (OSHI-Android/.../ui/theme/AvatarIdentity.kt) and desktop (OSHI-Desktop/.../ui/OshiTheme.kt). Each platform carries the literals and its tests re-read THIS file: palette values, contrast and the identifier->slot vectors. Change it here first, then all three, or a contact changes colour when they change device.",
+  "version": 2,
+  "selection": {
+    "normalise": "trim; if the result is a UUID (8-4-4-4-12 hex) lowercase it, otherwise use the identifier unchanged (contacts: the canonical, standard padded base64 public key)",
+    "hash": "SHA-256 over the UTF-8 bytes of the normalised identifier",
+    "slot": "digest[0] mod 16"
+  },
+  "gradient": {
+    "type": "linear",
+    "angleDegrees": 135,
+    "from": "top-leading corner (start)",
+    "to": "bottom-trailing corner (end)",
+    "interpolation": "sRGB"
+  },
+  "highlight": {
+    "type": "radial",
+    "color": "#FFFFFF",
+    "centerX": 0.3,
+    "centerY": 0.2,
+    "radius": 0.8,
+    "alphaAtCenter": 0.24,
+    "alphaAtRadius": 0.0,
+    "units": "fractions of the avatar diameter, origin top-leading",
+    "purpose": "soft light blob baked into the fill; drawn over the gradient, clipped to the circle"
+  },
+  "contrast": {
+    "minimum": 3.0,
+    "rule": "WCAG 2.1 contrast of `ink` against start, end, and the centre colour = mix(mix(start,end,0.5), white, highlight alpha at (0.5,0.5)) — initials are large text (>= 3:1)"
+  },
+  "palette": [
+    {
+      "index": 0,
+      "name": "coral",
+      "start": "#CB6C30",
+      "end": "#B63924",
+      "ink": "#FFFFFF",
+      "nameLight": "#BE4106",
+      "nameDark": "#E87750"
+    },
+    {
+      "index": 1,
+      "name": "apricot",
+      "start": "#FDD7AC",
+      "end": "#F6A97A",
+      "ink": "#743B1F",
+      "nameLight": "#A15905",
+      "nameDark": "#CB884F"
+    },
+    {
+      "index": 2,
+      "name": "honey",
+      "start": "#F8E9A3",
+      "end": "#F1BF5B",
+      "ink": "#6B4716",
+      "nameLight": "#846706",
+      "nameDark": "#B5932E"
+    },
+    {
+      "index": 3,
+      "name": "pistachio",
+      "start": "#D8EFB4",
+      "end": "#9AD387",
+      "ink": "#31552A",
+      "nameLight": "#4B7722",
+      "nameDark": "#79A35B"
+    },
+    {
+      "index": 4,
+      "name": "fern",
+      "start": "#43963C",
+      "end": "#027048",
+      "ink": "#FFFFFF",
+      "nameLight": "#007C37",
+      "nameDark": "#43AB60"
+    },
+    {
+      "index": 5,
+      "name": "mint",
+      "start": "#C2F5E0",
+      "end": "#7ED8C6",
+      "ink": "#07564F",
+      "nameLight": "#087965",
+      "nameDark": "#32A98F"
+    },
+    {
+      "index": 6,
+      "name": "teal",
+      "start": "#179696",
+      "end": "#066674",
+      "ink": "#FFFFFF",
+      "nameLight": "#07777E",
+      "nameDark": "#13A7B0"
+    },
+    {
+      "index": 7,
+      "name": "sky",
+      "start": "#C2ECFE",
+      "end": "#87C6F2",
+      "ink": "#264B7A",
+      "nameLight": "#05739F",
+      "nameDark": "#45A0CF"
+    },
+    {
+      "index": 8,
+      "name": "ocean",
+      "start": "#3E8CC9",
+      "end": "#2953A5",
+      "ink": "#FFFFFF",
+      "nameLight": "#156BC6",
+      "nameDark": "#5699EC"
+    },
+    {
+      "index": 9,
+      "name": "periwinkle",
+      "start": "#7B7FC9",
+      "end": "#5E45AE",
+      "ink": "#FFFFFF",
+      "nameLight": "#6B5ACB",
+      "nameDark": "#948AF1"
+    },
+    {
+      "index": 10,
+      "name": "lavender",
+      "start": "#E3DCFF",
+      "end": "#C9AFF4",
+      "ink": "#553781",
+      "nameLight": "#7A5CAD",
+      "nameDark": "#A48AD4"
+    },
+    {
+      "index": 11,
+      "name": "grape",
+      "start": "#B76BC3",
+      "end": "#7D32A3",
+      "ink": "#FFFFFF",
+      "nameLight": "#984AB2",
+      "nameDark": "#C27CD9"
+    },
+    {
+      "index": 12,
+      "name": "orchid",
+      "start": "#C96598",
+      "end": "#9E3082",
+      "ink": "#FFFFFF",
+      "nameLight": "#B23E89",
+      "nameDark": "#DC74B3"
+    },
+    {
+      "index": 13,
+      "name": "blush",
+      "start": "#FEDAE1",
+      "end": "#F0A9C4",
+      "ink": "#7E314D",
+      "nameLight": "#A84D70",
+      "nameDark": "#D27E9B"
+    },
+    {
+      "index": 14,
+      "name": "raspberry",
+      "start": "#DB6371",
+      "end": "#A92552",
+      "ink": "#FFFFFF",
+      "nameLight": "#BF395B",
+      "nameDark": "#E97188"
+    },
+    {
+      "index": 15,
+      "name": "slate",
+      "start": "#768997",
+      "end": "#47536A",
+      "ink": "#FFFFFF",
+      "nameLight": "#576D88",
+      "nameDark": "#8499B1"
+    }
+  ],
+  "vectors": [
+    {
+      "id": "anatole",
+      "slot": 10
+    },
+    {
+      "id": "hugo",
+      "slot": 4
+    },
+    {
+      "id": "",
+      "slot": 3
+    },
+    {
+      "id": "lorachan!manif",
+      "slot": 5
+    },
+    {
+      "id": "MCowBQYDK2VwAyEAq1w8Zk3nU5yYd2l3m4n5o6p7q8r9s0t1u2v3w4x5y6z=",
+      "slot": 3
+    },
+    {
+      "id": "BHq2Y7qkzL0m1yQe0kq9XW3sV1d6c7m3pPq9yZ4b8tE=",
+      "slot": 12
+    },
+    {
+      "id": "3F2504E0-4F89-11D3-9A0C-0305E82C3301",
+      "slot": 1
+    },
+    {
+      "id": "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
+      "slot": 1
+    },
+    {
+      "id": "6BA7B810-9DAD-11D1-80B4-00C04FD430C8",
+      "slot": 5
+    },
+    {
+      "id": "c56a4180-65aa-42ec-a945-5fd21dec0538",
+      "slot": 14
+    },
+    {
+      "id": "🙂🙂🙂",
+      "slot": 9
+    },
+    {
+      "id": "Zoë Ünïcode",
+      "slot": 3
+    }
+  ]
+}

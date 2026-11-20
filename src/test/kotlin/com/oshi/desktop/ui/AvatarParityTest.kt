@@ -20,7 +20,8 @@ import org.junit.Test
 class AvatarParityTest {
 
     private val spec: JSONObject by lazy {
-        val file = listOf(File("../docs/avatar-palette.json"), File("../../docs/avatar-palette.json"))
+        // monorepo: OSHI-Desktop/../docs; public repo (the desktop project IS the root): docs/
+        val file = listOf(File("../docs/avatar-palette.json"), File("../../docs/avatar-palette.json"), File("docs/avatar-palette.json"))
             .firstOrNull { it.exists() }
         assertTrue("docs/avatar-palette.json not found from ${File(".").absolutePath}", file != null)
         JSONObject(file!!.readText())

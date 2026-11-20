@@ -205,15 +205,21 @@ data class CallOffer(
         fun decode(payload: ByteArray): CallOffer? {
             if (payload.size < MIN_SIZE) return null
 
+            // __CALL_OFFER_PEEL_WITHOUT_A_LIST_2026_11_20__ The peeled tail IS payload[end until
+            // size], front first, so a flag is read straight from the payload. This used an
+            // ArrayList<Byte> filled with add(0, …), and twice in full local suite runs (Temurin
+            // 21.0.13, HolePunchTest and WbAdpcmCodecTest) `caps[slot]` came back NULL from a
+            // list nothing else could touch — an NPE inside the decode of an inbound call offer.
+            // No list, no boxing, nothing to come back null.
             var end = payload.size
-            val caps = ArrayList<Byte>(MAX_CAP_BYTES)
             while (end > HEADER_SIZE &&
-                caps.size < MAX_CAP_BYTES &&
+                payload.size - end < MAX_CAP_BYTES &&
                 (payload[end - 1].toInt() and 0xFF) < PEEL_FLOOR
             ) {
-                caps.add(0, payload[end - 1])
                 end--
             }
+            val capsStart = end
+            val capsCount = payload.size - end
             if (end <= HEADER_SIZE) return null
 
             val id = String(payload, HEADER_SIZE, end - HEADER_SIZE, StandardCharsets.UTF_8)
@@ -225,7 +231,7 @@ data class CallOffer(
             if (cleaned.isEmpty()) return null
 
             fun cap(slot: Int, flag: Byte): Boolean =
-                slot < caps.size && (caps[slot].toInt() and flag.toInt()) != 0
+                slot < capsCount && (payload[capsStart + slot].toInt() and flag.toInt()) != 0
 
             return CallOffer(
                 sessionKey = payload.copyOfRange(0, SESSION_KEY_SIZE),

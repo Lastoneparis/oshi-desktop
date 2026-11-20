@@ -35,6 +35,8 @@ import java.time.format.DateTimeFormatter
  * can test.
  */
 fun runClientCli(args: Array<String>) {
+    // __CONSOLE_CHARSET_ON_WINDOWS_2026_11_20__ before the first println: see ConsoleIo.
+    val stdin = ConsoleIo.install()
     val home = argValue(args, "--home")?.let { File(it) } ?: DesktopPaths.dataDir
     val server = argValue(args, "--server")
     val name = argValue(args, "--name")
@@ -204,7 +206,7 @@ fun runClientCli(args: Array<String>) {
 
     while (true) {
         print("> "); System.out.flush()
-        val line = readlnOrNull() ?: break
+        val line = stdin.readLine() ?: break
         if (!ClientCommands.execute(client, line.trim()) { println(it) }) break
     }
     client.stop()
