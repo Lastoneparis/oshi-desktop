@@ -26,9 +26,10 @@ concurrency:
 
 env:
   PUBLISHED_PREVIOUS: '1.4.5'
-  TEST_VERSION: '1.5.0'
-  # 'published' = download from oshi-messenger.com; 'build' = build this branch's installers.
-  SMOKE_SOURCE: 'published'
+  # A ci/desktop-* branch is a release CANDIDATE: its installers are built from the branch.
+  # Anything else smokes the PUBLISHED files (oshi-messenger.com, checked against SHA256SUMS).
+  TEST_VERSION: ${{ startsWith(github.ref_name, 'ci/desktop-') && '1.5.1' || '1.5.0' }}
+  SMOKE_SOURCE: ${{ startsWith(github.ref_name, 'ci/desktop-') && 'build' || 'published' }}
   PYTHONIOENCODING: utf-8
   PYTHONUTF8: '1'
 
