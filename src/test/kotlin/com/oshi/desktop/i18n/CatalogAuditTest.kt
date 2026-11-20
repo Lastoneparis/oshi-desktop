@@ -164,12 +164,22 @@ class CatalogAuditTest {
     @Test
     fun `desktop-only catalog exactly matches the desktop source`() {
         val used = SourceKeys.usedDesktop(mainSource)
-        assertTrue(
-            "the desktop-only scan found ${used.size} keys ($used). An empty scan would make " +
-                "the exact-set assertion below pass while every dt(…) call had stopped being " +
-                "recognised, so fail before accepting that vacuous result.",
-            used.size >= 10,
-        )
+        // __DESKTOP_TRANSLATION_COMPLETE_2027__ the overlay was emptied on 2026-11-19: its
+        // 22 English-only strings moved into the 34 .lproj catalogs (see
+        // DesktopTranslationCompletenessTest), so an empty scan is now the expected state.
+        // What must not happen is an empty scan because dt(…) stopped being RECOGNISED, so
+        // the scanner is proven on a fixture instead of on the live source.
+        val fixture = kotlin.io.path.createTempDirectory("dt-scan").toFile()
+        try {
+            File(fixture, "Fixture.kt").writeText("val a = dt(\"desktop.fixture.one\")\nval b = com.oshi.desktop.i18n.dt(\"desktop.fixture.two\", 1)\n")
+            assertEquals(
+                "the dt(…) scanner no longer recognises dt calls, so the exact-set assertion below would be vacuous",
+                setOf("desktop.fixture.one", "desktop.fixture.two"),
+                SourceKeys.usedDesktop(fixture),
+            )
+        } finally {
+            fixture.deleteRecursively()
+        }
 
         val nonDesktopUses = used.filterNot { it.startsWith(DesktopStrings.PREFIX) }
         assertTrue(

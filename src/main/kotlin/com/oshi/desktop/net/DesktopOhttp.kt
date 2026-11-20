@@ -6,7 +6,6 @@ import com.oshi.messenger.network.ohttp.Bhttp
 import com.oshi.messenger.network.ohttp.Ohttp
 import com.oshi.messenger.network.ohttp.OhttpConfig
 import java.io.IOException
-import java.io.InputStream
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -22,6 +21,8 @@ data class DesktopOhttpTransport(
     val relayUrl: URI,
     val keyConfig: Ohttp.KeyConfig,
     val innerAuthority: String = OhttpConfig.INNER_AUTHORITY,
+    /** Harness only: the origin whose /v2 calls are eligible when it is not https://[innerAuthority]. */
+    val directOrigin: URI? = null,
 )
 
 /**
@@ -156,6 +157,10 @@ object DesktopOhttp {
 
     /** `https://<innerAuthority>/v2/...` only — media blobs INCLUDED (spec §4). */
     fun isEligible(uri: URI, t: DesktopOhttpTransport): Boolean {
+        t.directOrigin?.let { o ->
+            if (uri.scheme != o.scheme || uri.host != o.host || uri.port != o.port) return false
+            return uri.rawPath?.startsWith("/v2/") == true
+        }
         if (uri.scheme != "https") return false
         if (uri.host != t.innerAuthority) return false
         if (uri.port != -1 && uri.port != 443) return false
@@ -169,14 +174,15 @@ object DesktopOhttp {
     }
 
     /** Build the BHTTP request the gateway will replay. Header names lower-cased, hop-by-hop dropped. */
-    fun toBhttp(method: String, uri: URI, headers: Map<String, String>, body: ByteArray?): Bhttp.Request {
+    fun toBhttp(method: String, uri: URI, headers: Map<String, String>, body: ByteArray?, t: DesktopOhttpTransport? = null): Bhttp.Request {
         val inner = ArrayList<Pair<String, String>>()
         for ((k, v) in headers) {
             val n = k.lowercase()
             if (n !in HOP_BY_HOP) inner += n to v
         }
         val path = uri.rawPath + (uri.rawQuery?.let { "?$it" } ?: "")
-        val authority = if (uri.port == -1 || uri.port == 443) uri.host else "${uri.host}:${uri.port}"
+        val authority = if (t?.directOrigin != null) t.innerAuthority
+            else if (uri.port == -1 || uri.port == 443) uri.host else "${uri.host}:${uri.port}"
         return Bhttp.Request(method, "https", authority, path, inner, body ?: ByteArray(0))
     }
 
@@ -196,7 +202,7 @@ object DesktopOhttp {
         timeout: Duration,
     ): Inner {
         try {
-            val ctx = Ohttp.encapsulateRequest(t.keyConfig, Bhttp.encodeRequest(toBhttp(method, uri, headers, body)))
+            val ctx = Ohttp.encapsulateRequest(t.keyConfig, Bhttp.encodeRequest(toBhttp(method, uri, headers, body, t)))
             val outer = HttpRequest.newBuilder(t.relayUrl)
                 .timeout(timeout)
                 .header("Content-Type", Ohttp.REQUEST_MEDIA_TYPE)
@@ -204,8 +210,9 @@ object DesktopOhttp {
                 // A cleartext relay (only ever a loopback test double) must not see an h2c upgrade.
                 .apply { if (t.relayUrl.scheme == "http") version(HttpClient.Version.HTTP_1_1) }
                 .build()
-            val resp = http.send(outer, HttpResponse.BodyHandlers.ofInputStream())
-            val bytes = resp.body().use { it.readBounded(MAX_RESPONSE) }
+            // Whole exchange bounded: a frozen connection must not hang the caller (NetClients.sendBounded).
+            val resp = NetClients.sendBounded(http, outer, MAX_RESPONSE, timeout, "Privacy relay response too large")
+            val bytes = resp.body()
             val type = resp.headers().firstValue("Content-Type").orElse("")
             if (isKeyMismatch(resp.statusCode(), type, bytes)) {
                 throw Ohttp.KeyMismatchException(
@@ -233,17 +240,5 @@ object DesktopOhttp {
         if (code !in 400..499) return false
         if (!contentType.contains("problem+json", ignoreCase = true)) return false
         return String(body, Charsets.UTF_8).contains("http-problem-types#ohttp-key")
-    }
-
-    private fun InputStream.readBounded(limit: Int): ByteArray {
-        val out = java.io.ByteArrayOutputStream()
-        val buf = ByteArray(8192)
-        while (true) {
-            val n = read(buf)
-            if (n < 0) break
-            if (out.size() + n > limit) throw IOException("Privacy relay response too large")
-            out.write(buf, 0, n)
-        }
-        return out.toByteArray()
     }
 }

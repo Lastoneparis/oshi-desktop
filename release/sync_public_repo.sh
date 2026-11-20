@@ -73,6 +73,13 @@ cp "$J"/service/diag/CallFileLogger.kt "$M/service/diag/"
 cp "$J"/util/{CashuTokens,CashuCbor,CashuJson,CashuPayCommand}.kt "$M/util/"
 # __VIDEO_NOTE_2026_09_24__ round-video-note rules; V2FileKeyMessage.kt calls it.
 mkdir -p "$M/service/media" && cp "$J"/service/media/VideoNote.kt "$M/service/media/"
+# __PRIVACY_DISGUISE_2026_11_18__ STEGO-v1 + the cover transport's wire format, and the two
+# Android STEGO tests the desktop runs unchanged (they read ../docs/fixtures/stego).
+mkdir -p "$M/service/stego" "$A/test/java/com/oshi/messenger/service/stego"
+cp "$J"/service/stego/{StegoV1,StegoPng}.kt "$M/service/stego/"
+cp "$J"/service/CoverCodec.kt "$M/service/"
+cp "$J"/network/v2/CoverPresentation.kt "$M/network/v2/"
+cp "$SRC"/OSHI-Android/app/src/test/java/com/oshi/messenger/service/stego/{StegoV1Test,StegoV1VectorTest}.kt "$A/test/java/com/oshi/messenger/service/stego/"
 # RECURSIVE, and not `*.json` at the top level only. That glob is why
 # `DesktopCallLogTest` failed on BOTH Ubuntu and Windows in the public repo while passing
 # here: its fixtures are `call_log/redaction_*.log` — a SUBDIRECTORY, and `.log` rather
@@ -107,7 +114,8 @@ if grep -l '^import android\.' "$M"/network/v2/{OSHICryptoV2,OSHICryptoV2Streami
      "$M"/service/{LlamaCpp,CallRatingPolicy,VideoReorderReassembler,VideoRateController}.kt \
      "$M"/service/media/VideoNote.kt "$M"/service/diag/CallFileLogger.kt \
      "$M"/util/{CashuTokens,CashuCbor,CashuJson,CashuPayCommand}.kt \
-     "$M"/network/ohttp/{Bhttp,Ohttp,OhttpConfig}.kt; then
+     "$M"/network/ohttp/{Bhttp,Ohttp,OhttpConfig}.kt \
+     "$M"/service/stego/{StegoV1,StegoPng}.kt "$M"/service/CoverCodec.kt "$M"/network/v2/CoverPresentation.kt; then
   echo "ABORT: android.* import in a shared source the desktop compiles" >&2; exit 1; fi
 
 # __OPUS_CODEC_2026_09_23__ Concentus, the pure-Java Opus port the call codec compiles from
@@ -123,6 +131,9 @@ cp "$SRC/Vendor/README-OSHI.md" "$PUB/Vendor/"
 echo "== 3/6 test fixtures"
 mkdir -p "$PUB/docs/fixtures"
 rsync -a --exclude __pycache__ "$SRC/docs/fixtures/" "$PUB/docs/fixtures/"
+# STEGO-v1: the normative spec travels with its vectors, and StegoV1VectorTest locates the
+# fixtures by walking up to docs/stego/STEGO-v1.md.
+mkdir -p "$PUB/docs/stego" && cp "$SRC"/docs/stego/{STEGO-v1,PRIVACY_DISGUISE_SCOPE}.md "$PUB/docs/stego/"
 
 # The bot sealing vectors. BOT_SEAL_SPEC.md says "every client MUST pass the vectors", and
 # `BotSealFixtures` calls `error()` rather than skipping when they are absent — correctly,

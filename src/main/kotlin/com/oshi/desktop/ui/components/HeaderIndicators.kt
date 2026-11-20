@@ -97,7 +97,7 @@ fun NetworkBadgeChip(
                 Text("LoRa ${badge.loraNodes}", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Ink.strong)
             }
         }
-        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+        OshiDropdownMenu(expanded = open, onDismissRequest = { open = false }) {
             ReachList(shown)
         }
     }
@@ -199,7 +199,7 @@ fun IncomingSharesChip(shares: List<IncomingShare>, onOpen: (String) -> Unit, mo
             Pin(Ink.strong, hole = OshiTheme.background)
             Text("${shares.size}", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Ink.strong)
         }
-        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+        OshiDropdownMenu(expanded = open, onDismissRequest = { open = false }) {
             for (share in shares) {
                 DropdownMenuItem(
                     text = {

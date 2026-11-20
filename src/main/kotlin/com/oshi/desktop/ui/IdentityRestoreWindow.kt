@@ -65,72 +65,46 @@ fun restoreIdentityWindow(vault: KeyVault): Boolean {
             // the common catalog means the first Windows/Linux screen a restored user sees is
             // available in exactly the same 34 languages as iOS and macOS.
             title = t("identity.import_existing"),
-            state = rememberWindowState(width = 520.dp, height = 410.dp),
+            state = rememberWindowState(size = ScreenFit.fitToScreen(androidx.compose.ui.unit.DpSize(960.dp, 640.dp))),
         ) {
+            androidx.compose.runtime.DisposableEffect(window) {
+                DialogOwner.current = window
+                onDispose { if (DialogOwner.current === window) DialogOwner.current = null }
+            }
             var recoveryKey by remember { mutableStateOf("") }
             var error by remember { mutableStateOf<String?>(null) }
-            MaterialTheme(colorScheme = OshiTheme.colors, typography = OshiTheme.typography) {
-                Surface {
-                    Column(
-                        modifier = Modifier.padding(28.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
-                        Text(t("identity.import_existing"), style = MaterialTheme.typography.headlineSmall)
-                        Text(
-                            t("identity.import_existing.hint"),
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                        Spacer(Modifier.height(4.dp))
-                        OutlinedTextField(
-                            value = recoveryKey,
-                            onValueChange = { recoveryKey = it; error = null },
-                            modifier = Modifier.fillMaxWidth(),
-                            label = { Text(t("identity.vault.import_key")) },
-                            // Do not surface parser or crypto details for an invalid secret:
-                            // this is both clearer to a user and avoids treating recovery-key
-                            // material as diagnostic data in a future logging integration.
-                            supportingText = error?.let { message -> { Text(message) } },
-                            isError = error != null,
-                            visualTransformation = PasswordVisualTransformation(),
-                            minLines = 3,
-                        )
-                        OutlinedButton(
-                            modifier = Modifier.fillMaxWidth(),
-                            onClick = {
-                                pickQrImage()?.let { image ->
-                                    QrImageDecoder.decode(image).fold(
-                                        onSuccess = { recoveryKey = it; error = null },
-                                        onFailure = { error = t("identity.vault.import_error") },
-                                    )
-                                }
-                            },
-                        ) { Text(t("identity.vault.scan_qr")) }
-                        Spacer(Modifier.height(4.dp))
-                        Button(
-                            modifier = Modifier.fillMaxWidth(),
-                            enabled = recoveryKey.isNotBlank(),
-                            onClick = {
-                                try {
-                                    IdentityStore.importRecoveryKey(vault, recoveryKey)
-                                    recoveryKey = ""
-                                    restored = true
-                                    exitApplication()
-                                } catch (e: IdentityImportException) {
-                                    error = t("identity.vault.import_error")
-                                } catch (_: Exception) {
-                                    // Never surface local vault/OS-key-store diagnostics in the UI.
-                                    // The encrypted vault commits this identity as one atomic record.
-                                    recoveryKey = ""
-                                    error = t("identity.vault.import_error")
-                                }
-                            },
-                        ) { Text(t("identity.setup.restore.action")) }
-                        OutlinedButton(
-                            modifier = Modifier.fillMaxWidth(),
-                            onClick = { recoveryKey = ""; exitApplication() },
-                        ) { Text(t("common.cancel")) }
-                    }
-                }
+            // __DESKTOP_SETTINGS_2027__ the same screen as the first run, opened on "import".
+            OshiMaterialTheme {
+                FirstRunScreen(
+                    importing = true,
+                    recoveryKey = recoveryKey,
+                    error = error,
+                    onCreate = {},
+                    onStartImport = {},
+                    onKeyChange = { recoveryKey = it; error = null },
+                    onScanQr = {
+                        pickQrImage()?.let { image ->
+                            QrImageDecoder.decode(image).fold(
+                                onSuccess = { recoveryKey = it; error = null },
+                                onFailure = { error = t("identity.vault.import_error") },
+                            )
+                        }
+                    },
+                    onRestore = {
+                        try {
+                            IdentityStore.importRecoveryKey(vault, recoveryKey)
+                            recoveryKey = ""
+                            restored = true
+                            exitApplication()
+                        } catch (e: IdentityImportException) {
+                            error = t("identity.vault.import_error")
+                        } catch (_: Exception) {
+                            recoveryKey = ""
+                            error = t("identity.vault.import_error")
+                        }
+                    },
+                    onCancel = { recoveryKey = ""; exitApplication() },
+                )
             }
         }
     }
@@ -169,117 +143,45 @@ fun firstRunIdentityWindow(vault: KeyVault): FirstRunIdentityChoice {
         Window(
             onCloseRequest = { exitApplication() },
             title = t("identity.app_name"),
-            state = rememberWindowState(width = 540.dp, height = 450.dp),
+            state = rememberWindowState(size = ScreenFit.fitToScreen(androidx.compose.ui.unit.DpSize(960.dp, 640.dp))),
         ) {
+            androidx.compose.runtime.DisposableEffect(window) {
+                DialogOwner.current = window
+                onDispose { if (DialogOwner.current === window) DialogOwner.current = null }
+            }
             var importing by remember { mutableStateOf(false) }
             var recoveryKey by remember { mutableStateOf("") }
             var error by remember { mutableStateOf<String?>(null) }
-            MaterialTheme(colorScheme = OshiTheme.colors, typography = OshiTheme.typography) {
-                Surface {
-                    // __FIRST_RUN_IS_THE_FIRST_IMPRESSION_2026_11_03__ Seen on a real
-                    // Linux box for the first time, this screen was a headline, a line
-                    // of hint and two buttons jammed against the top edge of a 540x450
-                    // window, with the lower half empty and nothing identifying the
-                    // product. It is the first thing a new user ever sees of OSHI.
-                    //
-                    // Centred, with the name and the tagline above it. The three
-                    // strings used here — `identity.title`, `identity.tagline`,
-                    // `identity.subtitle` — ALREADY EXIST and are already translated in
-                    // all 34 locales, which is why they are reused rather than new copy
-                    // written: the guides shipped with 32 locales of untranslated
-                    // English this week and that is not a mistake worth repeating for
-                    // the sake of a nicer sentence.
-                    Column(
-                        modifier = Modifier.fillMaxSize().padding(horizontal = 36.dp, vertical = 28.dp),
-                        verticalArrangement = Arrangement.Center,
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                    ) {
-                        Text(
-                            t("identity.title"),
-                            // The brand gradient the phone draws its own wordmark in.
-                            style = MaterialTheme.typography.headlineMedium.copy(
-                                brush = OshiTheme.brandGradient,
-                                fontWeight = FontWeight.Bold,
-                            ),
-                        )
-                        Spacer(Modifier.height(6.dp))
-                        Text(
-                            t("identity.tagline"),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = OshiTheme.textSecondary,
-                            textAlign = TextAlign.Center,
-                        )
-                        Spacer(Modifier.height(28.dp))
-                        Text(
-                            if (importing) t("identity.import_existing") else t("identity.create_new"),
-                            style = MaterialTheme.typography.headlineSmall,
-                            textAlign = TextAlign.Center,
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            if (importing) {
-                                t("identity.import_existing.hint")
-                            } else {
-                                t("identity.create_new.hint")
-                            },
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = OshiTheme.textSecondary,
-                            textAlign = TextAlign.Center,
-                        )
-                        Spacer(Modifier.height(20.dp))
-                        if (!importing) {
-                            Button(
-                                modifier = Modifier.fillMaxWidth(),
-                                onClick = { choice = FirstRunIdentityChoice.CREATE_NEW; exitApplication() },
-                            ) { Text(t("identity.create_new")) }
-                            OutlinedButton(
-                                modifier = Modifier.fillMaxWidth(),
-                                onClick = { importing = true },
-                            ) { Text(t("identity.import_existing")) }
-                        } else {
-                            OutlinedTextField(
-                                value = recoveryKey,
-                                onValueChange = { recoveryKey = it; error = null },
-                                modifier = Modifier.fillMaxWidth(),
-                                label = { Text(t("identity.vault.import_key")) },
-                                supportingText = error?.let { message -> { Text(message) } },
-                                isError = error != null,
-                                visualTransformation = PasswordVisualTransformation(),
-                                minLines = 3,
+            // __DESKTOP_SETTINGS_2027__ FirstRunScreen: brand + promises left, the choice right.
+            OshiMaterialTheme {
+                FirstRunScreen(
+                    importing = importing,
+                    recoveryKey = recoveryKey,
+                    error = error,
+                    onCreate = { choice = FirstRunIdentityChoice.CREATE_NEW; exitApplication() },
+                    onStartImport = { importing = true },
+                    onKeyChange = { recoveryKey = it; error = null },
+                    onScanQr = {
+                        pickQrImage()?.let { image ->
+                            QrImageDecoder.decode(image).fold(
+                                onSuccess = { recoveryKey = it; error = null },
+                                onFailure = { error = t("identity.vault.import_error") },
                             )
-                            OutlinedButton(
-                                modifier = Modifier.fillMaxWidth(),
-                                onClick = {
-                                    pickQrImage()?.let { image ->
-                                        QrImageDecoder.decode(image).fold(
-                                            onSuccess = { recoveryKey = it; error = null },
-                                            onFailure = { error = t("identity.vault.import_error") },
-                                        )
-                                    }
-                                },
-                            ) { Text(t("identity.vault.scan_qr")) }
-                            Button(
-                                modifier = Modifier.fillMaxWidth(),
-                                enabled = recoveryKey.isNotBlank(),
-                                onClick = {
-                                    try {
-                                        IdentityStore.importRecoveryKey(vault, recoveryKey)
-                                        recoveryKey = ""
-                                        choice = FirstRunIdentityChoice.RESTORED
-                                        exitApplication()
-                                    } catch (_: Exception) {
-                                        recoveryKey = ""
-                                        error = t("identity.vault.import_error")
-                                    }
-                                },
-                            ) { Text(t("identity.setup.restore.action")) }
-                            OutlinedButton(
-                                modifier = Modifier.fillMaxWidth(),
-                                onClick = { recoveryKey = ""; error = null; importing = false },
-                            ) { Text(t("common.cancel")) }
                         }
-                    }
-                }
+                    },
+                    onRestore = {
+                        try {
+                            IdentityStore.importRecoveryKey(vault, recoveryKey)
+                            recoveryKey = ""
+                            choice = FirstRunIdentityChoice.RESTORED
+                            exitApplication()
+                        } catch (_: Exception) {
+                            recoveryKey = ""
+                            error = t("identity.vault.import_error")
+                        }
+                    },
+                    onCancel = { recoveryKey = ""; error = null; importing = false },
+                )
             }
         }
     }
@@ -288,7 +190,7 @@ fun firstRunIdentityWindow(vault: KeyVault): FirstRunIdentityChoice {
 
 /** A saved screenshot/photo works on all packaged desktops; no webcam dependency is assumed. */
 private fun pickQrImage(): File? {
-    val dialog = FileDialog(null as java.awt.Frame?, "Select QR image", FileDialog.LOAD)
+    val dialog = com.oshi.desktop.ui.DialogOwner.fileDialog(t("identity.vault.scan_title"), FileDialog.LOAD)
     dialog.isVisible = true
     val name = dialog.file ?: return null
     return File(dialog.directory, name)

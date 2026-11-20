@@ -97,7 +97,11 @@ class DevSyncEndToEndTest {
         return e to rec
     }
 
-    private fun waitUntil(what: String, timeoutMs: Long = 20_000, cond: () -> Boolean) {
+    // __DEVSYNC_FLAKE_ON_MACOS_RUNNER_2026_11_20__ 20 s was enough on a developer machine and not
+    // on a shared macos-latest runner (CI run 44560312528: this test's only failure, a waitUntil
+    // timeout, while 2934 others passed). A wait returns as soon as its condition holds, so a
+    // longer ceiling costs nothing on a fast machine; the message now says which wait expired.
+    private fun waitUntil(what: String, timeoutMs: Long = 90_000, cond: () -> Boolean) {
         val end = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < end) {
             if (runCatching(cond).getOrDefault(false)) return

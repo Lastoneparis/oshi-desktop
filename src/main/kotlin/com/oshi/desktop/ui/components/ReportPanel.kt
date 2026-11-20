@@ -34,6 +34,8 @@ fun ReportPanel(
     alreadyReported: Boolean,
     onSubmit: (V2ReportClient.Reason, String, Boolean) -> Unit,
     onClose: () -> Unit,
+    /** __GROUP_MEMBER_MODERATION_2027__ overrides the heading (a group member's report). */
+    title: String? = null,
 ) {
     var reason by remember { mutableStateOf<V2ReportClient.Reason?>(null) }
     var details by remember { mutableStateOf("") }
@@ -43,7 +45,7 @@ fun ReportPanel(
             .padding(horizontal = OshiTheme.lg, vertical = OshiTheme.sm),
         verticalArrangement = Arrangement.spacedBy(OshiTheme.xs),
     ) {
-        Text(if (isGroup) t("group.report_group") else t("report.contact_title"),
+        Text(title ?: if (isGroup) t("group.report_group") else t("report.contact_title"),
             style = OshiTheme.typography.titleSmall, color = Ink.strong)
         Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm), verticalAlignment = Alignment.CenterVertically) {
             for (r in V2ReportClient.Reason.entries) {

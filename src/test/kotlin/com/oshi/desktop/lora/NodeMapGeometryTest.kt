@@ -171,7 +171,8 @@ class NodeMessagingReachTest {
     @org.junit.Test
     fun `messaging a node is not gated on hop count`() {
         val pane = java.io.File("src/main/kotlin/com/oshi/desktop/ui/components/LoRaPane.kt").readText()
-        val i = pane.indexOf("TextAction(\"Message\")")
+        // __DESKTOP_TOOLS_2027__ the action is now an icon button labelled lora.node.message.
+        val i = pane.indexOf("t(\"lora.node.message\")")
         org.junit.Assert.assertTrue("the Message action is gone", i > 0)
         // The 400 characters before it must not introduce a hop condition.
         val before = pane.substring(maxOf(0, i - 400), i)

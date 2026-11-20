@@ -1,5 +1,7 @@
 package com.oshi.desktop.ui.components
 
+import com.oshi.desktop.i18n.t
+
 import com.oshi.desktop.store.MediaType
 import java.io.File
 
@@ -89,15 +91,8 @@ data class MediaPresentation(
          */
         private val REF = Regex("""^\[([^\]]+)] (.+)$""", RegexOption.DOT_MATCHES_ALL)
 
-        const val MISSING_FILE_NOTE =
-            "The decrypted file is not at that path any more. Nothing was lost on the wire — " +
-                "the bytes were written to this disk when the message arrived and something " +
-                "has removed them since."
-
-        const val SEALED_NOTE =
-            "View once, as the sender marked it. Reveal is a LOCAL action: this client does " +
-                "not destroy the file afterwards and the sender is never told you opened it."
-
+        val MISSING_FILE_NOTE: String get() = t("desktop.media.note.missing_file")
+        val SEALED_NOTE: String get() = t("media.view_once.will_disappear")   // __VIEW_ONCE_DESKTOP_2027__ the bytes ARE destroyed now
         /**
          * The ceiling on a decoded-in-full inline image, in bytes.
          *
@@ -109,14 +104,8 @@ data class MediaPresentation(
          */
         const val MAX_INLINE_BYTES = 16L * 1024 * 1024
 
-        const val OVERSIZE_NOTE =
-            "This image is too large for this window to decode in one piece (over 16 MiB). " +
-                "The file is on disk and intact; open it in an image viewer."
-
-        const val UNPARSEABLE_NOTE =
-            "This attachment reference is not in the form this window knows how to read, so " +
-                "it is shown verbatim rather than interpreted."
-
+        val OVERSIZE_NOTE: String get() = t("desktop.media.note.inline_oversize")
+        val UNPARSEABLE_NOTE: String get() = t("desktop.media.note.unparseable")
         /**
          * @param attachment `MessageRow.attachment` — null or blank means "no media".
          * @param viewOnce whether the underlying `Message.isViewOnce` was set.
@@ -156,7 +145,7 @@ data class MediaPresentation(
             return MediaPresentation(
                 kind = kind,
                 path = path,
-                fileName = nameOf(path),
+                fileName = com.oshi.desktop.store.SafeFileName.displayName(nameOf(path)),
                 inlineImage = kind == MediaType.IMAGE && size != null && !oversize && !sealed,
                 posterVideo = kind == MediaType.VIDEO && size != null && !sealed,
                 sealedViewOnce = sealed,
@@ -177,13 +166,13 @@ data class MediaPresentation(
 
         /** The word a file card puts above the filename. Never "Photo" for a non-image. */
         fun cardLabel(kind: MediaType): String = when (kind) {
-            MediaType.IMAGE -> "Image"
-            MediaType.VIDEO -> "Video — click to play"
-            MediaType.AUDIO -> "Voice note — click to play"
-            MediaType.DOCUMENT -> "File"
-            MediaType.CONTACT -> "Contact card"
-            MediaType.LOCATION -> "Location"
-            MediaType.UNKNOWN -> "Attachment"
+            MediaType.IMAGE -> t("desktop.media.card.image")
+            MediaType.VIDEO -> t("desktop.media.card.video")
+            MediaType.AUDIO -> t("desktop.media.card.audio")
+            MediaType.DOCUMENT -> t("desktop.media.card.document")
+            MediaType.CONTACT -> t("desktop.media.card.contact")
+            MediaType.LOCATION -> t("desktop.media.card.location")
+            MediaType.UNKNOWN -> t("desktop.media.card.unknown")
         }
     }
 }

@@ -195,14 +195,24 @@ object CallVoiceEffects {
      * pitch heads stay continuous. [apply] is allocation-light and runs on the capture
      * thread, which has 20 ms of real time per frame and must not be made to wait.
      */
-    class Chain(val effect: Effect) {
+    class Chain(
+        val effect: Effect,
+        /**
+         * __VOICE_EFFECTS_DESKTOP_2027__ Calls run at 48 kHz; a voice MESSAGE is recorded at
+         * 44.1 kHz (`VoiceNoteFormat.SAMPLE_RATE`, the phones' rate). Every time constant below
+         * is scaled by it, so the same effect sounds the same on both.
+         */
+        private val sampleRate: Int = CallAudio.SAMPLE_RATE.toInt(),
+    ) {
+        private val rateScale = sampleRate / CallAudio.SAMPLE_RATE.toDouble()
+        private fun samples(atCallRate: Int) = maxOf(1, (atCallRate * rateScale).roundToInt())
 
         private val shifter: PitchShifter? =
             semitones(effect).takeIf { it != 0.0 }?.let { PitchShifter(ratioFor(it)) }
 
         /** `ECHO`: one clearly audible repeat. 180 ms, decaying. */
         private val echo: DelayLine? =
-            if (effect == Effect.ECHO) DelayLine((0.180 * CallAudio.SAMPLE_RATE).toInt(), 0.35f, 0.6f) else null
+            if (effect == Effect.ECHO) DelayLine((0.180 * sampleRate).toInt(), 0.35f, 0.6f) else null
 
         /**
          * `REVERB`: three short, mutually prime combs. Not a room model — a cheap
@@ -211,9 +221,9 @@ object CallVoiceEffects {
          */
         private val reverb: List<DelayLine> =
             if (effect == Effect.REVERB) listOf(
-                DelayLine(1_327, 0.42f, 0.30f),
-                DelayLine(1_733, 0.38f, 0.25f),
-                DelayLine(2_111, 0.34f, 0.20f),
+                DelayLine(samples(1_327), 0.42f, 0.30f),
+                DelayLine(samples(1_733), 0.38f, 0.25f),
+                DelayLine(samples(2_111), 0.34f, 0.20f),
             ) else emptyList()
 
         /** `ROBOT`/`ALIEN`: ring modulation. Phase kept across frames, or it clicks. */
@@ -248,7 +258,7 @@ object CallVoiceEffects {
             val n = pcm.size / 2
             if (n == 0) return pcm
             val out = ByteArray(pcm.size)
-            val ringStep = 2.0 * PI * ringHz / CallAudio.SAMPLE_RATE
+            val ringStep = 2.0 * PI * ringHz / sampleRate
             for (i in 0 until n) {
                 val lo = pcm[i * 2].toInt() and 0xFF
                 val hi = pcm[i * 2 + 1].toInt()

@@ -188,7 +188,18 @@ class MailClient(
 
     // ---- inbox ------------------------------------------------------------------------
 
-    data class Envelope(val from: String, val to: String, val subject: String, val date: String, val cc: String = "", val inReplyTo: String? = null)
+    data class Envelope(
+        val from: String, val to: String, val subject: String, val date: String, val cc: String = "", val inReplyTo: String? = null,
+        /**
+         * __MAIL_LIST_PREVIEW_2026_11_16__ The list preview the server seals into the envelope at
+         * delivery (Android e5920443, iOS 190b3222): snippet, paperclip, "contains images".
+         * Optional and type-checked: a wrong type drops that field, never the row.
+         */
+        val snippet: String? = null,
+        val hasAttachments: Boolean = false,
+        val attachmentCount: Int = 0,
+        val hasImages: Boolean = false,
+    )
 
     data class MailSummary(
         val id: String,
@@ -205,17 +216,39 @@ class MailClient(
 
     private fun parseEnvelope(sealedB64: String?): Envelope? {
         if (sealedB64.isNullOrEmpty()) return null
-        return runCatching {
-            val plain = JSONObject(String(openB64(sealedB64), Charsets.UTF_8))
-            Envelope(
+        return runCatching { EnvelopeJson.envelopeOf(JSONObject(String(openB64(sealedB64), Charsets.UTF_8))) }.getOrNull()
+    }
+
+    object EnvelopeJson {
+        private val IMAGE_NAME = Regex("""\.(jpe?g|png|gif|heic|heif|webp|bmp|tiff?)$""", RegexOption.IGNORE_CASE)
+
+        /** The opened envelope JSON → [Envelope]; Android `OshiMailClient.EnvelopeJson.parseEnvelope`. */
+        fun envelopeOf(plain: JSONObject): Envelope {
+            // Sent copies have always carried `attachments: [filename…]`; without the newer
+            // counters that list still says whether a paperclip belongs on the row.
+            val legacyNames = plain.optJSONArray("attachments")
+                ?.let { arr -> (0 until arr.length()).mapNotNull { arr.opt(it) as? String } }
+                .orEmpty()
+            val count = when (val c = plain.opt("attachmentCount")) {
+                is Number -> c.toInt().coerceIn(0, 999)
+                else -> legacyNames.size
+            }
+            val hasAttachments = (plain.opt("hasAttachments") as? Boolean ?: false) || count > 0
+            val hasImages = plain.opt("hasImages") as? Boolean ?: legacyNames.any { IMAGE_NAME.containsMatchIn(it) }
+            val snippet = (plain.opt("snippet") as? String)?.replace(Regex("\\s+"), " ")?.trim()?.takeIf { it.isNotEmpty() }
+            return Envelope(
                 from = plain.optString("from"),
                 to = plain.optString("to"),
                 subject = plain.optString("subject"),
                 date = plain.optString("date"),
                 cc = plain.optString("cc"),
                 inReplyTo = plain.optString("inReplyTo").takeIf { it.isNotBlank() },
+                snippet = snippet,
+                hasAttachments = hasAttachments,
+                attachmentCount = if (hasAttachments) count.coerceAtLeast(1) else 0,
+                hasImages = hasImages,
             )
-        }.getOrNull()
+        }
     }
 
     private fun parseMessages(arr: JSONArray): List<MailSummary> = (0 until arr.length()).map { i ->

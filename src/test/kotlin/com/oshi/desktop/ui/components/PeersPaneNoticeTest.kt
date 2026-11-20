@@ -11,6 +11,14 @@ import org.junit.Test
  */
 class PeersPaneNoticeTest {
 
+    // The sentences now come from the catalog (__DESKTOP_TOOLS_2027__); these assertions read
+    // the English ones, so pin English rather than whatever this JVM's locale is.
+    private var saved = com.oshi.desktop.i18n.Strings.activeTag
+
+    @org.junit.Before fun english() { saved = com.oshi.desktop.i18n.Strings.activeTag; com.oshi.desktop.i18n.Strings.activeTag = "en" }
+
+    @org.junit.After fun restore() { com.oshi.desktop.i18n.Strings.activeTag = saved }
+
     @Test
     fun `a refusal with the mesh off names the launch flag`() {
         val s = discoveryNotice(wanted = true, resulting = false, meshRunning = false)

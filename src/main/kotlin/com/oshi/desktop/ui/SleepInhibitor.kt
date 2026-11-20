@@ -64,7 +64,10 @@ class SleepInhibitor(
             )
             else -> listOf(
                 "systemd-inhibit", "--what=idle:sleep", "--who=OSHI", "--why=Call in progress", "--mode=block",
-                "sleep", "infinity",
+                // __INHIBITOR_OUTLIVED_THE_APP_2026_11_19__ tied to OUR pid, like the macOS and
+                // Windows branches: `sleep infinity` survived a crash or kill -9 and kept the
+                // machine from ever sleeping until reboot.
+                "sh", "-c", "while kill -0 $pid 2>/dev/null; do sleep 15; done",
             )
         }
     }

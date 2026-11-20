@@ -1,28 +1,14 @@
 package com.oshi.desktop.ui.components
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
+import com.oshi.desktop.i18n.t
 import com.oshi.desktop.ui.OshiTheme
 import kotlinx.coroutines.delay
 
@@ -64,18 +50,16 @@ import kotlinx.coroutines.delay
  * not get it — was told they had turned it off on purpose.
  */
 internal fun discoveryNotice(wanted: Boolean, resulting: Boolean, meshRunning: Boolean): String = when {
-    resulting -> "Scanning. This machine is visible on the network again."
-    wanted && !meshRunning ->
-        "The LAN mesh is not running in this window, so there is nothing to announce. It is a " +
-            "launch flag, not a fault: start OSHI with --mesh. Discovery, this box and the peer " +
-            "list all stay empty until then."
-    wanted ->
-        "Discovery did not start. The mesh is running, so this is the network refusing multicast " +
-            "rather than a setting."
-    else ->
-        "Scanning off. Nothing is announced and nothing is looked for; open connections are left alone."
+    resulting -> t("pc.peers.notice.on")
+    wanted && !meshRunning -> t("pc.peers.notice.meshOff")
+    wanted -> t("pc.peers.notice.refused")
+    else -> t("pc.peers.notice.off")
 }
 
+/**
+ * __DESKTOP_TOOLS_2027__ Nearby peers, redrawn with the tool kit: one card per concern
+ * (who is here, discovery, connect by hand), icon actions, and the mascot when nobody is.
+ */
 @Composable
 fun PeersPane(
     peers: List<PeerRow>,
@@ -89,15 +73,8 @@ fun PeersPane(
     /** Turn that on or off; returns the state after the call. */
     onSetDiscovery: (Boolean) -> Boolean = { it },
     /**
-     * __MESH_OFF_IS_A_SENTENCE_2026_10_29__ Is the LAN mesh running in this process?
-     *
-     * `--ui` alone leaves it OFF. Everything this pane shows then looks like a network
-     * fault: no peers, "Nobody found yet", and a scanning box that refuses to tick
-     * because `onSetDiscovery` returns the RESULTING state and the mesh declines. The
-     * notice even said *"Scanning off. Nothing is announced…"*, which describes a
-     * successful switch-off rather than a refusal. Row 1.2-a records half an hour lost to
-     * exactly that, blamed on mDNS. The window printed `mesh : off (pass --mesh to
-     * enable)` on stdout the whole time, where nobody using a window reads.
+     * __MESH_OFF_IS_A_SENTENCE_2026_10_29__ Is the LAN mesh running in this process? With
+     * `--ui` alone it is OFF, and every symptom here would otherwise look like blocked mDNS.
      */
     meshRunning: () -> Boolean = { true },
 ) {
@@ -105,7 +82,7 @@ fun PeersPane(
     var host by remember { mutableStateOf("") }
     var port by remember { mutableStateOf("") }
     var notice by remember { mutableStateOf<String?>(null) }
-    var scanning by remember { mutableStateOf(true) }
+    var scanning by remember { mutableStateOf(runCatching { discovering() }.getOrDefault(true)) }
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -115,155 +92,67 @@ fun PeersPane(
         }
     }
 
-    Column(
-        Modifier.fillMaxSize().background(OshiTheme.surface).verticalScroll(rememberScrollState()).padding(OshiTheme.xxl),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Column(Modifier.widthIn(max = 720.dp)) {
-            PaneHeading(
-                "Nearby peers",
-                "Other OSHI devices on this network, found over mDNS. This is the LAN mesh — " +
-                    "it carries messages with no internet at all, and since it speaks the same " +
-                    "envelope as the radio, a message from one of these arrives end-to-end " +
-                    "encrypted and lands in that contact's conversation.",
-            )
-
-            notice?.let {
-                Spacer(Modifier.height(OshiTheme.md))
-                PaneCard { Text(it, style = OshiTheme.typography.bodySmall, color = Ink.soft) }
-            }
-
-            Spacer(Modifier.height(OshiTheme.lg))
-            if (live.isEmpty() && !meshRunning()) {
-                // The honest reason, where the person looking can read it.
-                EmptyPaneNote(
-                    "The LAN mesh is off in this window",
-                    "Nothing is announced and nothing is looked for, so this list cannot fill and " +
-                        "the box below will not tick. This is a launch flag rather than a fault: " +
-                        "start OSHI with --mesh. Until then every symptom here looks exactly like " +
-                        "blocked mDNS, which is what makes it worth saying plainly.",
-                )
-            } else if (live.isEmpty()) {
-                EmptyPaneNote(
-                    "Nobody found yet",
-                    "Discovery runs continuously while OSHI is open. A peer appears here within a " +
-                        "few seconds of joining the same network — if one never does, the two " +
-                        "machines are probably on different subnets, or mDNS is blocked.",
-                )
-            } else {
-                for (p in live) {
-                    PaneCard {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Column(Modifier.fillMaxWidth(0.72f)) {
-                                Text(p.displayName, style = OshiTheme.typography.titleSmall, color = Ink.strong)
-                                Spacer(Modifier.height(OshiTheme.xxs))
-                                Text(
-                                    "${p.platform} · ${p.address}",
-                                    style = OshiTheme.typography.bodySmall,
-                                    color = Ink.soft,
-                                )
-                            }
-                            TextAction("Copy key") { onCopy(p.publicKey) }
+    ToolScaffold(t("pc.peers.title"), subtitle = t("pc.peers.subtitle"), icon = ToolGlyph.WIFI) {
+        notice?.let { ToolNotice(it) { ToolIconButton(ToolGlyph.CLOSE, t("common.dismiss"), size = 28.dp) { notice = null } } }
+        if (live.isEmpty() && !meshRunning()) {
+            ToolEmptyState(t("pc.peers.meshOff.title"), t("pc.peers.meshOff.body"), mascot = "sleep")
+        } else if (live.isEmpty()) {
+            ToolEmptyState(t("pc.peers.empty.title"), t("pc.peers.empty.body"), mascot = "peek")
+        } else ToolCard(title = t("pc.peers.title"), icon = ToolGlyph.PEOPLE, trailing = { ToolPill("${live.size}") }) {
+            for (p in live) {
+                ToolRow(
+                    p.displayName,
+                    // "connected" and "reachable" are different facts: a peer that dialled
+                    // us has no dialable port until mDNS supplies one.
+                    subtitle = buildList {
+                        add(p.platform); add(p.address)
+                        add(if (p.connected) t("pc.peers.connected") else t("pc.peers.known"))
+                        if (!p.dialable) add(t("pc.peers.noPort"))
+                        p.hopCount?.let { add(if (it == 0) t("lora.nodes.direct") else t("lora.nodes.hops", it)) }
+                    }.bidiJoin(),
+                    leading = {
+                        Box {
+                            Monogram(p.displayName, p.publicKey, 36.dp)
+                            if (p.connected) Box(Modifier.align(Alignment.BottomEnd).size(11.dp).clip(CircleShape).background(OshiTheme.success))
                         }
-                        Spacer(Modifier.height(OshiTheme.xxs))
-                        Text(
-                            // "connected" and "reachable" are different facts here. See the
-                            // class doc: a peer that dialled us has no dialable port until
-                            // mDNS supplies one, so it can reach us while we cannot re-open
-                            // a connection to it.
-                            buildList {
-                                add(if (p.connected) "connected" else "known, not connected")
-                                if (!p.dialable) add("no listen port yet — it dialled us, mDNS will fill it in")
-                                p.hopCount?.let { add(if (it == 0) "direct" else "$it hop(s) away") }
-                            }.joinToString(" · "),
-                            style = OshiTheme.typography.bodySmall,
-                            color = if (p.connected) Ink.strong else Ink.soft,
-                        )
-                        if (p.connected) {
-                            Spacer(Modifier.height(OshiTheme.xxs))
-                            // "Hang up", not "block". The peer stays in the directory and
-                            // the next discovery tick may reconnect — which is honest
-                            // rather than a defect. Blocking is a different question and
-                            // lives under More, where it is also undone.
-                            TextAction("Disconnect") {
-                                notice = if (onDisconnect(p.publicKey))
-                                    "Disconnected from ${p.displayName}. Discovery may reconnect; to stop that, block them or turn scanning off."
-                                else "No live connection to close."
-                            }
-                        }
-                    }
-                    Spacer(Modifier.height(OshiTheme.sm))
-                }
-            }
-
-            Spacer(Modifier.height(OshiTheme.lg))
-            PaneCard {
-                TextAction((if (scanning) "☑" else "☐") + "  Announce this machine and look for others") {
-                    val wanted = !scanning
-                    scanning = onSetDiscovery(wanted)
-                    // A refusal is not an off-switch. Saying "Scanning off" to someone who
-                    // just asked for ON is how this cost half an hour (row 1.2-a).
-                    notice = discoveryNotice(wanted, scanning, meshRunning())
-                }
-                Text(
-                    "mDNS is both halves at once: turning this off stops this machine ANNOUNCING " +
-                        "itself as well as looking. A switch that silenced only one would leave you " +
-                        "believing you were invisible while still broadcasting your name and public " +
-                        "key on the network. Existing connections are left alone — this is how peers " +
-                        "are FOUND, not how they are hung up on.",
-                    style = OshiTheme.typography.bodySmall,
-                    color = Ink.soft,
-                )
-            }
-
-            Spacer(Modifier.height(OshiTheme.lg))
-            PaneCard {
-                Text("Connect by hand", style = OshiTheme.typography.titleSmall, color = Ink.strong)
-                Spacer(Modifier.height(OshiTheme.xxs))
-                Text(
-                    "When discovery cannot see a machine — a different subnet, or mDNS blocked — " +
-                        "its address reaches it directly. The identity is still checked on " +
-                        "connection: typing an address cannot make a stranger into a contact.",
-                    style = OshiTheme.typography.bodySmall,
-                    color = Ink.soft,
-                )
-                Spacer(Modifier.height(OshiTheme.sm))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    BasicTextField(
-                        value = host,
-                        onValueChange = { host = it },
-                        textStyle = OshiTheme.typography.bodyMedium.copy(color = Ink.strong),
-                        cursorBrush = SolidColor(OshiTheme.brand),
-                        modifier = Modifier.fillMaxWidth(0.45f),
-                        decorationBox = { inner ->
-                            if (host.isEmpty()) Text("192.168.1.42", style = OshiTheme.typography.bodyMedium, color = Ink.soft)
-                            inner()
-                        },
-                    )
-                    BasicTextField(
-                        value = port,
-                        onValueChange = { port = it.filter(Char::isDigit).take(5) },
-                        textStyle = OshiTheme.typography.bodyMedium.copy(color = Ink.strong),
-                        cursorBrush = SolidColor(OshiTheme.brand),
-                        modifier = Modifier.fillMaxWidth(0.3f),
-                        decorationBox = { inner ->
-                            if (port.isEmpty()) Text("port", style = OshiTheme.typography.bodyMedium, color = Ink.soft)
-                            inner()
-                        },
-                    )
-                    TextAction("Connect") {
-                        val p = port.toIntOrNull()
-                        notice = when {
-                            host.isBlank() || p == null || p !in 1..65_535 ->
-                                "Give a host and a port from 1 to 65535."
-                            onConnect(host.trim(), p) -> "Connecting to ${host.trim()}:$p…"
-                            else -> "That address was refused."
-                        }
+                    },
+                ) {
+                    ToolIconButton(ToolGlyph.COPY, t("settings.backup.copyKey")) { onCopy(p.publicKey) }
+                    // "Hang up", not "block": the next discovery tick may reconnect.
+                    if (p.connected) ToolIconButton(ToolGlyph.CLOSE, t("peers.peer.disconnect")) {
+                        notice = if (onDisconnect(p.publicKey)) t("pc.peers.disconnected", p.displayName) else t("pc.peers.noConnection")
                     }
                 }
             }
-            Spacer(Modifier.height(OshiTheme.xxl))
         }
+        ToolColumns(
+            first = {
+                ToolCard(title = t("pc.peers.discovery"), icon = ToolGlyph.BROADCAST) {
+                    ToolSwitchRow(t("pc.peers.announce"), t("pc.peers.announce.hint"), scanning) { wanted ->
+                        scanning = onSetDiscovery(wanted)
+                        // A refusal is not an off-switch (row 1.2-a).
+                        notice = discoveryNotice(wanted, scanning, meshRunning())
+                    }
+                }
+            },
+            second = {
+                ToolCard(title = t("pc.peers.byHand"), icon = ToolGlyph.LINK) {
+                    ToolHint(t("pc.peers.byHand.hint"))
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm)) {
+                        ToolField(host, { host = it }, "192.168.1.42", Modifier.weight(2f), mono = true)
+                        ToolField(port, { port = it.filter(Char::isDigit).take(5) }, t("pc.peers.port"), Modifier.weight(1f), mono = true)
+                        ToolButton(t("peers.peer.connect"), style = ToolButtonStyle.PRIMARY, enabled = host.isNotBlank() && port.isNotBlank()) {
+                            val p = port.toIntOrNull()
+                            notice = when {
+                                host.isBlank() || p == null || p !in 1..65_535 -> t("pc.peers.badAddress")
+                                onConnect(host.trim(), p) -> t("pc.radio.attaching", "${host.trim()}:$p")
+                                else -> t("pc.peers.refused")
+                            }
+                        }
+                    }
+                }
+            },
+        )
     }
 }
 

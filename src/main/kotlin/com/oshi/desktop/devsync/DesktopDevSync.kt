@@ -60,6 +60,8 @@ class DesktopDevSync(
     @Volatile private var engine: DevSyncEngine? = null
     @Volatile private var serverEnabled = false
     @Volatile private var relayEnabled = true
+    @Volatile private var coverFlipped = false
+    init { com.oshi.desktop.net.DesktopCover.addListener { coverFlipped = true } }
     @Volatile private var lanEnabled = true
     @Volatile private var flagsAt = 0L
     @Volatile private var lastAlert: String? = null
@@ -153,9 +155,16 @@ class DesktopDevSync(
         flagsAt = System.currentTimeMillis()
         try {
             val req = HttpRequest.newBuilder(URI.create("${client.serverUrl}/v2/config")).timeout(Duration.ofSeconds(15)).GET().build()
-            val resp = http.send(req, HttpResponse.BodyHandlers.ofString())
-            if (resp.statusCode() in 200..299) {
-                val o = JSONObject(resp.body())
+            // __PRIVACY_DISGUISE_2026_11_18__ with "Disguise OSHI traffic" on, this read rides the
+            // cover carrier like every other /v2/ call; a failure lands in the catch (no direct retry).
+            val (code, text) = if (com.oshi.desktop.net.DesktopCover.isEnabled()) {
+                com.oshi.desktop.net.DesktopCover.exchange(http, "GET", req.uri(), emptyMap(), null, Duration.ofSeconds(15))
+                    .let { it.status to String(it.body, Charsets.UTF_8) }
+            } else {
+                http.send(req, HttpResponse.BodyHandlers.ofString()).let { it.statusCode() to (it.body() ?: "") }
+            }
+            if (code in 200..299) {
+                val o = JSONObject(text)
                 serverEnabled = o.optBoolean("devsync_enabled", false)
                 relayEnabled = o.optBoolean("devsync_relay_enabled", true)
                 lanEnabled = o.optBoolean("devsync_lan_enabled", true)
@@ -168,6 +177,9 @@ class DesktopDevSync(
     /** Called from the client's poll loop (and on demand): apply the gate. */
     @Synchronized
     fun tick() {
+        // __PRIVACY_DISGUISE_2026_11_18__ the switch decides which lanes the engine may open
+        // (below), and it is read only at start — so a flip restarts the engine on this tick.
+        if (coverFlipped) { coverFlipped = false; stopEngine() }
         refreshFlags()
         if (!enabled) { stopEngine(); return }
         purgeLegacyOnce()
@@ -275,7 +287,12 @@ class DesktopDevSync(
         e.start(
             lanDiscovery = if (lanEnabled || override == true) lanDiscoveryFactory() else null,
             // __DEVSYNC_DEVICE_AUTH_2026_09_23__ also signed by this install's `dsk` (same vault dk as the engine).
-            relayConnector = if (relayEnabled || override == true)
+            // __PRIVACY_DISGUISE_2026_11_18__ The live relay is a WebSocket to /v2/devsync: a
+            // long-lived socket cannot ride the request/response cover carrier, so with the
+            // disguise on it is NOT opened (fail-closed, as Android refuses what V2 cannot
+            // carry). Linked devices on the same LAN still sync; others catch up through the
+            // V2 mailbox, which is disguised.
+            relayConnector = if ((relayEnabled || override == true) && !com.oshi.desktop.net.DesktopCover.isEnabled())
                 DesktopRelayConnector(client.serverUrl, DesktopV2Signer(client.identity), { client.deviceMailbox.relayCredentials() }, log) else null,
             lanEnabled = lanEnabled || override == true,
         )

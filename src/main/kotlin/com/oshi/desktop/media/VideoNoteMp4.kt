@@ -57,6 +57,9 @@ object VideoNoteFormat {
 }
 
 /** The outcome of [VideoNoteMp4Writer.finish]. */
+/** __DESKTOP_CAMERA_2027__ a camera clip's largest side (720p). */
+const val MAX_CLIP_SIDE = 1280
+
 data class VideoNoteFile(val file: File, val durationMs: Long, val side: Int, val hasAudio: Boolean, val videoEncoder: String)
 
 /**
@@ -71,6 +74,12 @@ class VideoNoteMp4Writer(
     val fps: Int = VideoNoteFormat.FPS,
     private val maxDurationMs: Long = VideoNoteFormat.MAX_DURATION_MS,
     names: List<String> = FfmpegVideo.encoderCandidates(),
+    /**
+     * __DESKTOP_CAMERA_2027__ A camera clip is not square: [side] is then the WIDTH and this the
+     * height. Default = [side], so a round note is exactly what it was.
+     */
+    val height: Int = side,
+    private val bitRate: Long = VideoNoteFormat.VIDEO_BITRATE,
 ) : AutoCloseable {
     val encoderName: String
     private val ctx: AVCodecContext
@@ -87,22 +96,24 @@ class VideoNoteMp4Writer(
 
     init {
         FfmpegVideo.load().getOrThrow()
-        require(side in 16..VideoNoteFormat.SIDE && side % 2 == 0) { "side must be even and ≤ ${VideoNoteFormat.SIDE}: $side" }
+        val ceiling = if (height == side) VideoNoteFormat.SIDE else MAX_CLIP_SIDE
+        require(side in 16..ceiling && side % 2 == 0) { "side must be even and ≤ $ceiling: $side" }
+        require(height in 16..ceiling && height % 2 == 0) { "height must be even and ≤ $ceiling: $height" }
         var opened: Pair<String, AVCodecContext>? = null
         val failures = ArrayList<String>()
         for (n in names) {
             val codec = avcodec.avcodec_find_encoder_by_name(n) ?: continue
             val c = avcodec.avcodec_alloc_context3(codec)
-            c.width(side); c.height(side)
+            c.width(side); c.height(height)
             c.pix_fmt(avutil.AV_PIX_FMT_YUV420P)
             // Millisecond clock: capture timestamps are real, not a frame counter.
             c.time_base(avutil.av_make_q(1, 1000))
             c.framerate(avutil.av_make_q(fps, 1))
             c.gop_size(fps)
             c.max_b_frames(0)
-            c.bit_rate(VideoNoteFormat.VIDEO_BITRATE)
-            c.rc_max_rate(VideoNoteFormat.VIDEO_BITRATE * 3 / 2)
-            c.rc_buffer_size(VideoNoteFormat.VIDEO_BITRATE.toInt())
+            c.bit_rate(bitRate)
+            c.rc_max_rate(bitRate * 3 / 2)
+            c.rc_buffer_size(bitRate.toInt())
             // MP4 wants SPS/PPS in the avcC box, i.e. out of band.
             c.flags(c.flags() or avcodec.AV_CODEC_FLAG_GLOBAL_HEADER)
             val opts = AVDictionary(null)

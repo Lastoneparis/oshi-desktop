@@ -92,9 +92,13 @@ object PeerNickname {
  *  - Android reads with `JSONObject.opt*` and needs nothing in particular.
  *
  * Deliberately NOT sent, and why:
- *  - `profileImageData` — this client has no avatar. Absent and `null` decode the same.
- *  - `lastSeen` carries `0` ("not shared"): there is no presence setting here to honour,
- *    Android treats `<= 0` as absent, and iOS overwrites it with its own receive time.
+ *  - `profileImageData` — only when the user set a picture here
+ *    (__PROFILE_PHOTOS_DESKTOP_2027__, see [ProfilePhotoWire]) AND Settings › Privacy ›
+ *    Profile Photo is on ([com.oshi.desktop.store.PrivacyPreferences.outgoingProfilePhoto],
+ *    applied by the caller). Absent and `null` decode the same on iOS: "no picture".
+ *  - `lastSeen` is the send time in Unix seconds when Settings › Privacy › Last Seen is on
+ *    (Android's rule) and `0` ("not shared") when it is off; Android treats `<= 0` as absent,
+ *    and iOS overwrites it with its own receive time.
  *  - `groupEnvelopeV3` / `ratchetV3` / `pqPublicKey` / `appVersion` — capability claims this
  *    client cannot back. Absent is read as "cannot", which is the truth.
  */
@@ -107,11 +111,18 @@ object ProfileUpdateWire {
      *        every receiver reads as "no opinion" — unless [clear] is set, in which case an
      *        explicit empty string tells receivers the nickname was REMOVED.
      */
-    fun encode(nickname: String?, clear: Boolean = false): String {
+    fun encode(
+        nickname: String?,
+        clear: Boolean = false,
+        photoBase64: String? = null,
+        // __DESKTOP_PRIVACY_PARITY_2027__ Settings › Privacy › Last Seen: now (s) or 0.
+        lastSeen: Double = com.oshi.desktop.store.PrivacyPreferences.lastSeenWireValue(),
+    ): String {
         val o = JSONObject()
             .put("type", TYPE)
-            .put("lastSeen", 0)
+            .put("lastSeen", if (lastSeen > 0) lastSeen else 0)
             .put("version", VERSION)
+        photoBase64?.takeIf { it.isNotBlank() }?.let { o.put(ProfilePhotoWire.WIRE_KEY, it) }
         val clean = PeerNickname.sanitize(nickname)
         when {
             clean != null -> o.put(PeerNickname.WIRE_KEY, clean)

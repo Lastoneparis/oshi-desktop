@@ -114,7 +114,7 @@ class MediaVault(
     /** A plaintext copy in [scratchDir], named `<random>-<original name>` so the extension survives. */
     fun decryptToScratch(src: File): File {
         DesktopPaths.ensurePrivateDir(scratchDir)
-        val safe = src.name.replace(Regex("[^A-Za-z0-9._-]"), "_").takeLast(120).ifEmpty { "file" }
+        val safe = SafeFileName.sanitize(src.name)
         val dest = File(scratchDir, "${UUID.randomUUID()}-$safe")
         decryptTo(src, dest)
         DesktopPaths.makePrivate(dest)

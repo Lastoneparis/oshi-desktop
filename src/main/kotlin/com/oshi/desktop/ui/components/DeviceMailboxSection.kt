@@ -6,6 +6,9 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -20,7 +23,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.oshi.desktop.i18n.dt
 import com.oshi.desktop.i18n.t
 import com.oshi.desktop.net.DeviceMailbox
 import com.oshi.desktop.ui.OshiTheme
@@ -52,66 +54,72 @@ fun DeviceMailboxSection(mailbox: DeviceMailbox) {
         }
     }
     val s = snap ?: return
-    Column(verticalArrangement = Arrangement.spacedBy(OshiTheme.sm)) {
-        if (s.removedAlert) {
-            Column(
-                Modifier.fillMaxWidth().background(OshiTheme.surfaceElevated, RoundedCornerShape(12.dp)).padding(OshiTheme.lg),
-                verticalArrangement = Arrangement.spacedBy(OshiTheme.sm),
-            ) {
-                Text(dt("desktop.devices.mailbox.removed.title"), color = Ink.strong, fontWeight = FontWeight.SemiBold)
-                Text(dt("desktop.devices.mailbox.removed.body"), color = Ink.soft)
-                Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.md)) {
-                    PrimaryButton(dt("desktop.devices.mailbox.relink")) { Thread { mailbox.relink() }.start() }
-                    TextAction(t("chat.peer_outdated.dismiss")) { mailbox.dismissRemovedAlert() }
+    // __DESKTOP_SETTINGS_2027__ drawn with the Settings kit, in the shared catalogs.
+    if (s.removedAlert) {
+        SettingsCard {
+            SettingsCardBody {
+                Text(t("desktop.devices.mailbox.removed.title"), style = OshiTheme.typography.bodyLarge, color = Ink.strong, fontWeight = FontWeight.SemiBold)
+                Text(t("desktop.devices.mailbox.removed.body"), style = OshiTheme.typography.bodySmall, color = Ink.soft)
+                Spacer(Modifier.height(OshiTheme.sm))
+                SettingsButtonRow {
+                    SettingsButton(SettingsIcon.LINK, t("desktop.devices.mailbox.relink"), primary = true) { Thread { mailbox.relink() }.start() }
+                    SettingsButton(null, t("chat.peer_outdated.dismiss")) { mailbox.dismissRemovedAlert() }
                 }
             }
         }
-        if (s.newDevices.isNotEmpty()) {
-            Column(
-                Modifier.fillMaxWidth().background(OshiTheme.surfaceElevated, RoundedCornerShape(12.dp)).padding(OshiTheme.lg),
-                verticalArrangement = Arrangement.spacedBy(OshiTheme.sm),
-            ) {
-                Text(dt("desktop.devices.mailbox.newDevice"), color = Ink.strong, fontWeight = FontWeight.SemiBold)
-                TextAction(t("chat.peer_outdated.dismiss")) { mailbox.dismissNewDeviceAlerts() }
+    }
+    if (s.newDevices.isNotEmpty()) {
+        SettingsCard {
+            SettingsCardBody {
+                Text(t("desktop.devices.mailbox.newDevice"), style = OshiTheme.typography.bodyLarge, color = Ink.strong)
+                Spacer(Modifier.height(OshiTheme.sm))
+                SettingsButton(null, t("chat.peer_outdated.dismiss")) { mailbox.dismissNewDeviceAlerts() }
             }
         }
-        Text(dt("desktop.devices.mailbox.title"), style = OshiTheme.typography.titleMedium, color = Ink.strong)
-        Text(
-            when (s.status) {
-                DeviceMailbox.Status.OFF -> dt("desktop.devices.mailbox.off")
-                DeviceMailbox.Status.REGISTERED -> dt("desktop.devices.mailbox.registered")
-                DeviceMailbox.Status.NEEDS_APPROVAL -> dt("desktop.devices.mailbox.needsApproval")
-                DeviceMailbox.Status.BAD_APPROVAL -> dt("desktop.devices.mailbox.badApproval")
-                DeviceMailbox.Status.TOO_MANY_DEVICES -> dt("desktop.devices.mailbox.tooMany")
-                DeviceMailbox.Status.CONFLICT -> dt("desktop.devices.mailbox.conflict")
-                DeviceMailbox.Status.REMOVED -> dt("desktop.devices.mailbox.removed.body")
-                DeviceMailbox.Status.ERROR -> dt("desktop.devices.mailbox.error")
-                DeviceMailbox.Status.UNREGISTERED -> dt("desktop.devices.mailbox.unregistered")
-            },
-            color = Ink.soft,
-        )
-        if (s.active) {
+    }
+    SettingsCard(
+        title = t("desktop.devices.mailbox.title"),
+        footer = if (s.active) {
+            if (s.holdsAccountBundle) t("desktop.devices.mailbox.holder") else t("desktop.devices.mailbox.notHolder")
+        } else null,
+    ) {
+        SettingsCardBody {
             Text(
-                if (s.holdsAccountBundle) dt("desktop.devices.mailbox.holder") else dt("desktop.devices.mailbox.notHolder"),
-                color = Ink.soft, fontSize = 12.sp,
+                when (s.status) {
+                    DeviceMailbox.Status.OFF -> t("desktop.devices.mailbox.off")
+                    DeviceMailbox.Status.REGISTERED -> t("desktop.devices.mailbox.registered")
+                    DeviceMailbox.Status.NEEDS_APPROVAL -> t("desktop.devices.mailbox.needsApproval")
+                    DeviceMailbox.Status.BAD_APPROVAL -> t("desktop.devices.mailbox.badApproval")
+                    DeviceMailbox.Status.TOO_MANY_DEVICES -> t("desktop.devices.mailbox.tooMany")
+                    DeviceMailbox.Status.CONFLICT -> t("desktop.devices.mailbox.conflict")
+                    DeviceMailbox.Status.REMOVED -> t("desktop.devices.mailbox.removed.body")
+                    DeviceMailbox.Status.ERROR -> t("desktop.devices.mailbox.error")
+                    DeviceMailbox.Status.UNREGISTERED -> t("desktop.devices.mailbox.unregistered")
+                },
+                style = OshiTheme.typography.bodyMedium,
+                color = Ink.strong,
             )
         }
         if (s.active && s.devices.isNotEmpty()) {
-            val fmt = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT)
+            val fmt = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT, java.util.Locale.forLanguageTag(com.oshi.desktop.i18n.Strings.activeTag))
             for (d in s.devices) {
                 val self = d.deviceId == s.deviceId
+                SettingsDivider()
                 Row(
-                    Modifier.fillMaxWidth().background(OshiTheme.surfaceElevated, RoundedCornerShape(12.dp)).padding(OshiTheme.md),
+                    Modifier.fillMaxWidth().padding(horizontal = OshiTheme.lg, vertical = OshiTheme.md),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    SettingsIconBadge(SettingsIcon.DEVICES, if (self) OshiTheme.success else OshiTheme.brand)
+                    Spacer(Modifier.width(OshiTheme.md))
                     Column(Modifier.weight(1f)) {
                         Text(
-                            d.deviceId.take(8) + if (self) " · " + dt("desktop.devices.mailbox.thisDevice") else "",
-                            color = Ink.strong, fontWeight = FontWeight.SemiBold,
+                            d.deviceId.take(8) + if (self) " · " + t("desktop.devices.mailbox.thisDevice") else "",
+                            style = OshiTheme.typography.bodyLarge,
+                            color = Ink.strong,
                         )
-                        Text(fmt.format(Date(d.lastSeenAt)), color = Ink.soft, fontSize = 12.sp)
+                        Text(fmt.format(Date(d.lastSeenAt)), style = OshiTheme.typography.bodySmall, color = Ink.soft)
                     }
-                    if (!self) TextAction(t("common.remove")) { Thread { mailbox.unregister(d.deviceId) }.start() }
+                    if (!self) SettingsButton(SettingsIcon.DELETE, t("common.remove"), danger = true) { Thread { mailbox.unregister(d.deviceId) }.start() }
                 }
             }
         }

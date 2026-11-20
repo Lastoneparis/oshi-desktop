@@ -1,5 +1,7 @@
 package com.oshi.desktop.ui.state
 
+import com.oshi.desktop.i18n.catalogKey
+
 /**
  * What this window will not do, and why — PARITY.md row 1.1, rendered on the LIMITS pane.
  *
@@ -33,7 +35,19 @@ package com.oshi.desktop.ui.state
  */
 object DesktopLimits {
 
-    data class Limit(val what: String, val why: String)
+    /**
+     * [what] and [why] are the engineering ledger in English, checked by tests against what
+     * the client does. [titleKey] and [whyKey] are the same row said for a reader, in all 34
+     * languages (__DESKTOP_LEDGER_TRANSLATED_2027__): the window draws those, and [row] is
+     * the PARITY.md reference printed beside them.
+     */
+    data class Limit(
+        val what: String,
+        val why: String,
+        val titleKey: String,
+        val whyKey: String,
+        val row: String,
+    )
 
     /**
      * Not available in this CLIENT — protocol, hardware or platform, not schedule.
@@ -75,6 +89,7 @@ object DesktopLimits {
                 "than discarding them. It is opt-in (OSHI_AUDIO_PLAYBACK=1) because a test suite " +
                 "should not make noise, and the microphone half is a SEPARATE switch that is left " +
                 "off: recording the room because tests ran is not something a switch should bundle.",
+            catalogKey("pc.ledger.calls.title"), catalogKey("pc.ledger.calls.why"), "2.1",
         ),
         // __DESKTOP_POSITION_CLAIMS_EXPIRED_2026_10_29__ Two clauses of this entry had died,
         // and one of them I killed myself in this very codebase.
@@ -103,12 +118,14 @@ object DesktopLimits {
                 "of the machine: over a LoRa radio this client does beacon a position its owner " +
                 "typed in, because Meshtastic's fixed_position is built for a node with no " +
                 "sensor — see the Radio screen, where it is off until you set one.",
+            catalogKey("pc.ledger.location.title"), catalogKey("pc.ledger.location.why"), "0.19",
         ),
         Limit(
             "Push notifications",
             "PARITY.md row 2.3. A desktop client POLLS /v2/messages; there is no APNs or FCM " +
                 "equivalent. That means NO WAKE-FROM-SLEEP DELIVERY: messages arrive when this " +
                 "process is running and the poll interval IS the delivery latency.",
+            catalogKey("pc.ledger.push.title"), catalogKey("pc.ledger.push.why"), "2.3",
         ),
         // __DESKTOP_SCREENSHOT_REASON_2026_10_29__ The CONCLUSION here is right and is kept;
         // the REASON was wrong, and checking it was the only way to find that the right
@@ -151,11 +168,13 @@ object DesktopLimits {
                 "security promise that is false, which is worse than an absent one. iOS blocks " +
                 "screenshots with a UITextField.isSecureTextEntry layer; there is no equivalent " +
                 "trick in a Compose window.",
+            catalogKey("pc.ledger.screenshot.title"), catalogKey("pc.ledger.screenshot.why"), "2.6",
         ),
         Limit(
             "Apple Watch",
             "PARITY.md row 2.7. WatchConnectivity needs a paired iPhone. There is no desktop-side " +
                 "wearable story at all.",
+            catalogKey("pc.ledger.watch.title"), catalogKey("pc.ledger.watch.why"), "2.7",
         ),
         // __DESKTOP_CALLS_ARE_NOT_MISSING_2026_10_29__ Removed, not rewritten: live webcam
         // QR capture SHIPPED on 2026-10-28. `QrCameraScanner` is wired into `NewPane` and
@@ -172,6 +191,7 @@ object DesktopLimits {
                 "iOS/Android recovery key, but history and group synchronisation remain unavailable: " +
                 "phones do not yet write the owner-authenticated V2 archive this client requires. " +
                 "The unauthenticated legacy archive is deliberately not enabled here.",
+            catalogKey("pc.ledger.phoneSync.title"), catalogKey("pc.ledger.phoneSync.why"), "0.24",
         ),
         // __DESKTOP_RADIO_LIMIT_IS_THE_CABLE_2026_10_29__ This entry read "Reading anything
         // the LAN mesh or a LoRa radio carries", because "both carry the LEGACY ratchet,
@@ -205,6 +225,7 @@ object DesktopLimits {
                 "this entry used to say it was: OSHI envelopes off either transport are decrypted " +
                 "and filed under the sender, and unauthenticated stock Meshtastic text gets its own " +
                 "quarantined `lora!` thread, marked unverified, never beside a real message.",
+            catalogKey("pc.ledger.loraBluetooth.title"), catalogKey("pc.ledger.loraBluetooth.why"), "0.27",
         ),
         Limit(
             "Bubble styles, link previews",
@@ -215,6 +236,7 @@ object DesktopLimits {
                 "one set here would be invisible on the phone and vice versa; a link preview means " +
                 "this client fetching an arbitrary URL a stranger sent, which is an outbound " +
                 "request to a third party triggered by an incoming message. Neither is a paint job.",
+            catalogKey("pc.ledger.bubbles.title"), catalogKey("pc.ledger.bubbles.why"), "1.4",
         ),
     )
 
@@ -246,6 +268,7 @@ object DesktopLimits {
                 "searching for video PLAYBACK found nothing while the decoder sat in the tree. " +
                 "Unverified, and said rather than left to be found: no test opens a speaker, so " +
                 "the audio of a played video has never left a device.",
+            catalogKey("pc.ledger.media.title"), catalogKey("pc.ledger.media.why"), "0.15 · 1.4",
         ),
         Limit(
             "Advanced group administration",
@@ -256,12 +279,14 @@ object DesktopLimits {
                 "thread header; the roster lets an admin add known unblocked contacts, remove " +
                 "other members, and promote or demote other members. The creator role is permanent. " +
                 "Leaving a group and other advanced operations remain REPL-only: /group.",
+            catalogKey("pc.ledger.groupAdmin.title"), catalogKey("pc.ledger.groupAdmin.why"), "0.17",
         ),
         Limit(
             "Bot channels",
             "PARITY.md row 0.26. Wired in the client and deliberately not given a composer here — " +
                 "the lane has no encryption at all. REPL: /bot send, which prints the warning on " +
                 "every send.",
+            catalogKey("pc.ledger.bots.title"), catalogKey("pc.ledger.bots.why"), "0.26",
         ),
         Limit(
             "None for direct-message controls",
@@ -272,6 +297,7 @@ object DesktopLimits {
                 "sends the privacy-gated read receipt, and composing sends debounced typing " +
                 "start/stop pings. Inbound direct typing appears transiently and auto-clears. " +
                 "REPL: /typing, /read.",
+            catalogKey("pc.ledger.controls.title"), catalogKey("pc.ledger.controls.why"), "0.18",
         ),
         // __LORA_IS_NOT_REPL_ONLY_2026_10_29__ This entry was titled "LoRa attach, account
         // deletion and sync checkpointing" and ended "The others are REPL-only: /sync
@@ -300,12 +326,14 @@ object DesktopLimits {
                 "direct contacts and groups this account belongs to. A sync checkpoint is the only " +
                 "REPL-only action left here. Deleting the account is NOT: it has its own screen " +
                 "under More, and so does the radio.",
+            catalogKey("pc.ledger.checkpoint.title"), catalogKey("pc.ledger.checkpoint.why"), "0.25 · 0.24 · 0.11",
         ),
         Limit(
             "Localisation",
-            "PARITY.md row 1.5. 34 catalogs ship and the window reaches 41 shared keys from " +
-                "them. Desktop-only copy remains English by design, so that measured coverage " +
-                "does not mean every sentence in this pane is translated.",
+            "PARITY.md row 1.5. 34 catalogs ship, and every string the window draws is in all " +
+                "of them: DesktopTranslationCompletenessTest fails on a missing key, on a phrase " +
+                "left identical to English, and on hard-coded text in the redesigned screens.",
+            catalogKey("pc.ledger.languages.title"), catalogKey("pc.ledger.languages.why"), "1.5",
         ),
     )
 }

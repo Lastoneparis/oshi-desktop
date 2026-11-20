@@ -238,8 +238,39 @@ class V2Router(
          * checked at each encrypt, where the session slot is known.
          */
         padGate: Boolean = true,
+        /**
+         * __RESEND_KEEPS_DATE_2026_11_18__ The time the message is DATED — the moment the person
+         * pressed send — for a RESEND (cover outbox retry, radio escalation). The envelope's `ts`
+         * is what every receiver sorts its thread by, so a message parked during a block and
+         * delivered after a newer one must keep its original date or it lands BELOW the newer
+         * one. Android's `originalTimestampMs`. Null = now (a first send).
+         */
+        sentAtMs: Long? = null,
     ): Boolean {
         if (!config.isEnabledCached()) return false
+        if (sentAtMs != null) datedAt.set(sentAtMs)
+        try { return sendTextDated(peerUserKey, plaintext, msgId, groupId, selfCopy, padGate) } finally { datedAt.remove() }
+    }
+
+    /** See [sendText]'s `sentAtMs`: read by every envelope built on this thread for the call. */
+    private val datedAt = ThreadLocal<Long?>()
+    private fun envelopeTs(): Long = datedAt.get() ?: System.currentTimeMillis()
+
+    /**
+     * __COVER_RETRY_KICK_2026_11_18__ Wall-clock time of the last pull that went THROUGH (the
+     * relay answered), legacy or device view. The client kicks the cover outbox when it moves.
+     */
+    @Volatile var lastPullOkMs: Long = 0L
+        private set
+
+    private fun sendTextDated(
+        peerUserKey: String,
+        plaintext: ByteArray,
+        msgId: String?,
+        groupId: String?,
+        selfCopy: Boolean,
+        padGate: Boolean,
+    ): Boolean {
         activeDevices()?.let { dm ->
             return try {
                 sendDeviceMode(dm, peerUserKey, plaintext, msgId ?: UUID.randomUUID().toString(), groupId, selfCopy, padGate)
@@ -258,7 +289,7 @@ class V2Router(
                 // Re-read inside the lock: a concurrent inbound may have established or
                 // advanced this session while we were fetching.
                 val session = sessions.load(peerUserKey) ?: run {
-                    val b = bundle ?: return@sendText false
+                    val b = bundle ?: return@sendTextDated false
                     // ONE initiator() call: each mints fresh ephemerals, so the state and
                     // the header must come from the same one.
                     val init = V2Session.initiator(myPair, b)
@@ -286,7 +317,7 @@ class V2Router(
                     x3dh = x3dh,
                     header = OSHICryptoV2.encodeHeader(header),
                     ciphertext = ct,
-                    ts = System.currentTimeMillis(),
+                    ts = envelopeTs(),
                 )
             }
             messages.send(envelope).isNotEmpty()
@@ -361,6 +392,7 @@ class V2Router(
         if (!config.isEnabledCached()) return 0
         activeDevices()?.let { return pollDevice(it) }
         val pull = messages.pull(myUserKey, state.lastSeq()) ?: return 0
+        lastPullOkMs = System.currentTimeMillis()
         val (delivered, ackSeq) = processPull(pull, deviceView = null)
         if (ackSeq > state.lastSeq() && messages.ack(myUserKey, ackSeq)) {
             state.setLastSeq(ackSeq)
@@ -706,6 +738,7 @@ class V2Router(
             return 0
         }
         val pull = call.value!!
+        lastPullOkMs = System.currentTimeMillis()
         val (delivered, ackSeq) = processPull(pull, deviceView = dm)
         if (ackSeq > state.deviceLastSeq()) {
             val ack = messages.ackDevice(myUserKey, ackSeq)
@@ -756,7 +789,7 @@ class V2Router(
                 msgId = msgId, from = myUserKey, to = peer,
                 type = routing?.get("type") ?: "1to1", groupId = routing?.get("groupId"),
                 x3dh = x3dh, header = OSHICryptoV2.encodeHeader(header), ciphertext = ct,
-                ts = System.currentTimeMillis(), toDevice = device, fromDevice = fromDevice,
+                ts = envelopeTs(), toDevice = device, fromDevice = fromDevice,
             )
         }
     }

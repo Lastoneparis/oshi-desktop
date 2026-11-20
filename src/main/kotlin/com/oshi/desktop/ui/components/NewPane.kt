@@ -2,6 +2,7 @@ package com.oshi.desktop.ui.components
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -43,6 +44,7 @@ import androidx.compose.ui.layout.ContentScale
 import java.awt.EventQueue
 import com.oshi.desktop.pairing.QrCameraScanner
 import com.oshi.desktop.pairing.QrImageDecoder
+import com.oshi.desktop.i18n.t
 import com.oshi.desktop.ui.OshiTheme
 import com.oshi.desktop.ui.state.ShellState
 import java.io.File
@@ -93,159 +95,154 @@ fun NewPane(
     // a camera light that stays on for no reason anybody can see.
     DisposableEffect(scanner) { onDispose { scanner.stop() } }
 
-    Column(
-        modifier
-            .fillMaxSize()
-            .background(OshiTheme.surface)
-            .verticalScroll(rememberScrollState())
-            .padding(OshiTheme.xl),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Column(Modifier.widthIn(max = 620.dp)) {
-
-            Text("New conversation", style = OshiTheme.typography.headlineLarge, color = Ink.strong)
-            Spacer(Modifier.height(OshiTheme.xs))
-            Text(
-                "OSHI has no phone numbers and no accounts. Two people exchange keys, and that is " +
-                    "the whole of it.",
-                style = OshiTheme.typography.bodyMedium,
-                color = Ink.soft,
-            )
-            Spacer(Modifier.height(OshiTheme.xl))
-
-            // ---------------------------------------------------------------- your code
-            PaneCard {
-                Text("Your code", style = OshiTheme.typography.titleMedium, color = Ink.strong)
-                Spacer(Modifier.height(OshiTheme.xs))
-                Text(
-                    "Have the other person scan this with the OSHI app on their phone.",
-                    style = OshiTheme.typography.bodySmall,
-                    color = Ink.soft,
-                )
-                Spacer(Modifier.height(OshiTheme.lg))
-
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    QrCode(state.shareText, size = 200.dp)
-                    Spacer(Modifier.size(OshiTheme.xl))
-                    Column(Modifier.weight(1f)) {
-                        Text("Address", style = OshiTheme.typography.labelMedium, color = Ink.soft)
-                        Spacer(Modifier.height(OshiTheme.xxs))
-                        SelectableMono(state.selfAddress)
-                        Spacer(Modifier.height(OshiTheme.md))
-                        TextAction("Copy address") { onCopy(state.selfAddress) }
-                        Spacer(Modifier.height(OshiTheme.xs))
-                        TextAction("Copy share text") { onCopy(state.shareText) }
-                    }
+    val startScan: () -> Unit = {
+        scanError = null
+        cameraFrame = null
+        scanning = true
+        scanner.start(object : QrCameraScanner.Listener {
+            override fun onPreview(image: com.oshi.desktop.call.video.VideoImage) {
+                val bmp = image.toImageBitmap()
+                EventQueue.invokeLater { cameraFrame = bmp }
+            }
+            override fun onFinished(payload: String?, error: String?, stopped: Boolean) {
+                EventQueue.invokeLater {
+                    scanning = false
+                    cameraFrame = null
+                    // The scanner decides nothing: a scanned string lands in the SAME field a
+                    // pasted one does, so the person sees what was read before anything is
+                    // added, and `ContactQr` judges both by one code path.
+                    if (payload != null) pasted = payload
+                    scanError = error
                 }
             }
+        })
+    }
 
-            Spacer(Modifier.height(OshiTheme.lg))
-
-            // ---------------------------------------------------------------- their code
-            PaneCard {
-                Text("Their code", style = OshiTheme.typography.titleMedium, color = Ink.strong)
+    // __NEW_CHAT_2027__ Two cards — "Add someone" and "My QR code" — side by side when the
+    // window is wide, stacked when it is not; every action an icon or a button, no text links.
+    androidx.compose.foundation.layout.BoxWithConstraints(
+        modifier.fillMaxSize().background(OshiTheme.paneGround),
+    ) {
+        val wide = maxWidth >= 920.dp
+        Column(
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(OshiTheme.xl),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Column(Modifier.widthIn(max = if (wide) 1040.dp else 620.dp)) {
+                Text(t("chats.merged.new_chat"), style = OshiTheme.typography.headlineLarge, color = Ink.strong)
                 Spacer(Modifier.height(OshiTheme.xs))
-                Text(
-                    "Paste what their app gave them — a bare key, an oshi:// link, or the whole " +
-                    "share message. You can also choose a screenshot or photo of their QR code.",
-                    style = OshiTheme.typography.bodySmall,
-                    color = Ink.soft,
-                )
-                Spacer(Modifier.height(OshiTheme.lg))
+                Text(t("new.hero.subtitle"), style = OshiTheme.typography.bodyMedium, color = Ink.soft)
+                Spacer(Modifier.height(OshiTheme.xl))
 
-                PasteField(
-                    value = pasted,
-                    onValue = { pasted = it },
-                    placeholder = "oshi://add?key=…",
-                )
-                Spacer(Modifier.height(OshiTheme.md))
-                Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm)) {
-                    PrimaryButton("Open conversation", enabled = pasted.isNotBlank()) {
-                        onStartConversation(pasted)
-                        pasted = ""
-                    }
-                    TextAction("Scan QR image") {
-                        onPickQrImage()?.let { image ->
-                            QrImageDecoder.decode(image).fold(
-                                onSuccess = { pasted = it; scanError = null },
-                                onFailure = { scanError = it.message ?: "Could not scan this QR image." },
-                            )
-                        }
-                    }
-                    TextAction(if (scanning) "Stop camera" else "Scan with camera") {
-                        if (scanning) {
-                            scanner.stop()
-                        } else {
-                            scanError = null
-                            cameraFrame = null
-                            scanning = true
-                            scanner.start(object : QrCameraScanner.Listener {
-                                override fun onPreview(image: com.oshi.desktop.call.video.VideoImage) {
-                                    val bmp = image.toImageBitmap()
-                                    EventQueue.invokeLater { cameraFrame = bmp }
+                val addCard: @Composable (Modifier) -> Unit = { m ->
+                    Box(m) {
+                        PaneCard {
+                            CardTitle(Glyph.PERSON, t("new.add_contact"))
+                            Spacer(Modifier.height(OshiTheme.xs))
+                            Text(t("conv.new.paste_hint"), style = OshiTheme.typography.bodySmall, color = Ink.soft)
+                            Spacer(Modifier.height(OshiTheme.lg))
+                            PasteField(value = pasted, onValue = { pasted = it }, placeholder = t("new.paste.placeholder"))
+                            Spacer(Modifier.height(OshiTheme.md))
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm)) {
+                                PrimaryButton(t("new.start_conversation"), enabled = pasted.isNotBlank()) {
+                                    onStartConversation(pasted)
+                                    pasted = ""
                                 }
-                                override fun onFinished(payload: String?, error: String?, stopped: Boolean) {
-                                    EventQueue.invokeLater {
-                                        scanning = false
-                                        cameraFrame = null
-                                        // The scanner decides nothing: a scanned string lands
-                                        // in the SAME field a pasted one does, so the person
-                                        // sees what was read before anything is added, and
-                                        // `ContactQr` judges both by one code path.
-                                        if (payload != null) pasted = payload
-                                        scanError = error
+                                Spacer(Modifier.weight(1f))
+                                GlyphButton(Glyph.IMAGE, t("conv.new.scan_image")) {
+                                    onPickQrImage()?.let { image ->
+                                        QrImageDecoder.decode(image).fold(
+                                            onSuccess = { pasted = it; scanError = null },
+                                            onFailure = { scanError = t("conv.new.scan_image_failed") },
+                                        )
                                     }
                                 }
-                            })
+                                GlyphButton(Glyph.CAMERA, if (scanning) t("conv.new.stop_camera") else t("a11y.scan_qr"), active = scanning) {
+                                    if (scanning) scanner.stop() else startScan()
+                                }
+                            }
+                            if (scanning) {
+                                Spacer(Modifier.height(OshiTheme.md))
+                                Box(
+                                    Modifier.fillMaxWidth().height(220.dp).clip(OshiTheme.radiusMd).background(OshiTheme.surface),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    val shot = cameraFrame
+                                    if (shot != null) {
+                                        Image(bitmap = shot, contentDescription = null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
+                                    } else {
+                                        Text(t("conv.new.opening_camera"), style = OshiTheme.typography.bodySmall, color = Ink.soft)
+                                    }
+                                }
+                                Spacer(Modifier.height(OshiTheme.xs))
+                                Text(t("conv.new.camera_hint"), style = OshiTheme.typography.bodySmall, color = Ink.soft)
+                            }
+                            scanError?.let {
+                                Spacer(Modifier.height(OshiTheme.xs))
+                                Text(it, style = OshiTheme.typography.bodySmall, color = OshiTheme.danger)
+                            }
+                            Spacer(Modifier.height(OshiTheme.md))
+                            Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm), verticalAlignment = Alignment.Top) {
+                                GlyphIcon(Glyph.LOCK, Ink.soft, 14.dp)
+                                Text(t("conv.new.privacy_note"), style = OshiTheme.typography.bodySmall, color = Ink.soft)
+                            }
                         }
                     }
                 }
-                if (scanning) {
-                    Spacer(Modifier.height(OshiTheme.sm))
-                    Box(
-                        Modifier
-                            .width(260.dp)
-                            .height(195.dp)
-                            .clip(OshiTheme.radiusMd)
-                            .background(OshiTheme.surface),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        val shot = cameraFrame
-                        if (shot != null) {
-                            Image(
-                                bitmap = shot,
-                                contentDescription = null,
-                                contentScale = ContentScale.Fit,
-                                modifier = Modifier.fillMaxSize(),
-                            )
-                        } else {
-                            Text(
-                                "Opening the camera…",
-                                style = OshiTheme.typography.bodySmall,
-                                color = Ink.soft,
-                            )
+                val codeCard: @Composable (Modifier) -> Unit = { m ->
+                    Box(m) {
+                        PaneCard {
+                            CardTitle(Glyph.QR, t("my_qr_code"))
+                            Spacer(Modifier.height(OshiTheme.xs))
+                            Text(t("qr.instructions_2"), style = OshiTheme.typography.bodySmall, color = Ink.soft)
+                            Spacer(Modifier.height(OshiTheme.lg))
+                            Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                                QrCode(state.shareText, size = 200.dp)
+                                Spacer(Modifier.height(OshiTheme.md))
+                                // An address is a key: always left-to-right, even in an Arabic window.
+                                androidx.compose.runtime.CompositionLocalProvider(
+                                    androidx.compose.ui.platform.LocalLayoutDirection provides androidx.compose.ui.unit.LayoutDirection.Ltr,
+                                ) {
+                                    Text(
+                                        state.selfAddress,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 11.sp,
+                                        color = Ink.soft,
+                                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                    )
+                                }
+                                Spacer(Modifier.height(OshiTheme.md))
+                                Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm)) {
+                                    PrimaryButton(t("settings.qr.copyAddress")) { onCopy(state.selfAddress) }
+                                    GlyphButton(Glyph.LINK, t("conv.new.copy_share_text")) { onCopy(state.shareText) }
+                                }
+                            }
                         }
                     }
-                    Text(
-                        "Hold the other phone's code up to the camera. Nothing is recorded and " +
-                            "no frame leaves this machine — the picture is decoded in memory and " +
-                            "dropped.",
-                        style = OshiTheme.typography.bodySmall,
-                        color = Ink.soft,
-                    )
                 }
-                scanError?.let { Text(it, style = OshiTheme.typography.bodySmall, color = Color(0xffb3261e)) }
-                Spacer(Modifier.height(OshiTheme.md))
-                Text(
-                    "Nothing is sent and the relay is not told. Adding someone here writes one row " +
-                        "on this machine; the first message is what travels.",
-                    style = OshiTheme.typography.bodySmall,
-                    color = Ink.soft,
-                )
+                if (wide) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.lg), verticalAlignment = Alignment.Top) {
+                        addCard(Modifier.weight(1.2f))
+                        codeCard(Modifier.weight(1f))
+                    }
+                } else {
+                    addCard(Modifier)
+                    Spacer(Modifier.height(OshiTheme.lg))
+                    codeCard(Modifier)
+                }
+                Spacer(Modifier.height(OshiTheme.xl))
             }
-
-            Spacer(Modifier.height(OshiTheme.xl))
         }
+    }
+}
+
+@Composable
+private fun CardTitle(glyph: Glyph, title: String) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm)) {
+        Box(Modifier.size(30.dp).clip(androidx.compose.foundation.shape.CircleShape).background(OshiTheme.brand.copy(alpha = 0.14f)), contentAlignment = Alignment.Center) {
+            GlyphIcon(glyph, OshiTheme.brand, 16.dp)
+        }
+        Text(title, style = OshiTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, color = Ink.strong)
     }
 }
 
@@ -273,7 +270,7 @@ fun QrCode(payload: String, size: Dp, modifier: Modifier = Modifier) {
             contentAlignment = Alignment.Center,
         ) {
             Text(
-                "This address is too long to encode here — copy it instead.",
+                t("conv.qr.too_long"),
                 style = OshiTheme.typography.bodySmall,
                 color = Ink.soft,
                 modifier = Modifier.padding(OshiTheme.md),
@@ -305,8 +302,8 @@ fun PaneCard(content: @Composable androidx.compose.foundation.layout.ColumnScope
     Column(
         Modifier
             .fillMaxWidth()
-            .clip(OshiTheme.radiusXl)
-            .background(OshiTheme.surfaceElevated)
+            // OLED: crystal glass on the black pane ground (__OLED_GLASS_2026_11_16__).
+            .glass(OshiTheme.radiusXl, OshiTheme.surfaceElevated, OshiTheme.cardOutline)
             .padding(OshiTheme.xl),
         content = content,
     )
@@ -341,8 +338,13 @@ fun TextAction(label: String, onClick: () -> Unit) {
 fun PrimaryButton(label: String, enabled: Boolean = true, onClick: () -> Unit) {
     Box(
         Modifier
-            .clip(OshiTheme.pill)
-            .background(if (enabled) OshiTheme.brandGradient else SolidColor(OshiTheme.separator))
+            // OLED: a soft violet glow under the enabled button; a disabled one is glass.
+            .brandGlow(OshiTheme.pill, active = enabled)
+            .then(
+                if (enabled || OshiTheme.glass == null) Modifier.clip(OshiTheme.pill)
+                    .background(if (enabled) OshiTheme.brandGradient else SolidColor(OshiTheme.separator))
+                else Modifier.glass(OshiTheme.pill, OshiTheme.separator, raised = true)
+            )
             .focusRing(OshiTheme.pill)
             .let { if (enabled) it.clickable(onClick = onClick) else it }
             .padding(horizontal = OshiTheme.xl, vertical = OshiTheme.sm),

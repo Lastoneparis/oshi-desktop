@@ -95,6 +95,13 @@ class LoRaInbound(
         data class Envelope(val message: LoRaSecureMessage, val nodeNum: UInt) : Decision()
 
         /**
+         * __LORA_LONG_TEXT_OMP_2026_11_18__ An OSHI Mesh firmware control frame — the BEACON
+         * that answers our probe, or a STATUS about a message we handed it. Only our own
+         * radio's frames mean anything; the caller checks [from] against its node number.
+         */
+        data class OmpControl(val type: OshiMeshProtocol.FrameType, val payload: ByteArray, val from: UInt) : Decision()
+
+        /**
          * Plain text from a stock Meshtastic node.
          *
          * @property conversationKey where it should be filed — `lora!<nodehex>` unless the
@@ -162,7 +169,11 @@ class LoRaInbound(
     private fun oshiChunk(p: LoRaProto.Incoming, myPublicKey: String, nowMillis: Long): Decision {
         // "OS" = OSHI Mesh firmware (OMP): the radio reassembled and acknowledged the message and hands it
         // over whole; `origin` in the OMP header is the composing node even when a custodian delivered it.
-        if (OshiMeshProtocol.typeOf(p.payload) != null) {
+        val omp = OshiMeshProtocol.typeOf(p.payload)
+        if (omp == OshiMeshProtocol.FrameType.BEACON || omp == OshiMeshProtocol.FrameType.STATUS) {
+            return Decision.OmpControl(omp, p.payload, p.from)
+        }
+        if (omp != null) {
             val f = OshiMeshProtocol.parseData(p.payload) ?: return Decision.Ignored
             val body = ompReassembler.accept(f, nowMillis) ?: return Decision.Ignored
             val json = OshiMeshProtocol.decodeBody(body) ?: return Decision.Ignored

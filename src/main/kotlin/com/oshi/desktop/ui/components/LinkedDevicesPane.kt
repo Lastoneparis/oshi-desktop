@@ -10,6 +10,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.width
+import com.oshi.desktop.i18n.t
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -49,6 +51,18 @@ fun LinkedDevicesPane(
     /** __PER_DEVICE_MAILBOX_2026_09_23__ this computer's own mailbox (null = section hidden). */
     mailbox: com.oshi.desktop.net.DeviceMailbox? = null,
 ) {
+    SettingsPageFrame {
+        SettingsPageHeader(SettingsIcon.DEVICES, t("devsync.title"), t("desktop.settings.devices.subtitle"))
+        LinkedDevicesSection(devSync, mailbox)
+    }
+}
+
+/** The live half: polls [DesktopDevSync] once a second and draws [LinkedDevicesContent]. */
+@Composable
+fun LinkedDevicesSection(
+    devSync: DesktopDevSync,
+    mailbox: com.oshi.desktop.net.DeviceMailbox? = null,
+) {
     var snap by remember { mutableStateOf<DesktopDevSync.Snapshot?>(null) }
     var tick by remember { mutableStateOf(0) }
     DisposableEffect(devSync) {
@@ -61,77 +75,116 @@ fun LinkedDevicesPane(
             delay(1_000)
         }
     }
-    val s = snap
-    Column(
-        Modifier.fillMaxSize().background(OshiTheme.surface).verticalScroll(rememberScrollState()).padding(OshiTheme.xxl),
+    LinkedDevicesContent(
+        s = snap,
+        onOverride = { devSync.setOverride(it) },
+        onApprove = { id, ok -> devSync.approve(id, ok) },
+        onRevoke = { devSync.revoke(it) },
+        onSyncNow = { devSync.syncNow() },
+        mailbox = { if (mailbox != null) DeviceMailboxSection(mailbox) },
+    )
+}
+
+/**
+ * __DESKTOP_SETTINGS_2027__ Stateless, so it renders without a sync engine. The phones' own
+ * `devsync.*` words, so it is translated everywhere; the switch replaces the old "Force on /
+ * Follow server" links: on when the server enables it, and switching it to the server's own
+ * value goes back to following the server.
+ */
+@Composable
+fun LinkedDevicesContent(
+    s: DesktopDevSync.Snapshot?,
+    onOverride: (Boolean?) -> Unit,
+    onApprove: (String, Boolean) -> Unit,
+    onRevoke: (String) -> Unit,
+    onSyncNow: () -> Unit,
+    mailbox: @Composable () -> Unit = {},
+) {
+    val enabled = s?.enabled == true
+    SettingsCard(
+        footer = s?.deviceId?.let { t("desktop.settings.devices.thisDevice", it.take(8)) },
     ) {
-        Column(Modifier.widthIn(max = 640.dp), verticalArrangement = Arrangement.spacedBy(OshiTheme.md)) {
-            Text("Linked devices", style = OshiTheme.typography.headlineLarge, color = Ink.strong)
-            Text(
-                if (s?.enabled == true) "Direct sync is on: your history moves device to device, over the local network or a live relay that stores nothing."
-                else "Direct sync is off on this machine (the server has not enabled it). You can force it on below.",
-                style = OshiTheme.typography.bodyLarge, color = Ink.soft,
-            )
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(OshiTheme.md)) {
-                Text("Override: ${when (s?.override) { true -> "forced on"; false -> "forced off"; else -> "follow the server" }}", color = Ink.strong)
-                TextAction("Force on") { devSync.setOverride(true) }
-                TextAction("Follow server") { devSync.setOverride(null) }
-            }
-            s?.deviceId?.let { Text("This machine: device ${it.take(8)}", color = Ink.soft, fontSize = 12.sp) }
+        SettingsToggleRow(
+            SettingsIcon.DEVICES,
+            t("desktop.settings.devices.direct"),
+            if (enabled) t("devsync.footer") else t("devsync.disabled"),
+            checked = enabled,
+        ) { want -> onOverride(if (s != null && want == s.serverEnabled) null else want) }
+    }
 
-            if (!s?.pending.isNullOrEmpty()) {
-                Spacer(Modifier.height(OshiTheme.sm))
-                Text("Waiting for approval", style = OshiTheme.typography.titleMedium, color = Ink.strong)
-                for (p in s!!.pending) {
-                    Column(
-                        Modifier.fillMaxWidth().background(OshiTheme.surfaceElevated, RoundedCornerShape(12.dp)).padding(OshiTheme.lg),
-                        verticalArrangement = Arrangement.spacedBy(OshiTheme.sm),
-                    ) {
-                        Text(
-                            if (p.thisDeviceIsNew) "Approve this machine on your other device, after checking it shows the same code."
-                            else "${p.name} (${p.platform}) wants to receive your history. Check that its screen shows the same code.",
-                            color = Ink.strong,
-                        )
-                        Text(p.code.chunked(3).joinToString(" "), fontSize = 34.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, color = Ink.strong)
-                        if (p.peerApproved) Text("The other device already approved. Approve here to finish.", color = Ink.soft)
-                        Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.md)) {
-                            PrimaryButton("Allow") { devSync.approve(p.peerId, true) }
-                            TextAction("Deny") { devSync.approve(p.peerId, false) }
-                        }
+    if (!s?.pending.isNullOrEmpty()) {
+        SettingsCard(title = t("devsync.pending.section")) {
+            for (p in s!!.pending) {
+                SettingsCardBody {
+                    Text(
+                        if (p.thisDeviceIsNew) t("devsync.pending.waiting", "").trim()
+                        else t("devsync.pending.message", p.name, p.platform, "").trim(),
+                        style = OshiTheme.typography.bodyMedium,
+                        color = Ink.strong,
+                    )
+                    Spacer(Modifier.height(OshiTheme.sm))
+                    Text(
+                        p.code.chunked(3).joinToString(" "),
+                        fontSize = 34.sp,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        color = Ink.strong,
+                    )
+                    // __MERGE_2027__ from the tools branch: say when the other side already allowed it.
+                    if (p.peerApproved) {
+                        Spacer(Modifier.height(OshiTheme.xs))
+                        Text(t("pc.devices.peerApproved"), style = OshiTheme.typography.bodySmall, color = Ink.soft)
+                    }
+                    Spacer(Modifier.height(OshiTheme.sm))
+                    SettingsButtonRow {
+                        SettingsButton(SettingsIcon.CHECK, t("devsync.allow"), primary = true) { onApprove(p.peerId, true) }
+                        SettingsButton(null, t("devsync.deny"), danger = true) { onApprove(p.peerId, false) }
                     }
                 }
-            }
-
-            Spacer(Modifier.height(OshiTheme.sm))
-            Text("Linked", style = OshiTheme.typography.titleMedium, color = Ink.strong)
-            val linked = s?.linked.orEmpty()
-            if (linked.isEmpty()) Text("No device linked yet. Open OSHI on your phone while this window is open.", color = Ink.soft)
-            for (d in linked) {
-                val live = s?.sessions?.firstOrNull { it.peerId == d.deviceId }
-                Row(
-                    Modifier.fillMaxWidth().background(OshiTheme.surfaceElevated, RoundedCornerShape(12.dp)).padding(OshiTheme.md),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("${d.name} · ${d.platform}", color = Ink.strong, fontWeight = FontWeight.SemiBold)
-                        Text(
-                            when {
-                                live != null -> "Connected over ${live.transport} (${live.state.name.lowercase()})"
-                                d.lastSyncAtMs != null -> "Last sync " + DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(d.lastSyncAtMs!!))
-                                else -> "Never synced"
-                            },
-                            color = Ink.soft, fontSize = 12.sp,
-                        )
-                    }
-                    TextAction("Remove") { devSync.revoke(d.deviceId) }
-                }
-            }
-            Spacer(Modifier.height(OshiTheme.sm))
-            PrimaryButton("Sync now", enabled = s?.enabled == true) { devSync.syncNow() }
-            if (mailbox != null) {
-                Spacer(Modifier.height(OshiTheme.md))
-                DeviceMailboxSection(mailbox)
             }
         }
     }
+
+    val linked = s?.linked.orEmpty()
+    SettingsCard(title = t("desktop.settings.devices.linked")) {
+        if (linked.isEmpty()) {
+            MascotEmptyState("wave", t("desktop.settings.devices.empty.title"), t("devsync.noDevices"))
+        }
+        linked.forEachIndexed { i, d ->
+            if (i > 0) SettingsDivider()
+            val live = s?.sessions?.firstOrNull { it.peerId == d.deviceId }
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = OshiTheme.lg, vertical = OshiTheme.md),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                SettingsIconBadge(SettingsIcon.DEVICES, if (live != null) OshiTheme.success else OshiTheme.brand)
+                Spacer(Modifier.width(OshiTheme.md))
+                Column(Modifier.weight(1f)) {
+                    Text(listOf(d.name, d.platform).bidiJoin(), style = OshiTheme.typography.bodyLarge, color = Ink.strong)
+                    Text(
+                        when {
+                            live != null -> t(
+                                "desktop.settings.devices.connected",
+                                if (live.transport.contains("lan", ignoreCase = true)) t("devsync.transport.lan") else t("devsync.transport.relay"),
+                            )
+                            d.lastSyncAtMs != null -> t(
+                                "devsync.lastSync",
+                                DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT, java.util.Locale.forLanguageTag(com.oshi.desktop.i18n.Strings.activeTag)).format(Date(d.lastSyncAtMs!!)),
+                            )
+                            else -> t("devsync.neverSynced")
+                        },
+                        style = OshiTheme.typography.bodySmall,
+                        color = Ink.soft,
+                    )
+                }
+                SettingsButton(SettingsIcon.DELETE, t("devsync.remove"), danger = true) { onRevoke(d.deviceId) }
+            }
+        }
+        SettingsCardBody {
+            SettingsButtonRow {
+                SettingsButton(SettingsIcon.CHECK, t("devsync.syncNow"), primary = true, enabled = enabled) { onSyncNow() }
+            }
+        }
+    }
+    mailbox()
 }

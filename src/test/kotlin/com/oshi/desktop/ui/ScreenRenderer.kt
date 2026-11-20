@@ -96,7 +96,17 @@ object ScreenRenderer {
 
     @JvmStatic
     fun main(args: Array<String>) {
-        val out = File(args.firstOrNull() ?: "build/screens").apply { mkdirs() }
+        // __OLED_BLACK_2026_11_16__ OSHI_RENDER_THEME=light|dark|oled renders the same sheets
+        // in that appearance, into a sub-directory named after it, so Dark and OLED can be put
+        // side by side. Unset, nothing changes: light, straight into the output directory.
+        val theme = System.getenv("OSHI_RENDER_THEME")?.lowercase()
+        OshiTheme.appearance = when (theme) {
+            "dark" -> Appearance(ThemeMode.DARK, oledBlack = false)
+            "oled" -> Appearance(ThemeMode.DARK, oledBlack = true)
+            else -> Appearance.DEFAULT
+        }
+        val base = File(args.firstOrNull() ?: "build/screens")
+        val out = (if (theme.isNullOrBlank()) base else File(base, theme)).apply { mkdirs() }
 
         // The chrome on its own: the destination strip over the sidebar, which is the one
         // composition no single pane covers and the one a reader compares to the capture.
@@ -139,6 +149,10 @@ object ScreenRenderer {
                 }
             }
         }
+        // __PRIVACY_DISGUISE_2026_11_18__ settings pane, disguise sheet, reveal results, drop
+        // overlay and the "waiting for disguised connection" bubble.
+        PrivacyDisguiseScreens.renderAll(out)
+        PrivacyDisguiseScreens.renderRestrictedHint(out)
         render(File(out, "01-messages-list.png"), SIDEBAR, H) {
             ConversationListPane(
                 state = demoState(),
@@ -258,7 +272,8 @@ object ScreenRenderer {
             render(File(out, "26-call-minimized-bar.png"), W, H) {
                 androidx.compose.foundation.layout.Box(
                     androidx.compose.ui.Modifier.fillMaxSize()
-                        .background(androidx.compose.ui.graphics.Color(0xFFF4F3F8)),
+                        // __OLED_GLASS_2026_11_16__ the app's own ground in a dark theme.
+                        .background(if (OshiTheme.palette.isDark) OshiTheme.background else androidx.compose.ui.graphics.Color(0xFFF4F3F8)),
                 ) {
                     com.oshi.desktop.ui.components.CallMiniBar(
                         connected.copy(minimized = true), {}, {}, nowMs = { fixedNow },
@@ -385,6 +400,12 @@ object ScreenRenderer {
         render(File(out, "04-more.png"), W, 1100) {
             MorePane(demoState(), onShow = {}, onSelect = {}, onSetBlocked = { _, _ -> }, onRename = { _, _ -> }, onVerifySafetyNumber = { _, _ -> false }, onCopy = {})
         }
+        // __OLED_BLACK_2026_11_16__ The appearance card on its own: 04 is cut off above it.
+        render(File(out, "04b-more-appearance.png"), 760, 340) {
+            Box(Modifier.fillMaxSize().background(OshiTheme.surface).padding(OshiTheme.xl)) {
+                com.oshi.desktop.ui.components.AppearanceCard()
+            }
+        }
         render(File(out, "05-ai.png"), W, H) {
             AiPane(demoAi(), onUseModel = {}, onAsk = {}, onForget = {})
         }
@@ -436,6 +457,7 @@ object ScreenRenderer {
             )
         }
         renderMail(out)
+        renderOverlays(out)
 
         println("[screens] wrote ${out.listFiles()?.size ?: 0} file(s) to ${out.absolutePath}")
         checkNotBlank(out)
@@ -541,13 +563,58 @@ object ScreenRenderer {
         )
     }
 
+    /**
+     * __OLED_GLASS_2026_11_16__ The floating surfaces the first OLED pass never looked at: the
+     * ringing card (its own window in the app), a dropdown menu, the media viewer.
+     */
+    private fun renderOverlays(out: File) {
+        render(File(out, "29-ring-card.png"), 360, 92) {
+            RingCard(
+                com.oshi.desktop.ui.state.CallScreenModel.CallScreen(
+                    phase = com.oshi.desktop.ui.state.CallScreenModel.Phase.INCOMING,
+                    peer = addr('a'), label = "Alice Martin", initials = "AM", callId = "C1", outgoing = false,
+                ),
+                {}, {},
+            )
+        }
+        render(File(out, "30-dropdown-menu.png"), 520, 360, frames = 10) {
+            Box(Modifier.padding(24.dp)) {
+                androidx.compose.material3.Text("Devices", color = OshiTheme.textPrimary)
+                com.oshi.desktop.ui.components.OshiDropdownMenu(expanded = true, onDismissRequest = {}) {
+                    for ((label, on) in listOf("Default" to true, "MacBook Pro Microphone" to false, "AirPods Pro" to false)) {
+                        androidx.compose.material3.DropdownMenuItem(
+                            text = { androidx.compose.material3.Text((if (on) "✓  " else "     ") + label) },
+                            onClick = {},
+                        )
+                    }
+                }
+            }
+        }
+        val picture = File.createTempFile("oshi-render-", ".png").apply { deleteOnExit() }
+        run {
+            val img = java.awt.image.BufferedImage(800, 520, java.awt.image.BufferedImage.TYPE_INT_RGB)
+            val g = img.createGraphics()
+            g.paint = java.awt.GradientPaint(0f, 0f, java.awt.Color(0x2A, 0x1B, 0x6E), 800f, 520f, java.awt.Color(0xE0, 0x6A, 0x3B))
+            g.fillRect(0, 0, 800, 520)
+            g.dispose()
+            javax.imageio.ImageIO.write(img, "png", picture)
+        }
+        render(File(out, "31-media-viewer.png"), W, H) {
+            com.oshi.desktop.ui.components.MediaViewerOverlay(
+                com.oshi.desktop.ui.components.MediaViewerTarget(
+                    com.oshi.desktop.store.MediaType.IMAGE, picture.absolutePath, "sunset.png", viewOnce = false,
+                ),
+            ) {}
+        }
+    }
+
     private fun render(target: File, wDp: Int, hDp: Int, frames: Int = 1, content: @Composable () -> Unit) {
         val scene = ImageComposeScene(
             width = (wDp * SCALE).toInt(),
             height = (hDp * SCALE).toInt(),
             density = Density(SCALE),
         ) {
-            MaterialTheme(colorScheme = OshiTheme.colors, typography = OshiTheme.typography) {
+            OshiMaterialTheme {
                 Surface(Modifier.fillMaxSize(), color = OshiTheme.background) {
                     Box(Modifier.fillMaxSize()) { content() }
                 }

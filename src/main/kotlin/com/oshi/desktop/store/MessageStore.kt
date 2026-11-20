@@ -251,6 +251,22 @@ class MessageStore(
         return updated
     }
 
+    /**
+     * __PRIVACY_DISGUISE_2026_11_18__ Settle a row that was WAITING for the disguised
+     * connection (`deliveryStatus = PENDING`). The one place a status moves other than
+     * forward: PENDING → FAILED is not an "advance" ([DeliveryStatus.advanced] refuses it,
+     * rightly, for receipts), but a message that waited an hour and gave up must say so.
+     * Acts only on a PENDING row, so a receipt that already moved it on is never undone.
+     */
+    @Synchronized
+    fun settlePending(conversationId: String, id: String, to: DeliveryStatus, transport: String): Message? {
+        val current = message(conversationId, id) ?: return null
+        if (current.deliveryStatus != DeliveryStatus.PENDING) return current
+        val updated = current.copy(deliveryStatus = to, transport = transport)
+        append(updated)
+        return updated
+    }
+
     @Synchronized
     fun editContent(conversationId: String, id: String, newContent: String, editedAtMs: Long): Message? {
         val current = message(conversationId, id) ?: return null
@@ -623,6 +639,11 @@ data class Message(
     /** The note's announced duration (ms, clamped to 15 000), when the sender stated one. */
     val mediaDurationMs: Long? = null,
     /**
+     * __RESTRICTED_NETWORK_HINT_2026_11_18__ An inbound 1:1 text whose sender had the disguise
+     * on and lets contacts know (RN-HINT v1). Local only — the marker itself was stripped.
+     */
+    val restrictedNetwork: Boolean = false,
+    /**
      * Append-order sequence within its conversation, assigned by [MessageStore] — the
      * ordering tiebreaker for two messages that claim the identical [sentAtMs]. Not
      * meaningful across conversations, and callers should not set it themselves; [copy]
@@ -689,6 +710,7 @@ data class Message(
         com.oshi.desktop.group.MentionWire.render(mentions)?.let { put("mentions", JSONArray(it)) }
         if (videoNote) put("videoNote", true)
         mediaDurationMs?.let { put("mediaDurationMs", it) }
+        if (restrictedNetwork) put("restrictedNetwork", true)
         if (reactions.isNotEmpty()) {
             put("reactions", JSONObject().apply {
                 for ((emoji, senders) in reactions.toSortedMap()) {
@@ -726,6 +748,7 @@ data class Message(
             mentions = com.oshi.desktop.group.MentionWire.parse(o.opt("mentions")),
             videoNote = o.optBoolean("videoNote", false),
             mediaDurationMs = if (o.has("mediaDurationMs")) o.optLong("mediaDurationMs") else null,
+            restrictedNetwork = o.optBoolean("restrictedNetwork", false),
             reactions = o.optJSONObject("reactions")?.let { r ->
                 val out = LinkedHashMap<String, Set<String>>()
                 for (emoji in r.keys()) {

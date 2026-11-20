@@ -52,6 +52,27 @@ interface SecretStore {
             }
             return backend?.let { VerifiedSecretStore(it) }
         }
+
+        /**
+         * __DPAPI_PROBE_LOCKED_OUT_AN_EXISTING_VAULT_2026_11_19__ [detect], except that a probe
+         * failure must not lock a person out of a vault that ALREADY lives in the OS store.
+         *
+         * The Windows probe spawns PowerShell and gives it 15 s; a cold start under antivirus
+         * scanning can miss that, and then `detect()` answered "no store" and `KeyVault.open`
+         * refused the existing os-store vault outright. For such a vault the platform backend
+         * is returned unprobed: reading the master key is the real test, and when THAT fails
+         * the vault still refuses to open (never a fresh identity).
+         */
+        fun detectFor(vault: File, service: String = SERVICE): SecretStore? {
+            detect(service)?.let { return it }
+            if (!KeyVault.isOsStoreVault(vault)) return null
+            val backend: SecretStore = when {
+                DesktopPaths.isMac -> MacKeychainStore(service)
+                DesktopPaths.isWindows -> WindowsDpapiStore(service)
+                else -> LinuxSecretToolStore(service)
+            }
+            return VerifiedSecretStore(backend)
+        }
     }
 }
 
@@ -280,7 +301,7 @@ internal class WindowsDpapiStore(private val service: String) : SecretStore {
         val r = Proc.run(
             listOf(shell, "-NoProfile", "-NonInteractive", "-Command",
                 "Add-Type -AssemblyName System.Security; " +
-                    "\$p=[Convert]::FromBase64String((Get-Content -Raw \$env:OSHI_BLOB_PATH).Trim()); " +
+                    "\$p=[Convert]::FromBase64String((Get-Content -LiteralPath \$env:OSHI_BLOB_PATH -Raw).Trim()); " +
                     "\$b=[Security.Cryptography.ProtectedData]::Unprotect(\$p,\$null,'CurrentUser'); " +
                     "[Convert]::ToBase64String(\$b)"),
             env = mapOf("OSHI_BLOB_PATH" to f.absolutePath),
@@ -429,15 +450,7 @@ internal object Proc {
     }
 
     /** `which`, without a shell. */
-    fun which(binary: String): String? {
-        val path = System.getenv("PATH") ?: return null
-        val sep = if (DesktopPaths.isWindows) ";" else ":"
-        for (dir in path.split(sep)) {
-            val f = File(dir, binary)
-            if (f.isFile && f.canExecute()) return f.absolutePath
-        }
-        return null
-    }
+    fun which(binary: String): String? = ExecutableLookup.which(binary)
 }
 
 /**

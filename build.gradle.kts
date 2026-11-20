@@ -15,7 +15,7 @@ plugins {
 }
 
 group = "com.oshi.desktop"
-version = "1.4.6"
+version = "1.5.0"
 
 /**
  * Where the two shipped trees live.
@@ -180,6 +180,8 @@ val sharedOhttpSources =
     "$oshiAndroidRoot/app/src/main/java/com/oshi/messenger/network/ohttp"
 val sharedOhttpTests =
     "$oshiAndroidRoot/app/src/test/java/com/oshi/messenger/network/ohttp"
+val sharedStegoTests =
+    "$oshiAndroidRoot/app/src/test/java/com/oshi/messenger/service/stego"
 
 /*
  * __GIF_PACK_2026_09_23__ The offline GIF + sticker library (1,718 GIFs, 1,454 stickers,
@@ -328,6 +330,16 @@ sourceSets {
             // round bubble on one platform and a square one on another.
             // (relative to the shared `service/` srcDir, hence no `**/` prefix)
             "media/VideoNote.kt",
+            // __PRIVACY_DISGUISE_2026_11_18__ "Disguise as photo" (docs/stego/STEGO-v1.md) and
+            // the cover transport's wire format, compiled from the SAME files Android ships —
+            // not a desktop copy. StegoV1/StegoPng are pure JVM by design (Android vector-tests
+            // them on the JVM); CoverCodec/CoverPresentation are the padded analytics-style
+            // carrier the relay's `cover_transport.js` decodes. A second implementation would
+            // be a second chance to disagree with the phones about one bit position.
+            "**/StegoV1.kt",
+            "**/StegoPng.kt",
+            "**/CoverCodec.kt",
+            "**/CoverPresentation.kt",
             // __DEVSYNC_DIRECT_2026_09_22__ The own-device sync core
             // (docs/OSHI_DEVICE_SYNC_DIRECT.md): Noise XXpsk0, framing, diff/merge, linked-device
             // registry, sessions, LAN + relay plumbing. The whole `network/v2/devsync/` package is
@@ -366,6 +378,10 @@ sourceSets {
         // Android API). Its siblings use OkHttp/MockWebServer or the network and are NOT
         // compiled; the RFC 9458 Appendix A vector is re-run in `DesktopOhttpTest`.
         kotlin.srcDir(sharedOhttpTests)
+        // __PRIVACY_DISGUISE_2026_11_18__ Android's own STEGO-v1 tests, run UNCHANGED on the
+        // desktop JVM: the cross-platform vectors (docs/fixtures/stego) and the PNGs Android
+        // and iOS wrote must reveal here exactly as they do there.
+        kotlin.srcDir(sharedStegoTests)
         val ohttpTestDir = file(sharedOhttpTests)
         kotlin.exclude { it.file.parentFile == ohttpTestDir && it.name != "BhttpTest.kt" }
     }
@@ -683,6 +699,31 @@ val bytedecoNativeClassifier: String? = providers.gradleProperty("videoNatives")
     }
 }
 
+// ======================================================================== TLS LOOK
+//
+// __TLS_LOOK_2026_11_19__ (docs/CENSORSHIP_2026_THREAT_MODEL.md §3). The JDK's own TLS stack
+// sends a ClientHello no home device sends (31 ciphers, `t13d3113h2_1d947a95fc68_…`), so a
+// censor can single the desktop out by JA3/JA4 at zero collateral. Conscrypt is the TLS
+// stack Android apps use (BoringSSL); `net/TlsLook.kt` gives the relay-facing clients its
+// SSLContext with OkHttp's cipher list, i.e. the Android app fingerprint. Same host-only
+// natives rule as [webrtcNativeClassifier]. Published: osx/linux x86_64+aarch_64,
+// windows-x86_64. Absent (Windows on ARM) => TlsLook falls back to the JDK stack.
+val conscryptVersion = "2.8.0"
+val conscryptNativeClassifier: String? = providers.gradleProperty("conscryptNatives").orNull ?: run {
+    val os = System.getProperty("os.name").orEmpty().lowercase()
+    val cpu = when (System.getProperty("os.arch").orEmpty().lowercase()) {
+        "amd64", "x86_64", "x64" -> "x86_64"
+        "aarch64", "arm64" -> "aarch_64"
+        else -> null
+    }
+    when {
+        cpu == null -> null
+        os.contains("win") -> if (cpu == "x86_64") "windows-x86_64" else null
+        os.contains("mac") || os.contains("darwin") -> "osx-$cpu"
+        else -> "linux-$cpu"
+    }
+}
+
 dependencies {
     // Pinned to EXACTLY what OSHI-Android uses (app/build.gradle.kts:218, :296).
     // A different BouncyCastle is a parity risk, not a housekeeping detail.
@@ -693,6 +734,9 @@ dependencies {
     // error.
     implementation("org.bouncycastle:bcprov-jdk18on:1.81")
     implementation("org.json:json:20231013")
+    // __TLS_LOOK_2026_11_19__ see the TLS LOOK block above. The classifier jar carries the
+    // classes AND the host native.
+    conscryptNativeClassifier?.let { implementation("org.conscrypt:conscrypt-openjdk:$conscryptVersion:$it") }
 
     // __RATCHET_IS_SHARED_SOURCE_2026_10_28__ The ANNOTATIONS only (`@Inject`,
     // `@Singleton`), because the shared `DoubleRatchet.kt` carries Android's Dagger
@@ -846,6 +890,18 @@ tasks.register<JavaExec>("renderScreens") {
     args(layout.buildDirectory.dir("screens").get().asFile.absolutePath)
     // Skiko picks a software renderer here; there is no window to composite into and the
     // default GPU path wants a surface it will not get on a headless runner.
+    systemProperty("skiko.renderApi", "SOFTWARE")
+}
+
+// __DESKTOP_SETTINGS_2027__ Every Settings page and the first-run screen, in en/fr/ar ×
+// light/dark/OLED (OSHI_RENDER_LANGS / OSHI_RENDER_THEMES narrow it). Same method as above.
+tasks.register<JavaExec>("renderSettingsScreens") {
+    group = "verification"
+    description = "Renders Settings and first run to build/screens-settings as PNG, without opening a window."
+    dependsOn(tasks.named("testClasses"))
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("com.oshi.desktop.ui.SettingsScreens")
+    args(layout.buildDirectory.dir("screens-settings").get().asFile.absolutePath)
     systemProperty("skiko.renderApi", "SOFTWARE")
 }
 
@@ -1417,6 +1473,13 @@ fun registerJpackage(
                 // cannot be substituted for it, which is exactly what `LlamaNative.diagnose`
                 // tells a user who has the file in the right place and the wrong variable.
                 "--java-options", "-Djava.library.path=${'$'}APPDIR",
+            ) + (
+                // __LINUX_WM_CLASS_2026_11_19__ lets Main set the X11 WM_CLASS to "OSHI" so GNOME/KDE
+                // match the running window to the menu entry (StartupWMClass=OSHI in OSHI.desktop)
+                // instead of showing a second, generic "com-oshi-desktop-MainKt" icon. Linux only:
+                // the package does not exist in the Windows/macOS JDK.
+                if (hostIsLinux) listOf("--java-options", "--add-opens=java.desktop/sun.awt.X11=ALL-UNNAMED") else emptyList()
+            ) + listOf(
                 "--dest", outDir.absolutePath,
                 "--vendor", "OSHI",
                 "--description", "OSHI encrypted messenger — desktop client",
@@ -1536,6 +1599,9 @@ tasks.register("packagingOverrides") {
  * an IT department deploys. Same app image inside both.
  */
 private val windowsConsoleLauncher: File by lazy {
+    // __CONSOLE_NOT_IN_START_MENU_2026_11_20__ win-menu/win-shortcut=false: the terminal client
+    // stays in the install folder but gets no Start-menu entry or desktop shortcut, where people
+    // opened it by mistake (honoured by jpackage 21+, ignored by 17 — the release builds on 21).
     // jpackage takes a PROPERTIES FILE per extra launcher, not flags. `win-console=true`
     // is the whole point of this one: it is the surface `/send`, `/lora`, `/call` and the
     // rest live on, and it needs a console to read a line from.
@@ -1549,6 +1615,8 @@ private val windowsConsoleLauncher: File by lazy {
     f.writeText(
         """
         win-console=true
+        win-menu=false
+        win-shortcut=false
         arguments=--client
         description=OSHI encrypted messenger — terminal client
         """.trimIndent() + "\n" + icon
@@ -1622,7 +1690,26 @@ val packageDmg = registerJpackage(
  * part the Class-Path manifest gets wrong silently.
  */
 val packageAppImage = registerJpackage("packageAppImage", "app-image", "any", hostResourceDirArgs()).apply {
-    configure { doLast { localiseMacBundle(jpackageOutputDir.get().asFile.resolve("$appName.app")) } }
+    configure {
+        doLast { localiseMacBundle(jpackageOutputDir.get().asFile.resolve("$appName.app")) }
+        // __RUNTIME_MODULES_GUARD_2026_11_20__ jpackage picks the runtime's modules itself (no
+        // --add-modules here). Measured 2026-11-20 on Temurin 17.0.21 and 21.0.13 (Linux): the
+        // default set includes all four below. Without jdk.localedata, French/Arabic/… dates fall
+        // back to English; without jdk.crypto.ec, TLS to the relay fails. Fail the build rather than
+        // ship a runtime that lost one of them on a JDK change.
+        doLast {
+            val out = jpackageOutputDir.get().asFile
+            val release = listOf(
+                out.resolve("$appName.app/Contents/runtime/Contents/Home/release"),
+                out.resolve("$appName/lib/runtime/release"),
+                out.resolve("$appName/runtime/release"),
+            ).firstOrNull { it.isFile } ?: throw GradleException("packageAppImage: no runtime 'release' file under $out")
+            val modules = Regex("MODULES=\"([^\"]*)\"").find(release.readText())?.groupValues?.get(1)?.split(' ').orEmpty().toSet()
+            val missing = listOf("jdk.localedata", "jdk.crypto.ec", "jdk.charsets", "jdk.accessibility").filterNot { it in modules }
+            if (missing.isNotEmpty()) throw GradleException("packageAppImage: bundled runtime lacks $missing ($release)")
+            logger.lifecycle("[jpackage] runtime modules OK (${modules.size}): jdk.localedata, jdk.crypto.ec, jdk.charsets, jdk.accessibility present")
+        }
+    }
 }
 
 /**

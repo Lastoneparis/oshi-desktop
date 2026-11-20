@@ -50,6 +50,12 @@ class LoRaRadioState {
     var known: Boolean = false
         private set
 
+    /** __DESKTOP_TOOLS_2027__ `Config.LoRaConfig.modem_preset` (2) and `tx_power` (10), for the radio card. */
+    var modemPreset: Long? = null
+        private set
+    var txPowerDbm: Int? = null
+        private set
+
     /** The node is attached and will never transmit: no region, or muted. */
     val willNotTransmit: Boolean
         get() = known && (!transmitEnabled || regionCode == null || regionCode == 0L)
@@ -79,13 +85,19 @@ class LoRaRadioState {
         val lora = LoRaProto.field(config, 6, wire = 2)?.payload ?: return false
         var region: Long? = null
         var tx = true
+        var preset: Long? = null
+        var power: Int? = null
         for (f in LoRaProto.parseFields(lora)) {
             if (f.wire != 0) continue
             when (f.number) {
+                2 -> preset = f.varintValue
                 7 -> region = f.varintValue
                 9 -> tx = f.varintValue != 0L
+                10 -> power = f.varintValue.toInt().takeIf { it in 1..40 }
             }
         }
+        modemPreset = preset
+        txPowerDbm = power
         regionCode = region
         transmitEnabled = tx
         known = true

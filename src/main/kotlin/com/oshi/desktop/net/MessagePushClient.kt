@@ -45,7 +45,7 @@ class MessagePushClient(
 
     val sendPushUrl: String = baseUrl.trimEnd('/') + PATH
 
-    private val http: HttpClient = HttpClient.newBuilder()
+    private val http: HttpClient = NetClients.builder()
         .connectTimeout(Duration.ofSeconds(5))
         .followRedirects(HttpClient.Redirect.NEVER)
         .build()

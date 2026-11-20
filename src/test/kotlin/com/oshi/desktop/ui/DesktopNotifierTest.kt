@@ -7,7 +7,21 @@ import org.junit.Test
 class DesktopNotifierTest {
 
     @Test
+    fun `Linux fallback is generic and translated`() {
+        val saved = com.oshi.desktop.i18n.Strings.activeTag
+        try {
+            com.oshi.desktop.i18n.Strings.activeTag = "fr"
+            val body = LinuxDesktopNotification.command("Linux", executable = true)!!.last()
+            org.junit.Assert.assertNotEquals("New encrypted message", body)
+            org.junit.Assert.assertFalse(body.startsWith("⟦"))
+        } finally {
+            com.oshi.desktop.i18n.Strings.activeTag = saved
+        }
+    }
+
+    @Test
     fun `Linux fallback is generic and has no message metadata`() {
+        com.oshi.desktop.i18n.Strings.activeTag = "en"
         assertEquals(
             listOf(
                 "/usr/bin/notify-send",

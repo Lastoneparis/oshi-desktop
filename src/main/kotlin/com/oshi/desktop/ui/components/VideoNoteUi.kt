@@ -49,7 +49,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.oshi.desktop.i18n.dt
 import com.oshi.desktop.i18n.t
 import com.oshi.desktop.media.VideoNoteFile
 import com.oshi.desktop.media.VideoNoteFormat
@@ -93,10 +92,12 @@ private fun ProgressRing(fraction: Float, diameter: Dp, stroke: Dp, track: Color
 fun VideoNoteButton(unavailableReason: String?, onClick: () -> Unit) {
     val (source, hovered) = rememberRowInteraction()
     val enabled = unavailableReason == null
-    val label = if (enabled) t("videonote.button") else dt("desktop.videonote.unavailable", unavailableReason)
+    val label = if (enabled) t("videonote.button") else t("conv.videonote.unavailable", unavailableReason)
+    // __LOCK_STOPS_CAMERA__ no tooltip popup under the lock screen.
+    val hiddenByLock = LocalHiddenByLock.current
     TooltipArea(
         tooltip = {
-            Text(
+            if (!hiddenByLock) Text(
                 label,
                 fontSize = 11.sp,
                 color = Ink.strong,
@@ -247,7 +248,7 @@ fun VideoNoteRecorderPanel(
             EventQueue.invokeLater {
                 result.fold(
                     onSuccess = { sealed -> onSend(sealed, VideoNoteWire.Meta(p.note.durationMs.coerceIn(0, VideoNoteWire.MAX_DURATION_MS))); onClose() },
-                    onFailure = { phase = Phase.Failed("The note could not be stored (${it.javaClass.simpleName}).") },
+                    onFailure = { phase = Phase.Failed(t("conv.videonote.store_failed")) },
                 )
             }
         }, "oshi-videonote-seal").apply { isDaemon = true; start() }
@@ -264,7 +265,7 @@ fun VideoNoteRecorderPanel(
             override fun onCapped() { EventQueue.invokeLater { capped = true; stopAndEncode() } }
             override fun onError(message: String) { EventQueue.invokeLater { phase = Phase.Failed(message) } }
         })
-        if (!started) phase = Phase.Failed("Already recording.")
+        if (!started) phase = Phase.Failed(t("conv.videonote.already"))
     }
     DisposableEffect(Unit) {
         onDispose {
@@ -311,7 +312,7 @@ fun VideoNoteRecorderPanel(
             ) {
                 frame?.let { Image(it, null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize()) }
                 when (val p = phase) {
-                    Phase.Starting -> Text(dt("desktop.videonote.starting"), color = Color.White, fontSize = 12.sp)
+                    Phase.Starting -> Text(t("conv.new.opening_camera"), color = Color.White, fontSize = 12.sp)
                     Phase.Encoding, Phase.Sending -> Text(t("videonote.processing"), color = Color.White, fontSize = 12.sp)
                     is Phase.Failed -> Text(p.message, color = Color.White, fontSize = 11.sp, modifier = Modifier.padding(OshiTheme.xl))
                     is Phase.Preview -> if (!playing) Box(
@@ -330,7 +331,7 @@ fun VideoNoteRecorderPanel(
                 style = OshiTheme.typography.labelLarge,
                 color = Ink.strong,
             )
-            if (capped) Text(dt("desktop.videonote.capped"), fontSize = 11.sp, color = Ink.soft)
+            if (capped) Text(t("conv.videonote.capped"), fontSize = 11.sp, color = Ink.soft)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.md), verticalAlignment = Alignment.CenterVertically) {
             when (phase) {
@@ -347,7 +348,7 @@ fun VideoNoteRecorderPanel(
             }
         }
         Text(
-            if (phase is Phase.Preview) dt("desktop.videonote.hint.preview") else dt("desktop.videonote.hint.recording"),
+            if (phase is Phase.Preview) t("conv.videonote.hint.preview") else t("conv.videonote.hint.recording"),
             fontSize = 10.sp,
             color = Ink.soft,
         )
@@ -388,7 +389,7 @@ fun VideoNoteBubble(path: String, announcedDurationMs: Long?, missingNote: Strin
                     .clip(CircleShape)
                     .background(Color(0xFF101018))
                     .focusRing(CircleShape)
-                    .clickable(enabled = playable, onClickLabel = dt("desktop.videonote.play")) {
+                    .clickable(enabled = playable, onClickLabel = t("conv.videonote.play")) {
                         if (playing) { player.stop(); return@clickable }
                         problem = null
                         playing = true
@@ -425,7 +426,7 @@ fun VideoNoteBubble(path: String, announcedDurationMs: Long?, missingNote: Strin
                 }
             }
         }
-        (missingNote ?: thumb?.error?.let { dt("desktop.videonote.unplayable") } ?: problem)?.let {
+        (missingNote ?: thumb?.error?.let { t("conv.videonote.unplayable") } ?: problem)?.let {
             Text(it, fontSize = 10.sp, color = Ink.soft, modifier = Modifier.padding(horizontal = OshiTheme.sm))
         }
     }
@@ -442,7 +443,7 @@ object VideoNoteAvailability {
     fun reason(): String? {
         answer?.let { return it.getOrNull() }
         val r = runCatching { VideoNoteRecorder.unavailableReason() }
-            .recover { "The camera library did not load on this machine (${it.javaClass.simpleName})." }
+            .recover { t("conv.videonote.no_camera_lib") }
         answer = r
         return r.getOrNull()
     }

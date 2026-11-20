@@ -18,6 +18,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.dp
+import com.oshi.desktop.i18n.t
 import androidx.compose.ui.unit.sp
 import com.oshi.desktop.lora.LoRaNodeRoster
 import com.oshi.desktop.lora.NodeMapGeometry
@@ -64,9 +65,9 @@ fun LoRaNodeMap(
         // nodes", and the actual reason is almost always that WE have no fix.
         Text(
             if (myLat == null || myLon == null)
-                "Range needs this radio's own position — it has no GPS fix yet."
+                t("pc.radio.map.noFix")
             else
-                "No node has reported a position yet.",
+                t("pc.radio.map.noNodes"),
             style = OshiTheme.typography.bodySmall,
             color = labelColor,
             modifier = modifier.padding(OshiTheme.sm),
@@ -132,7 +133,7 @@ fun LoRaNodeMap(
                 val x = cx + (p.eastM * pxPerM).toFloat()
                 val y = cy - (p.northM * pxPerM).toFloat()
                 Text(
-                    p.name.ifBlank { "node ${p.num}" },
+                    p.name.ifBlank { "!" + p.num.toString(16) },
                     style = OshiTheme.typography.bodySmall,
                     color = labelColor,
                     modifier = Modifier.offset(
@@ -155,8 +156,7 @@ fun LoRaNodeMap(
         }
         Spacer(Modifier.height(OshiTheme.xxs))
         Text(
-            "Range diagram \u2014 distance and bearing from this radio. " +
-                "Circles are estimated reach; relayed nodes get none.",
+            t("pc.radio.map.caption"),
             style = OshiTheme.typography.bodySmall,
             color = labelColor,
         )

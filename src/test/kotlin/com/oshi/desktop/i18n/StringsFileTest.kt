@@ -276,7 +276,41 @@ class StringsFileTest {
         // sheet + truthful no-wallet wording, LoRa interop/channel strings) plus
         // the OHTTP "privacy relay" settings strings — re-extracted, not hand-added.
         // 4383 → 4387 on 2026-11-10 (4 keys): settings.privacy.ohttp.address{,.not_set,.hint,.invalid}.
-        assertEquals("en Localizable key count", 4387, en.localizable.size)
+        // 4387 → 4389 on 2026-11-16 (2 keys): settings.appearance.oledBlack{,.description}
+        // — __OLED_BLACK_2026_11_16__, written into all 34 .lproj first, then re-extracted.
+        // 4389 → 4423 on 2026-11-18 (34 keys): disguise.* — __PRIVACY_DISGUISE_2026_11_18__,
+        // the phones' "Privacy disguise" strings (iOS branch feat/stego-obfuscation-ios) in
+        // all 34 .lproj, then re-extracted.
+        // 4423 → 4427 on 2026-11-18 (4 keys): rnhint.{chip,explain,setting.title,setting.caption}
+        // — __RESTRICTED_NETWORK_HINT_2026_11_18__ (RN-HINT v1), all 34 .lproj, re-extracted.
+        // 4427 → 4488 on 2026-11-18 (61 keys): chats.merged.* (27, iOS a69e89e1), attach.* (29,
+        // iOS c52f1a8f) and mail.images.* / mail.attachment.open (5, iOS cb5f9875) — the
+        // phones' own lines, appended byte-identical to all 34 .lproj (__DESKTOP_PARITY_2027__).
+        // 4488 → 4610 on 2026-11-19 (122 keys): conv.* — the desktop messaging screens
+        // (__MESSAGES_PARITY_2027__), written into all 34 .lproj with real translations, re-extracted.
+        // 4610 → 4755 on 2026-11-19 (145 keys, merge of feat/desktop-parity-settings): desktop.settings.* plus the desktop.nickname/
+        // background/notifications/reactions/export/account/disguise/devices.mailbox lines that
+        // left the English-only overlay — __DESKTOP_SETTINGS_2027__, translated into all 34
+        // .lproj first, then re-extracted.
+        // 4755 → 5031 on 2026-11-19 (276 keys, merge of feat/desktop-parity-tools): pc.* — __DESKTOP_TOOLS_2027__, the desktop tool
+        // screens (mail, map, AI, radio, calls, scheduled, peers, devices, covert, limits),
+        // written into all 34 .lproj as one delimited block, then re-extracted.
+        // 5031 → 5126 on 2026-11-19 (95 keys): __DESKTOP_MERGE_2027__ — the 22 former English-only
+        // overlay strings (i18n/Desktop/en.json) and 73 media-viewer / scheduled / bubble strings,
+        // all 34 .lproj from OSHI-Desktop/i18n-src/merge, re-extracted.
+        // 5126 → 5215 on 2026-11-19 (89 keys): __DESKTOP_NOTICES_TRANSLATED_2027__ — send outcomes,
+        // notices, reachability, the notification body and the limits ledger (conv.*, pc.*),
+        // from OSHI-Desktop/i18n-src/tools/en_notices.json, re-extracted.
+        // 5215 → 5226 on 2026-11-19 (11 keys): __DESKTOP_MAC_PARITY_A__ — forward to many, reply
+        // privately, profile photo, gallery by type (conv.fa.*), from OSHI-Desktop/i18n-src/feat-a.
+        // 5226 → 5296 on 2026-11-19 (70 keys): __DESKTOP_MAC_PARITY_B_2027__ — privacy, passcode
+        // lock, help, group discovery, camera, photo markup (pc.*), plus markup.undo and
+        // chat.send, which iOS PhotoMarkup used and no catalog defined. (Both blocks merged.)
+        // 5296 → 5302 on 2026-11-19 (6 keys): __PC_STARTUP_STRINGS_2026_11_19__ — desktop.startup.*
+        // (startup failure on Windows/Linux, second launch), all 34 .lproj, re-extracted.
+        // 5302 → 5308 on 2026-11-20 (6 keys): __ATTACHMENT_REFUSAL_I18N_2026_11_20__ desktop.attach.*,
+        // the attachment open-policy refusals, all 34 .lproj, re-extracted.
+        assertEquals("en Localizable key count", 5308, en.localizable.size)
         assertEquals("en InfoPlist key count", 16, en.infoPlist.size)
         assertEquals("Messages", en.localizable["tab.messages"])
         // Spot-check a value with an escape and one with a bare percent.

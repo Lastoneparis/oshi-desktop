@@ -60,7 +60,7 @@ class V2MessagesClient(private val http: V2Http) {
      */
     fun pull(myUserKey: String, afterSeq: Long): V2Pull? {
         val path = "/v2/messages/${DesktopV2Signer.encodeIdentity(myUserKey)}"
-        val resp = http.get(path, query = "after=$afterSeq")   // query is NOT signed
+        val resp = http.get(path, query = "after=$afterSeq" + DesktopCover.pullBudgetQuery())   // query is NOT signed
         if (!resp.isSuccess) return null
         return try {
             val json = JSONObject(resp.body)
@@ -103,7 +103,7 @@ class V2MessagesClient(private val http: V2Http) {
     /** The device view of our mailbox (`x-oshi-device` + signature). */
     fun pullDevice(myUserKey: String, afterSeq: Long): V2DeviceCall<V2Pull> {
         val path = "/v2/messages/${DesktopV2Signer.encodeIdentity(myUserKey)}"
-        val resp = http.get(path, query = "after=$afterSeq", device = true)
+        val resp = http.get(path, query = "after=$afterSeq" + DesktopCover.pullBudgetQuery(), device = true)
         if (!resp.isSuccess) return V2DeviceCall(resp.code, null, resp.body)
         return V2DeviceCall(resp.code, parsePull(resp.body, afterSeq), resp.body)
     }

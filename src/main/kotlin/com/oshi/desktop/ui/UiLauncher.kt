@@ -3,6 +3,7 @@ package com.oshi.desktop.ui
 import com.oshi.desktop.app.OshiClient
 import com.oshi.desktop.net.V2Http
 import com.oshi.desktop.store.DesktopPaths
+import com.oshi.desktop.i18n.t
 import com.oshi.desktop.store.IdentityStore
 import com.oshi.desktop.store.KeyVault
 import com.oshi.desktop.store.SecretStore
@@ -42,6 +43,8 @@ fun runUiCli(args: Array<String>) {
     val verbose = args.contains("--verbose")
     val withMesh = args.contains("--mesh")
     val passphrase = System.getenv("OSHI_PASSPHRASE")?.toCharArray()
+    // __OSHI_LINKS_ON_PC_2026_11_20__ the oshi:// link this launch was started for, if any.
+    val link = args.firstNotNullOfOrNull { com.oshi.desktop.store.InstanceActivation.acceptableLink(it) }
 
     // __DESKTOP_HOME_LOCK_2026_10_29__ One process per data directory, BEFORE any store is
     // opened. Two instances doing read-modify-write on one ratchet blob corrupt the session
@@ -51,16 +54,31 @@ fun runUiCli(args: Array<String>) {
     // which is exactly the behaviour wanted, and an explicit release on a shutdown path would
     // only create a window in which a second instance could start during teardown.
     when (val lock = com.oshi.desktop.store.HomeLock.acquire(home)) {
-        is com.oshi.desktop.store.HomeLock.Outcome.Held -> Unit
+        is com.oshi.desktop.store.HomeLock.Outcome.Held -> {
+            com.oshi.desktop.store.InstanceActivation.listen(home)
+            // Opened when the window registers (after first run / the vault, if needed).
+            if (link != null) com.oshi.desktop.store.InstanceActivation.request(link)
+            ProtocolRegistration.ensureAsync()
+        }
         com.oshi.desktop.store.HomeLock.Outcome.Busy -> {
-            // Said plainly and in one sentence, because the person who caused this just
-            // double-clicked an icon and is owed an explanation, not a stack trace.
+            // __SECOND_LAUNCH_DID_NOTHING_2026_11_19__ The usual case on Windows: the window
+            // is hidden in the notification area and this is the Start menu being clicked.
+            // Hand the request to the running copy; it shows its window.
+            if (com.oshi.desktop.store.InstanceActivation.signal(home, link = link)) return
+            // Said plainly, because the person who caused this just double-clicked an icon
+            // and is owed an explanation, not a stack trace — and in a WINDOW, because a GUI
+            // launch on Windows has no stderr.
             System.err.println(
-                "OSHI is already running on this profile (${home.absolutePath}).\n" +
-                    "Two copies cannot share it: they would corrupt each other's encryption " +
-                    "sessions. Use the window that is already open, or pass --home to run a " +
-                    "second, separate profile.",
+                "OSHI is already running on this profile (${home.absolutePath}), and it did not answer " +
+                    "a request to show its window.",
             )
+            runCatching {
+                startupFailureWindow(
+                    headline = t("desktop.startup.title"),
+                    detail = home.absolutePath,
+                    whatToDo = t("desktop.startup.already_running"),
+                )
+            }
             return
         }
         is com.oshi.desktop.store.HomeLock.Outcome.Unsupported -> {
@@ -74,7 +92,22 @@ fun runUiCli(args: Array<String>) {
         }
     }
 
-    val store = SecretStore.detect()
+    // __OLED_BLACK_2026_11_16__ Theme before any window, so the first one is already right.
+    AppearanceSettings.attach(home)
+    // __MERGED_CHATS_2026_11_18__ before the vault opens: "fresh profile" = no key vault yet.
+    ChatListSettings.attach(home)
+    // __DESKTOP_SETTINGS_2027__ language / text size / default wallpaper, before any window.
+    DisplaySettings.attach(home)
+    // __DESKTOP_PRIVACY_PARITY_2027__ last seen / photo / contacts-only calls / forward & copy.
+    com.oshi.desktop.store.PrivacyPreferences.attach(home)
+    // __DESKTOP_APP_LOCK_2027__ read before any window: a set passcode locks the first one.
+    com.oshi.desktop.store.AppLock.attach(home)
+
+    // __O_BUBBLE_MASCOT_2026_11_16__ Logo → waving O bubble while the vault opens and the
+    // window builds. It closes itself when any window of ours opens; see LaunchSplash.
+    if (!args.contains(LoginItem.HIDDEN_FLAG)) LaunchSplash.show()
+
+    val store = SecretStore.detectFor(File(home, KeyVault.FILE_NAME))
     // Recovery happens before OshiClient's loadOrCreate. An existing profile is NEVER
     // overwritten; on an empty profile the first window lets the person explicitly choose
     // between a fresh identity and importing the mobile recovery key. `--restore-identity`
@@ -185,20 +218,17 @@ private fun reportStartupFailure(e: Exception, home: java.io.File) {
         detail.contains("secret-tool", ignoreCase = true) ||
         detail.contains("keyring", ignoreCase = true) ||
         detail.contains("passphrase", ignoreCase = true)
-    val whatToDo = if (keyStore) {
-        "OSHI keeps your identity key in this computer's key store, and this machine's is " +
-            "not accepting it — on Linux that usually means the login keyring is locked or " +
-            "absent.\n\nYou can either unlock the keyring and start OSHI again, or give OSHI " +
-            "a passphrase of its own by setting OSHI_PASSPHRASE before launching it. Your " +
-            "messages are not lost: nothing here was deleted or overwritten.\n\nProfile: " +
-            home.absolutePath
-    } else {
-        "Nothing was deleted or overwritten. If you reach us about this, the lines above are " +
-            "the ones to send.\n\nProfile: " + home.absolutePath
-    }
+    // __PC_STARTUP_STRINGS_2026_11_19__ in the person's language, and right for THEIR OS:
+    // this used to be English only and talked about a Linux keyring to Windows users.
+    val profile = "\n\n" + t("desktop.startup.profile", home.absolutePath)
+    val whatToDo = when {
+        keyStore && DesktopPaths.isWindows -> t("desktop.startup.keystore.windows")
+        keyStore -> t("desktop.startup.keystore.linux")
+        else -> t("desktop.startup.generic")
+    } + profile
     runCatching {
         startupFailureWindow(
-            headline = "OSHI could not open this account",
+            headline = t("desktop.startup.headline"),
             detail = detail,
             whatToDo = whatToDo,
         )

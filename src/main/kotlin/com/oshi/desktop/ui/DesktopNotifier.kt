@@ -1,5 +1,6 @@
 package com.oshi.desktop.ui
 
+import com.oshi.desktop.i18n.t
 import java.awt.Color
 import java.awt.Graphics2D
 import java.awt.Image
@@ -35,7 +36,7 @@ class DesktopNotifier {
      * Returns whether an icon is actually showing, because a background mode with no icon and
      * no window would be a process nobody can reach.
      */
-    fun install(openLabel: String = "Open OSHI", quitLabel: String = "Quit OSHI", onOpen: () -> Unit = {}, onQuit: (() -> Unit)? = null): Boolean {
+    fun install(openLabel: String = t("share.open_oshi"), quitLabel: String = t("desktop.background.quit"), onOpen: () -> Unit = {}, onQuit: (() -> Unit)? = null): Boolean {
         if (icon != null) return true
         if (!SystemTray.isSupported()) return false
         return runCatching {
@@ -61,16 +62,21 @@ class DesktopNotifier {
      * decrypted text reaches this class otherwise. Both null is the original
      * behaviour, byte for byte.
      */
-    fun notifyIncomingMessage(sender: String? = null, preview: String? = null) {
+    fun notifyIncomingMessage(senderIn: String? = null, previewIn: String? = null, sound: Boolean = false) {
+        // __DESKTOP_APP_LOCK_2027__ a locked window shows no name and no text in a notification.
+        val locked = com.oshi.desktop.store.AppLock.locked
+        val sender = senderIn.takeUnless { locked }
+        val preview = previewIn.takeUnless { locked }
+        val tone = if (sound) MESSAGE_SOUND else null
         val title = sender?.takeIf { it.isNotBlank() } ?: "OSHI"
-        val body = preview?.takeIf { it.isNotBlank() } ?: "New encrypted message"
+        val body = preview?.takeIf { it.isNotBlank() } ?: t("pc.notify.new_message")
         if (sender != null || preview != null) {
             // The macOS and Linux helpers take a body only (their title is the app),
             // so the sender rides in the body there. The tray has a real caption and
             // uses it. Same information either way, no new parameters on helpers that
             // every other notification path shares.
             val oneLine = if (sender != null && preview != null) "$title: $body" else body
-            if (MacNotification.notifyIfAvailable(oneLine)) return
+            if (MacNotification.notifyIfAvailable(oneLine, sound = tone)) return
             icon?.let { trayIcon ->
                 runCatching { trayIcon.displayMessage(title, body, TrayIcon.MessageType.INFO) }
                 return
@@ -78,19 +84,19 @@ class DesktopNotifier {
             LinuxDesktopNotification.notifyIfAvailable(oneLine)
             return
         }
-        notifyIncomingMessageGeneric()
+        notifyIncomingMessageGeneric(tone)
     }
 
-    private fun notifyIncomingMessageGeneric() {
+    private fun notifyIncomingMessageGeneric(tone: String? = null) {
         // Do not create a tray icon from the poll thread: desktop environments often
         // require tray setup to happen on the UI thread. If it was unavailable at startup,
         // the conversation still updates normally and there is simply no toast. Desktop
         // shells can also reject a notification after a suspend, tray restart or session
         // change; that is a presentation failure, never a message-processing failure.
-        if (MacNotification.notifyIfAvailable("New encrypted message")) return
+        if (MacNotification.notifyIfAvailable(t("pc.notify.new_message"), sound = tone)) return
         icon?.let { trayIcon ->
             runCatching {
-                trayIcon.displayMessage("OSHI", "New encrypted message", TrayIcon.MessageType.INFO)
+                trayIcon.displayMessage("OSHI", t("pc.notify.new_message"), TrayIcon.MessageType.INFO)
             }
             return
         }
@@ -126,13 +132,40 @@ class DesktopNotifier {
         LinuxDesktopNotification.notifyIfAvailable(body)
     }
 
+    private companion object {
+        /** A short macOS system sound for a message (calls keep "Submarine"). */
+        const val MESSAGE_SOUND = "Tink"
+    }
+
     fun close() {
         val current = icon ?: return
         runCatching { SystemTray.getSystemTray().remove(current) }
         icon = null
     }
 
-    private fun iconImage(): Image = BufferedImage(32, 32, BufferedImage.TYPE_INT_ARGB).also { image ->
+    /**
+     * __TRAY_ICON_WAS_A_PURPLE_DOT_2026_11_19__ The OSHI logo, pre-scaled smoothly to every tray
+     * size Windows/Linux use at 100–200 % (a multi-resolution image, so HiDPI picks the sharp
+     * one). It was a generated purple dot, which nobody recognised as "the way back into OSHI"
+     * once the window was closed to the tray.
+     */
+    private fun iconImage(): Image = runCatching {
+        val src = DesktopNotifier::class.java.getResourceAsStream(ScreenFit.LOGO_RESOURCE)
+            ?.use { javax.imageio.ImageIO.read(it) } ?: return fallbackIcon()
+        val variants = listOf(16, 20, 24, 32, 40, 48, 64).map { px ->
+            BufferedImage(px, px, BufferedImage.TYPE_INT_ARGB).also { out ->
+                val g = out.createGraphics()
+                try {
+                    g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION, java.awt.RenderingHints.VALUE_INTERPOLATION_BICUBIC)
+                    g.setRenderingHint(java.awt.RenderingHints.KEY_RENDERING, java.awt.RenderingHints.VALUE_RENDER_QUALITY)
+                    g.drawImage(src.getScaledInstance(px, px, Image.SCALE_SMOOTH), 0, 0, null)
+                } finally { g.dispose() }
+            }
+        }
+        java.awt.image.BaseMultiResolutionImage(*variants.toTypedArray()) as Image
+    }.getOrElse { fallbackIcon() }
+
+    private fun fallbackIcon(): Image = BufferedImage(32, 32, BufferedImage.TYPE_INT_ARGB).also { image ->
         val graphics: Graphics2D = image.createGraphics()
         try {
             graphics.color = Color(86, 22, 236)
@@ -195,7 +228,7 @@ internal object LinuxDesktopNotification {
     internal fun command(
         osName: String,
         executable: Boolean,
-        body: String = "New encrypted message",
+        body: String = t("pc.notify.new_message"),
         urgency: String = "normal",
     ): List<String>? {
         if (!osName.lowercase(Locale.ROOT).contains("linux") || !executable) return null
@@ -208,7 +241,7 @@ internal object LinuxDesktopNotification {
         )
     }
 
-    fun notifyIfAvailable(body: String = "New encrypted message", urgency: String = "normal") {
+    fun notifyIfAvailable(body: String = t("pc.notify.new_message"), urgency: String = "normal") {
         val args = command(System.getProperty("os.name", ""), Files.isExecutable(notifySend), body, urgency) ?: return
         // Do not wait on the desktop notification daemon from the polling thread. Its response
         // (or absence in a minimal session) must never delay durable message storage.

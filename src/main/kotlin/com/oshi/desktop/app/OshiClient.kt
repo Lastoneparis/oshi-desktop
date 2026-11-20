@@ -182,6 +182,10 @@ class OshiClient(
     private val localDataRoot: ByteArray = LocalDataKeys.root(vault)
 
     val contacts = ContactStore(File(home, "contacts.json"), LocalDataKeys.derive(localDataRoot, LocalDataKeys.CONTACTS))
+    /** __PROFILE_PHOTOS_DESKTOP_2027__ contacts' pictures and our own, sealed, one file each. */
+    val photos = com.oshi.desktop.store.ContactPhotoStore(
+        File(home, "contact-photos"), LocalDataKeys.derive(localDataRoot, LocalDataKeys.CONTACT_PHOTOS),
+    )
     // __BLOCKED_NOTICE_SWITCH_2026_09_23__ rate-limit stamps for the "you are blocked" notice.
     private val blockedNotice = BlockedNoticeGate(
         File(home, "blocked_notice.json"), LocalDataKeys.derive(localDataRoot, LocalDataKeys.BLOCKED_NOTICE),
@@ -225,6 +229,9 @@ class OshiClient(
      */
     val offlineOnly = OfflineOnlyStore(File(home, OfflineOnlyStore.FILE_NAME))
 
+    /** __CONVERSATION_PIN_MUTE_2027__ Pinned and muted (1:1) conversations, on this machine only. */
+    val conversationPrefs = com.oshi.desktop.store.ConversationPreferences(File(home, com.oshi.desktop.store.ConversationPreferences.FILE_NAME))
+
     /**
      * __DESKTOP_PROFILE_LINKS_2026_10_29__ Each contact's shared profile links. See
      * [ProfileLinksStore]; every string in it was chosen by a peer, so nothing is fetched,
@@ -248,6 +255,13 @@ class OshiClient(
     val blobs = V2BlobClient(http, identity)
     val account = V2AccountClient(http)
     private val routerState = RouterState(File(home, RouterState.FILE_NAME))
+    /**
+     * __PRIVACY_DISGUISE_2026_11_18__ 1:1 messages waiting for the disguised connection
+     * (see [CoverOutbox]). Rows a previous process left waiting become "not delivered" on
+     * the first tick — an in-memory retry does not survive a restart.
+     */
+    val coverOutbox = CoverOutbox(File(home, CoverOutbox.FILE_NAME))
+    @Volatile private var coverOutboxRecovered = false
 
     /**
      * __PER_DEVICE_MAILBOX_2026_09_23__ This install as one device of its account
@@ -450,6 +464,13 @@ class OshiClient(
             machine = CallStateMachine(address, contacts, syncCursor.deviceId()).also { m ->
                 // __BLOCKED_BY_PEER_2026_09_24__ never dial a peer that told us it blocks us.
                 m.isBlockedBy = { peer -> blockedByPeers.isBlockedBy(peer) }
+                // __DESKTOP_PRIVACY_PARITY_2027__ Calls from Contacts Only (iOS: has a conversation).
+                m.mayRing = { peer ->
+                    com.oshi.desktop.store.PrivacyPreferences.mayRing(peer, { p ->
+                        val want = com.oshi.desktop.mesh.MeshProtocol.normalizeKey(p)
+                        messages.conversations().any { com.oshi.desktop.mesh.MeshProtocol.normalizeKey(it.conversationId) == want }
+                    })
+                }
             },
             // AUDIO. Opens a UDP socket, the microphone and the speaker on a connected
             // call, signals ICE candidates, and ENDS the call if no device can be opened
@@ -674,6 +695,13 @@ class OshiClient(
     var readReceiptsEnabled: Boolean
         get() = receiptValues.read
         set(value) { receiptValues = receiptValues.copy(read = value); receiptPreferences.save(receiptValues) }
+    /**
+     * __TYPING_PRIVACY_2027__ iOS `settings.privacy.typing`: OFF means this account never
+     * tells anyone it is typing. Inbound typing from others is still shown.
+     */
+    var typingIndicatorsEnabled: Boolean
+        get() = receiptValues.typing
+        set(value) { receiptValues = receiptValues.copy(typing = value); receiptPreferences.save(receiptValues) }
 
     private val running = AtomicBoolean(false)
     private var timers: ScheduledExecutorService? = null
@@ -690,6 +718,9 @@ class OshiClient(
             // to keep in step here, so there is no reason to look at it at all.
             if (BlockPolicy.isBlocked(contacts, m.senderPublicKey)) {
                 log("client: dropped mesh ${m.type} from a blocked contact ${m.senderPublicKey.take(12)}…")
+            } else if (m.type == com.oshi.desktop.group.PublicGroupDirectory.TYPE) {
+                // __DESKTOP_GROUP_DISCOVERY_2027__ a public group someone nearby announces.
+                publicGroups.offer(m.payload, m.senderPublicKey, System.currentTimeMillis())
             } else {
                 onMeshTraffic("${m.type} from ${m.senderName} (${m.platform}): ${m.payload.take(200)}")
                 // __MESH_IS_NO_LONGER_OPAQUE_2026_10_28__ PARITY.md row 0.16's last
@@ -798,41 +829,68 @@ class OshiClient(
             Thread(r, "oshi-poll").apply { isDaemon = true }
         }
         timers = timer
+        // __DESKTOP_GROUP_DISCOVERY_2027__ re-announce our public groups, as the phones do.
+        timer.scheduleWithFixedDelay(
+            { runCatching { announcePublicGroups() } },
+            2_000L, com.oshi.desktop.group.PublicGroupDirectory.PERIOD_MS, TimeUnit.MILLISECONDS,
+        )
 
         // Publishing a prekey bundle is what makes iOS and Android route V2 traffic to
         // this address, so it happens on the poll thread AFTER the gate has been read —
         // never eagerly at construction, and never while the gate is closed.
-        timer.scheduleWithFixedDelay({
-            PollGuard.run(log) {
-                router.refreshConfig()
-                // Re-checked hourly, not once per process: the pool drains while we run, and
-                // whether THIS install may refill the account bundle can change (DeviceMailbox).
-                if (config.isEnabledCached() && (!published || System.currentTimeMillis() - publishedAt > REPUBLISH_CHECK_MS)) {
-                    val wasPublished = published
-                    published = router.publishBundleIfNeeded()
-                    if (published) publishedAt = System.currentTimeMillis()
-                    if (published && !wasPublished) log("client: prekey bundle published — peers can now reach us over V2")
+        // __COVER_JITTER_2026_11_18__ A one-shot that re-arms itself rather than a fixed-delay
+        // schedule, so the gap to the next poll can be drawn per tick: the caller's interval
+        // with the disguise off, 2.5–7.5 s with it on (DesktopCover.nextPollDelayMs). A fixed
+        // 3 s heartbeat would be the most recognisable feature of disguised traffic.
+        lateinit var pollTick: Runnable
+        pollTick = Runnable {
+            try {
+                pollBody()
+            } finally {
+                if (running.get()) runCatching {
+                    timer.schedule(pollTick, com.oshi.desktop.net.DesktopCover.nextPollDelayMs(pollIntervalMs), TimeUnit.MILLISECONDS)
                 }
-                // __PER_DEVICE_MAILBOX_2026_09_23__ register / keep this device's bundle fresh
-                // (a no-op while the flag is off), BEFORE the poll picks device or legacy mode.
-                // After the account publish: a brand-new identity is only authorisable on the
-                // device routes once its first publish has bound its signing key.
-                runCatching { deviceMailbox.tick() }
-                    .onFailure { log("client: device mailbox tick failed: ${it.javaClass.simpleName}: ${it.message}") }
-                router.poll()
-                tick()
-                // __DESKTOP_REPORT_2026_09_23__ a report filed offline goes out once the
-                // server answers again ("sent automatically" is what the UI promises).
-                if (System.currentTimeMillis() - lastReportRetryMs > 10 * 60_000L) {
-                    lastReportRetryMs = System.currentTimeMillis()
-                    runCatching { reports.retryPending() }
-                }
-                // __DEVSYNC_DIRECT_2026_09_22__ gate + engine lifecycle (a no-op while the flag is off).
-                runCatching { devSync.tick() }.onFailure { log("client: devsync tick failed: ${it.javaClass.simpleName}: ${it.message}") }
             }
-        }, 0, pollIntervalMs, TimeUnit.MILLISECONDS)
+        }
+        timer.schedule(pollTick, 0, TimeUnit.MILLISECONDS)
 
         if (withMesh) mesh.start()
+    }
+
+    /** One receive tick — the body the poll schedule above runs. */
+    private fun pollBody() {
+        PollGuard.run(log) {
+            router.refreshConfig()
+            // Re-checked hourly, not once per process: the pool drains while we run, and
+            // whether THIS install may refill the account bundle can change (DeviceMailbox).
+            if (config.isEnabledCached() && (!published || System.currentTimeMillis() - publishedAt > REPUBLISH_CHECK_MS)) {
+                val wasPublished = published
+                published = router.publishBundleIfNeeded()
+                if (published) publishedAt = System.currentTimeMillis()
+                if (published && !wasPublished) log("client: prekey bundle published — peers can now reach us over V2")
+            }
+            // __PER_DEVICE_MAILBOX_2026_09_23__ register / keep this device's bundle fresh
+            // (a no-op while the flag is off), BEFORE the poll picks device or legacy mode.
+            // After the account publish: a brand-new identity is only authorisable on the
+            // device routes once its first publish has bound its signing key.
+            runCatching { deviceMailbox.tick() }
+                .onFailure { log("client: device mailbox tick failed: ${it.javaClass.simpleName}: ${it.message}") }
+            val pulledBefore = router.lastPullOkMs
+            router.poll()
+            // __COVER_RETRY_KICK_2026_11_18__ the (disguised) path answered: parked rows retry now.
+            if (router.lastPullOkMs != pulledBefore) coverOutbox.kick()
+            tick()
+            // __DESKTOP_REPORT_2026_09_23__ a report filed offline goes out once the
+            // server answers again ("sent automatically" is what the UI promises).
+            if (System.currentTimeMillis() - lastReportRetryMs > 10 * 60_000L) {
+                lastReportRetryMs = System.currentTimeMillis()
+                runCatching { reports.retryPending() }
+            }
+            // __DEVSYNC_DIRECT_2026_09_22__ gate + engine lifecycle (a no-op while the flag is off).
+            runCatching { devSync.tick() }.onFailure { log("client: devsync tick failed: ${it.javaClass.simpleName}: ${it.message}") }
+            // __PRIVACY_DISGUISE_2026_11_18__ after the poll: same thread, same sessions.
+            runCatching { retryCoverOutbox() }.onFailure { log("client: cover outbox failed: ${it.javaClass.simpleName}: ${it.message}") }
+        }
     }
 
     /**
@@ -918,7 +976,15 @@ class OshiClient(
 
     // ------------------------------------------------------------------ send
 
-    enum class SendOutcome { SENT, BLOCKED, NO_V2_PATH, GATE_CLOSED, REFUSED_CONTROL_PAYLOAD }
+    enum class SendOutcome {
+        SENT, BLOCKED, NO_V2_PATH, GATE_CLOSED, REFUSED_CONTROL_PAYLOAD,
+        /**
+         * __PRIVACY_DISGUISE_2026_11_18__ "Disguise OSHI traffic" is on and the disguised send
+         * did not get through: the row is PENDING, parked in [coverOutbox], retried over the
+         * disguised path only. Never sent undisguised.
+         */
+        WAITING_FOR_COVER,
+    }
 
     /**
      * Send text to a peer and record it locally.
@@ -951,9 +1017,17 @@ class OshiClient(
         // decoding.
         val body = com.oshi.desktop.msg.MessageText.normalizedForSend(text)
         val wire = replyTo?.let { com.oshi.desktop.msg.ReplyEnvelope.wrap(body, it) } ?: body
+        // __RESTRICTED_NETWORK_HINT_2026_11_18__ RN-HINT v1: with the disguise on and the
+        // sender's "let contacts know" switch on, the ENCRYPTED text carries an invisible
+        // suffix (on the reply's `content` value, never after the JSON). The local row keeps
+        // the clean text; only the relay lane carries the marked one.
+        val marked = if (com.oshi.desktop.net.DesktopCover.shouldMarkOutgoing()) {
+            val m = com.oshi.desktop.msg.RestrictedNetworkHint.mark(body)
+            replyTo?.let { com.oshi.desktop.msg.ReplyEnvelope.wrap(m, it) } ?: m
+        } else wire
         // __SHARED_NICKNAME_2026_09_22__ Read BEFORE the row is appended: "first reply".
         val firstReply = !hasSentUserMessage(peerAddress)
-        val outcome = sendPlaintext(peerAddress, wire, storeRow = true)
+        val outcome = sendPlaintext(peerAddress, wire, storeRow = true, relayText = marked)
         if (outcome == SendOutcome.SENT) afterUserSend(peerAddress, firstReply)
         return outcome
     }
@@ -968,6 +1042,36 @@ class OshiClient(
     val ownNickname: String?
         get() = vault.get(OWN_NICKNAME_ACCOUNT)
             ?.let { PeerNickname.sanitize(String(it, Charsets.UTF_8)) }
+
+    /**
+     * __PROFILE_PHOTOS_DESKTOP_2027__ This account's own picture (base64 JPEG), or null.
+     * Travels in every profile update as `profileImageData`, as on both phones.
+     */
+    val ownPhotoBase64: String? get() = photos.get(com.oshi.desktop.store.ContactPhotoStore.SELF)
+
+    /** Something to introduce ourselves with: a nickname or a picture. */
+    private val hasOwnProfile: Boolean get() = ownNickname != null || ownPhotoBase64 != null
+
+    /** Outcome of [setOwnPhoto]. [withheld] = stored, deliberately not broadcast (shared identity). */
+    data class PhotoUpdate(val ok: Boolean, val sent: Int, val eligible: Int, val withheld: Boolean = false)
+
+    /**
+     * Set (bytes of any image ImageIO reads) or remove (null) this account's picture, then tell
+     * every eligible contact — the phones' `setProfileImage` + broadcast. Blocking I/O.
+     * Returns ok=false when the image could not be read.
+     */
+    fun setOwnPhoto(imageBytes: ByteArray?): PhotoUpdate {
+        val jpeg = imageBytes?.let { com.oshi.desktop.msg.ProfilePhotoWire.prepare(it) ?: return PhotoUpdate(false, 0, 0) }
+        val b64 = jpeg?.let { java.util.Base64.getEncoder().encodeToString(it) }
+        if (!photos.set(com.oshi.desktop.store.ContactPhotoStore.SELF, b64)) return PhotoUpdate(true, 0, 0)
+        if (!mayBroadcastProfile) {
+            log("client: picture stored; NOT broadcast — this identity is shared with a phone (or its origin is unknown)")
+            return PhotoUpdate(true, 0, 0, withheld = true)
+        }
+        val (sent, eligible) = broadcastProfile(clear = ownNickname == null)
+        log("client: picture ${if (b64 == null) "removed" else "set"}; told $sent/$eligible contact(s)")
+        return PhotoUpdate(true, sent, eligible)
+    }
 
     /** Peers already asked for their profile in this process — one request per peer per run. */
     private val profileRequested = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
@@ -1009,7 +1113,12 @@ class OshiClient(
      */
     fun sendProfileUpdate(peerAddress: String, clear: Boolean = false): SendOutcome {
         if (!mayBroadcastProfile) return SendOutcome.REFUSED_CONTROL_PAYLOAD
-        return sendPlaintext(peerAddress, ProfileUpdateWire.encode(ownNickname, clear), storeRow = false)
+        return sendPlaintext(peerAddress, ProfileUpdateWire.encode(
+                ownNickname,
+                clear,
+                // __MERGE_AB_PROFILE_PHOTO_PRIVACY__ Settings › Privacy › Profile Photo gates A's picture.
+                com.oshi.desktop.store.PrivacyPreferences.outgoingProfilePhoto(ownPhotoBase64),
+            ), storeRow = false)
     }
 
     /**
@@ -1073,7 +1182,7 @@ class OshiClient(
      * phones do exactly this, `isFirstMessage → sendProfileUpdate`).
      */
     private fun afterUserSend(peerAddress: String, firstReply: Boolean) {
-        if (firstReply && ownNickname != null && mayBroadcastProfile) runCatching { sendProfileUpdate(peerAddress) }
+        if (firstReply && hasOwnProfile && mayBroadcastProfile) runCatching { sendProfileUpdate(peerAddress) }
     }
 
     /**
@@ -1084,7 +1193,9 @@ class OshiClient(
      * having to rename.
      */
     private fun maybeRequestProfile(peerAddress: String) {
-        if (contacts.get(peerAddress)?.sharedNickname != null) return
+        // __PROFILE_PHOTOS_DESKTOP_2027__ a known name is not enough any more: a contact whose
+        // nickname arrived before this client read pictures is asked once per run for it too.
+        if (contacts.get(peerAddress)?.sharedNickname != null && photos.get(peerAddress) != null) return
         // __FIRST_CONTACT_NICKNAME_2026_09_23__ No "have we written to them" gate on ASKING any
         // more: the request discloses nothing of ours, and the peer's own gate (answer only
         // someone THEY wrote to) is satisfied by the very message we are reacting to. With the
@@ -1118,7 +1229,13 @@ class OshiClient(
             ).getOrThrow()
         }
 
-    private fun sendPlaintext(peerAddress: String, text: String, storeRow: Boolean): SendOutcome {
+    private fun sendPlaintext(
+        peerAddress: String,
+        text: String,
+        storeRow: Boolean,
+        /** What the RELAY lane carries (RN-HINT marker included); the row and the radio get [text]. */
+        relayText: String = text,
+    ): SendOutcome {
         // Through BlockPolicy, never through `contacts.isBlocked` directly: the store's
         // lookup is exact, and a block set under one base64 spelling has to hold against
         // every other spelling of the same key. See BlockPolicy's class note.
@@ -1170,7 +1287,10 @@ class OshiClient(
             val sent = when (lane) {
                 com.oshi.desktop.lora.DesktopTransportPolicy.Lane.RELAY ->
                     // A stored row is a user message: its other devices get a sent-copy (§3.6).
-                    router.sendText(peerAddress, text.toByteArray(Charsets.UTF_8), msgId, selfCopy = storeRow)
+                    // Dated with the row's own time: the envelope `ts` is what the receiver sorts
+                    // by, so sender and receiver show the same instant (__RESEND_KEEPS_DATE__).
+                    router.sendText(peerAddress, relayText.toByteArray(Charsets.UTF_8), msgId, selfCopy = storeRow,
+                        sentAtMs = if (storeRow) now else null)
                 com.oshi.desktop.lora.DesktopTransportPolicy.Lane.RADIO ->
                     loraSendOshiMessage(peerAddress, text, storeRow = false, messageId = msgId)
             }
@@ -1178,6 +1298,14 @@ class OshiClient(
         }
         // __DESKTOP_MESSAGE_PUSH_2026_09_23__ user-visible rows only; silent control payloads
         // (profile, receipts, typing, group state…) never wake anyone — same catalog as the phones.
+        // __PRIVACY_DISGUISE_2026_11_18__ FAIL-CLOSED, and SAID so. With the disguise on, a
+        // user message the disguised lane did not take waits for it — Android's rule. Only a
+        // row the user typed (`storeRow`): control traffic (typing, receipts, profile) is not
+        // queued, it is simply not sent, which is also Android's rule. Blocked and refused
+        // outcomes never get here; an offline-only conversation is not the internet's to wait for.
+        val waitForCover = storeRow && outcome != SendOutcome.SENT && internetAllowed &&
+            com.oshi.desktop.net.DesktopCover.isEnabled()
+        if (waitForCover) outcome = SendOutcome.WAITING_FOR_COVER
         if (storeRow && outcome == SendOutcome.SENT && !ControlPrefix.suppressesPush(text)) {
             messagePush.wakeDirect(peerAddress, msgId)
         }
@@ -1194,8 +1322,13 @@ class OshiClient(
                     // Our own clock, not something read off a wire — recorded as such so a
                     // later reader never has to guess which of the four epochs this was.
                     sentAtSource = TimestampSource.LOCAL_CLOCK,
-                    deliveryStatus = if (outcome == SendOutcome.SENT) DeliveryStatus.SENT else DeliveryStatus.FAILED,
+                    deliveryStatus = when (outcome) {
+                        SendOutcome.SENT -> DeliveryStatus.SENT
+                        SendOutcome.WAITING_FOR_COVER -> DeliveryStatus.PENDING
+                        else -> DeliveryStatus.FAILED
+                    },
                     transport = when {
+                        outcome == SendOutcome.WAITING_FOR_COVER -> CoverOutbox.TRANSPORT_WAITING
                         outcome != SendOutcome.SENT -> "none"
                         usedLane == com.oshi.desktop.lora.DesktopTransportPolicy.Lane.RADIO -> "lora"
                         else -> "relay-v2"
@@ -1203,6 +1336,7 @@ class OshiClient(
                 )
             )
         }
+        if (waitForCover) coverOutbox.park(peerAddress, msgId, relayText, sentAtMs = now)
         contacts.seen(peerAddress, now)
         if (usedLane == com.oshi.desktop.lora.DesktopTransportPolicy.Lane.RADIO && storeRow) {
             armRadioEscalation(peerAddress, msgId, text)
@@ -1278,13 +1412,100 @@ class OshiClient(
                 // Same msgId on purpose: one logical message, one id across every transport,
                 // so the receiver's cross-transport dedup sees a duplicate rather than a
                 // second bubble if the radio copy turns up later.
-                if (router.sendText(peerAddress, text.toByteArray(Charsets.UTF_8), msgId, selfCopy = true)) {
+                if (router.sendText(peerAddress, text.toByteArray(Charsets.UTF_8), msgId, selfCopy = true, sentAtMs = row?.sentAtMs)) {
                     onLoRa("radio went unanswered for ${msgId.take(8)}… — the internet picked it up")
                 } else {
                     onLoRa("radio went unanswered for ${msgId.take(8)}… and the relay could not take it either")
                 }
             }
         }, com.oshi.desktop.lora.DesktopTransportPolicy.ACK_WINDOW_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+    }
+
+    /**
+     * __PRIVACY_DISGUISE_2026_11_18__ One pass over [coverOutbox], from the poll tick.
+     *
+     * Each due row is re-tried over the relay lane ONLY — which, with the switch on, is the
+     * disguised lane ([com.oshi.desktop.net.V2Http] refuses to go direct). The switch is
+     * re-read here: if it was turned OFF while rows waited, they are not silently sent
+     * undisguised now (the user asked for them to wait for the disguise, and turning it off
+     * is a different request); they become "not delivered", a manual resend away.
+     */
+    /** Ids of inbound texts whose RN-HINT marker [dispatch] stripped, until [storeInbound] stores them. */
+    private val restrictedHinted: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /** A resumed row is re-marked by today's switches (the row itself is stored clean). */
+    private fun hintedForResend(text: String): String {
+        if (!com.oshi.desktop.net.DesktopCover.shouldMarkOutgoing()) return text
+        val reply = com.oshi.desktop.msg.ReplyEnvelope.unwrap(text)
+        if (text.startsWith(com.oshi.desktop.msg.ReplyEnvelope.REPLY_PREFIX) && reply != null) {
+            val o = org.json.JSONObject(text.removePrefix(com.oshi.desktop.msg.ReplyEnvelope.REPLY_PREFIX))
+            o.put("content", com.oshi.desktop.msg.RestrictedNetworkHint.mark(o.optString("content", "")))
+            return com.oshi.desktop.msg.ReplyEnvelope.REPLY_PREFIX + o.toString()
+        }
+        return if (com.oshi.desktop.msg.ReplyEnvelope.isWrapped(text) || ControlPrefix.isControl(text)) text
+        else com.oshi.desktop.msg.RestrictedNetworkHint.mark(text)
+    }
+
+    internal fun retryCoverOutbox() {
+        if (!coverOutboxRecovered) {
+            coverOutboxRecovered = true
+            for ((conv, id) in coverOutbox.recoverAfterRestart()) {
+                // __COVER_RESUME_AFTER_RESTART_2026_11_18__ a plain text still within the hour,
+                // with the disguise still on, is sent again (same id, same date); the rest fail.
+                val row = messages.messages(conv).firstOrNull { it.id == id && it.fromMe }
+                val text = row?.content
+                // __COVER_MEDIA_RETRY_2026_11_18__ an attachment resumes too when its sealed
+                // file can still be read (same id, same date); a text as before.
+                val isMedia = row?.mediaType != null || row?.mediaRef != null
+                val media = if (row != null && isMedia) parkedMediaFromRow(row) else null
+                val resume = row != null && (isMedia || !text.isNullOrBlank()) &&
+                    CoverOutbox.resumeAfterRestart(
+                        com.oshi.desktop.net.DesktopCover.isEnabled(), isText = !isMedia,
+                        ageMs = System.currentTimeMillis() - row.sentAtMs,
+                        mediaReadable = media != null,
+                    )
+                if (resume && isMedia) { parkedMedia[id] = media!!; coverOutbox.resume(conv, id, "", row!!.sentAtMs, media = true) }
+                else if (resume) coverOutbox.resume(conv, id, hintedForResend(text!!), row!!.sentAtMs)
+                else messages.settlePending(conv, id, DeliveryStatus.FAILED, "none")
+            }
+        }
+        if (!com.oshi.desktop.net.DesktopCover.isEnabled()) {
+            for (p in coverOutbox.drain()) {
+                parkedMedia.remove(p.messageId)
+                messages.settlePending(p.conversationId, p.messageId, DeliveryStatus.FAILED, "none")
+            }
+            return
+        }
+        for (p in coverOutbox.due()) {
+            val stillAllowed = com.oshi.desktop.msg.OfflineOnlyPayload.internetAllowed(
+                globalInternetAllowed = !transportPreferences.load().neverOverInternet,
+                conversationIsOfflineOnly = offlineOnly.isOfflineOnly(p.conversationId),
+            )
+            val delivered = stillAllowed && config.isEnabledCached() && runCatching {
+                if (p.media) {
+                    // __COVER_MEDIA_RETRY_2026_11_18__ re-sealed and re-uploaded, same id and date.
+                    val m = parkedMedia[p.messageId]
+                        ?: messages.message(p.conversationId, p.messageId)?.let(::parkedMediaFromRow)?.also { parkedMedia[p.messageId] = it }
+                    m != null && attemptMedia(p.conversationId, m, p.messageId, p.sentAtMs) == MediaAttempt.SENT
+                } else {
+                    router.sendText(p.conversationId, p.text.toByteArray(Charsets.UTF_8), p.messageId, selfCopy = true, sentAtMs = p.sentAtMs)
+                }
+            }.getOrDefault(false)
+            when (coverOutbox.record(p, delivered)) {
+                CoverOutbox.Verdict.DELIVERED -> {
+                    parkedMedia.remove(p.messageId)
+                    messages.settlePending(p.conversationId, p.messageId, DeliveryStatus.SENT, "relay-v2")
+                    if (p.media || !ControlPrefix.suppressesPush(p.text)) messagePush.wakeDirect(p.conversationId, p.messageId)
+                    log("client: ${p.messageId.take(8)}… left on a disguised retry")
+                }
+                CoverOutbox.Verdict.GAVE_UP -> {
+                    parkedMedia.remove(p.messageId)
+                    messages.settlePending(p.conversationId, p.messageId, DeliveryStatus.FAILED, "none")
+                    log("client: ${p.messageId.take(8)}… waited an hour for the disguised connection — not delivered")
+                }
+                CoverOutbox.Verdict.STILL_WAITING -> Unit
+            }
+        }
     }
 
     /** True when this peer can be reached over V2 right now (session or fetchable bundle). */
@@ -1444,8 +1665,11 @@ class OshiClient(
         mediaType: MediaType? = null,
         /** __VIDEO_NOTE_2026_09_24__ a round video note (docs/VIDEO_NOTE_SPEC.md); null = ordinary. */
         videoNote: com.oshi.desktop.media.VideoNoteWire.Meta? = null,
+        /** __VIEW_ONCE_DESKTOP_2027__ photo, video or voice note that opens once (ignored for other types). */
+        viewOnce: Boolean = false,
     ): SendOutcome {
         val mime = if (videoNote != null) com.oshi.desktop.media.VideoNoteWire.MIME else probeMime(file)
+        val type = if (videoNote != null) MediaType.VIDEO else mediaType ?: MediaType.forMime(mime)
         return sendMedia(
             peerAddress = peerAddress,
             // Through the vault: a GIF from GifOutbox is sealed at rest (a user's own file
@@ -1456,6 +1680,7 @@ class OshiClient(
             mediaType = if (videoNote != null) MediaType.VIDEO else mediaType ?: MediaType.forMime(mime),
             localRef = file.absolutePath,
             videoNote = videoNote,
+            viewOnce = viewOnce && com.oshi.desktop.ui.state.ViewOnceRules.canSendViewOnce(type, videoNote != null),
         )
     }
 
@@ -1484,6 +1709,53 @@ class OshiClient(
         )
     }
 
+    /**
+     * __COVER_MEDIA_RETRY_2026_11_18__ What a parked attachment needs to be sent again. Kept in
+     * memory for the life of the process ([bytes] included, so a contact card — which has no
+     * file — can be retried too); after a restart it is rebuilt from the row and its sealed
+     * file ([parkedMediaFromRow]), and an attachment with no readable file is "not delivered".
+     */
+    private class ParkedMedia(
+        val bytes: ByteArray,
+        val filename: String,
+        val mime: String,
+        val mediaType: MediaType,
+        val videoNote: com.oshi.desktop.media.VideoNoteWire.Meta?,
+        /** __VIEW_ONCE_DESKTOP_2027__ `isViewOnce:true` on the key message (1:1 only, as on the phones). */
+        val viewOnce: Boolean = false,
+    )
+    private val parkedMedia = java.util.concurrent.ConcurrentHashMap<String, ParkedMedia>()
+
+    /** One attempt at an attachment: session, seal, upload, key message — dated [sentAtMs]. */
+    private enum class MediaAttempt { SENT, NO_SESSION, NO_UPLOAD, NOT_SENT }
+
+    private fun attemptMedia(peerAddress: String, m: ParkedMedia, msgId: String, sentAtMs: Long): MediaAttempt {
+        // The session first: uploading to a peer with no bundle burns the uplink for
+        // nothing, and doing it through sendText's own fetch pops a second one-time prekey.
+        if (!router.ensureSession(peerAddress)) return MediaAttempt.NO_SESSION
+        // __MEDIA_PADDING_2026_11_10__ padded only when every device of the peer reads it.
+        val enc = OSHICryptoV2.encryptFile(m.bytes, m.filename, m.mime, pad = router.mediaPaddingAllowed(peerAddress))
+        val blobId = blobs.uploadBlob(peerAddress, enc.chunks) ?: return MediaAttempt.NO_UPLOAD
+        val key = V2FileKeyMessage(
+            blobId = blobId,
+            fileKey = enc.fileKey,
+            fileNonce = enc.fileNonce,
+            chunkCount = enc.chunks.size,
+            manifest = enc.manifest,
+            filename = m.filename,
+            mime = m.mime,
+            mediaType = com.oshi.desktop.gif.GifWire.label(m.mediaType, m.mime),   // __GIF_PACK_2026_09_23__
+            // __VIDEO_NOTE_2026_09_24__ spec §2.A, on the SHARED key message: `true` or absent.
+            videoNote = if (m.videoNote != null && m.mediaType == MediaType.VIDEO) true else null,
+            durationMs = m.videoNote?.takeIf { m.mediaType == MediaType.VIDEO }?.wireDurationMs,
+            // __VIEW_ONCE_DESKTOP_2027__ iOS `V2MessageRouter`: `isViewOnce ? true : nil`.
+            isViewOnce = if (m.viewOnce) true else null,
+        )
+        // Same message id on every retry (the receiver de-duplicates on it) and the date the
+        // person pressed send (__RESEND_KEEPS_DATE__), so a late photo lands where it was sent.
+        return if (router.sendText(peerAddress, key.toBytes(), msgId, sentAtMs = sentAtMs)) MediaAttempt.SENT else MediaAttempt.NOT_SENT
+    }
+
     private fun sendMedia(
         peerAddress: String,
         bytes: ByteArray,
@@ -1492,6 +1764,7 @@ class OshiClient(
         mediaType: MediaType,
         localRef: String?,
         videoNote: com.oshi.desktop.media.VideoNoteWire.Meta? = null,
+        viewOnce: Boolean = false,
     ): SendOutcome {
         if (BlockPolicy.outgoingText(contacts, peerAddress) == BlockPolicy.Outbound.REFUSE_BLOCKED) {
             return SendOutcome.BLOCKED
@@ -1501,27 +1774,20 @@ class OshiClient(
 
         val msgId = UUID.randomUUID().toString()
         val now = System.currentTimeMillis()
-        // The session first: uploading to a peer with no bundle burns the uplink for
-        // nothing, and doing it through sendText's own fetch pops a second one-time prekey.
-        if (!router.ensureSession(peerAddress)) return SendOutcome.NO_V2_PATH
-
-        // __MEDIA_PADDING_2026_11_10__ padded only when every device of the peer reads it.
-        val enc = OSHICryptoV2.encryptFile(bytes, filename, mime, pad = router.mediaPaddingAllowed(peerAddress))
-        val blobId = blobs.uploadBlob(peerAddress, enc.chunks) ?: return SendOutcome.NO_V2_PATH
-        val key = V2FileKeyMessage(
-            blobId = blobId,
-            fileKey = enc.fileKey,
-            fileNonce = enc.fileNonce,
-            chunkCount = enc.chunks.size,
-            manifest = enc.manifest,
-            filename = filename,
-            mime = mime,
-            mediaType = com.oshi.desktop.gif.GifWire.label(mediaType, mime),   // __GIF_PACK_2026_09_23__
-            // __VIDEO_NOTE_2026_09_24__ spec §2.A, on the SHARED key message: `true` or absent.
-            videoNote = if (videoNote != null && mediaType == MediaType.VIDEO) true else null,
-            durationMs = videoNote?.takeIf { mediaType == MediaType.VIDEO }?.wireDurationMs,
+        val media = ParkedMedia(bytes, filename, mime, mediaType, videoNote, viewOnce)
+        val attempt = runCatching { attemptMedia(peerAddress, media, msgId, now) }.getOrDefault(MediaAttempt.NOT_SENT)
+        val sent = attempt == MediaAttempt.SENT
+        // __COVER_MEDIA_RETRY_2026_11_18__ FAIL-CLOSED for attachments too (the integration
+        // matrix: a photo sent during a captive portal / a 10-min block / 30 % loss was simply
+        // dropped — NO_V2_PATH, no row, no retry — while texts waited). With the disguise on,
+        // a failed attachment WAITS like a text: a PENDING row with the waiting clock, retried
+        // over the disguised V2 path only on the outbox's backoff, "not delivered" after an hour.
+        val internetAllowed = com.oshi.desktop.msg.OfflineOnlyPayload.internetAllowed(
+            globalInternetAllowed = !transportPreferences.load().neverOverInternet,
+            conversationIsOfflineOnly = offlineOnly.isOfflineOnly(peerAddress),
         )
-        val sent = router.sendText(peerAddress, key.toBytes(), msgId)
+        val waitForCover = !sent && internetAllowed && com.oshi.desktop.net.DesktopCover.isEnabled()
+        if (!sent && !waitForCover && attempt != MediaAttempt.NOT_SENT) return SendOutcome.NO_V2_PATH   // as before: no row
         if (sent) messagePush.wakeDirect(peerAddress, msgId)   // __DESKTOP_MESSAGE_PUSH_2026_09_23__
         messages.append(
             Message(
@@ -1535,14 +1801,48 @@ class OshiClient(
                 mediaRef = localRef,
                 sentAtMs = now,
                 sentAtSource = TimestampSource.LOCAL_CLOCK,
-                deliveryStatus = if (sent) DeliveryStatus.SENT else DeliveryStatus.FAILED,
-                transport = if (sent) "relay-v2" else "none",
+                deliveryStatus = when {
+                    sent -> DeliveryStatus.SENT
+                    waitForCover -> DeliveryStatus.PENDING
+                    else -> DeliveryStatus.FAILED
+                },
+                transport = when {
+                    sent -> "relay-v2"
+                    waitForCover -> CoverOutbox.TRANSPORT_WAITING
+                    else -> "none"
+                },
                 videoNote = videoNote != null && mediaType == MediaType.VIDEO,
                 mediaDurationMs = videoNote?.durationMs?.takeIf { mediaType == MediaType.VIDEO },
+                isViewOnce = viewOnce,
             )
         )
+        if (waitForCover) {
+            parkedMedia[msgId] = media
+            coverOutbox.park(peerAddress, msgId, "", sentAtMs = now, media = true)
+        }
         contacts.seen(peerAddress, now)
-        return if (sent) SendOutcome.SENT else SendOutcome.NO_V2_PATH
+        return when {
+            sent -> SendOutcome.SENT
+            waitForCover -> SendOutcome.WAITING_FOR_COVER
+            else -> SendOutcome.NO_V2_PATH
+        }
+    }
+
+    /**
+     * __COVER_MEDIA_RETRY_2026_11_18__ A parked attachment after a restart: its sealed local
+     * file read back through the vault, the name, type and video-note flag from its row. Null
+     * when there is no file to read (a contact card, a deleted file) — that row cannot be
+     * resent faithfully and becomes "not delivered".
+     */
+    private fun parkedMediaFromRow(row: Message): ParkedMedia? {
+        val ref = row.mediaRef ?: return null
+        val file = File(ref)
+        if (!file.isFile) return null
+        val bytes = runCatching { mediaVault.openStream(file).use { it.readBytes() } }.getOrNull() ?: return null
+        if (bytes.isEmpty() || bytes.size > V2BlobClient.MAX_PLAINTEXT_BYTES) return null
+        val note = if (row.videoNote && row.mediaType == MediaType.VIDEO) runCatching { com.oshi.desktop.media.VideoNoteWire.Meta(row.mediaDurationMs) }.getOrElse { com.oshi.desktop.media.VideoNoteWire.Meta(null) } else null
+        val mime = if (note != null) com.oshi.desktop.media.VideoNoteWire.MIME else probeMime(file)
+        return ParkedMedia(bytes, row.content?.takeIf { it.isNotBlank() } ?: file.name, mime, row.mediaType ?: MediaType.forMime(mime), note, row.isViewOnce)
     }
 
     // ------------------------------------------------------ row 0.17, groups
@@ -1845,8 +2145,10 @@ class OshiClient(
         replyTo: com.oshi.desktop.msg.ReplyEnvelope.Quote? = null,
         /** __MENTIONS_2026_09_23__ members picked in the composer; kept only if still in the text. */
         mentions: List<com.oshi.desktop.group.MentionWire.Mention> = emptyList(),
+        /** __GROUP_POLLS_2027__ internal: a `📊POLL📊` payload built by [sendGroupPoll]. */
+        allowPoll: Boolean = false,
     ): GroupSendReport {
-        if (ControlPrefix.isControl(rawText)) {
+        if (ControlPrefix.isControl(rawText) && !(allowPoll && PollPayload.isPoll(rawText))) {
             return GroupSendReport(groupId, 0, 0, emptyList(), refusedControlPayload = true)
         }
         // __GROUP_PARITY_2026_09_23__ same `💬REPLY💬` envelope inside the group body
@@ -1961,6 +2263,47 @@ class OshiClient(
             log("client: group ${g.groupId.take(8)}… $failedTransiently member(s) not reached this time (transient) — not reported as needing an update")
         }
         return GroupSendReport(g.groupId, recipients.size, sent, blocked, unreachable = unreachable, messageId = msgId, reached = reached)
+    }
+
+    /**
+     * __GROUP_POLLS_2027__ A poll in a group — Android `GroupChatViewModel.sendPoll`: the
+     * `📊POLL📊` payload is an ordinary group message body (stored, a bubble on every member's
+     * screen), sanitized by the same [PollPayload.sanitize] as the 1:1 path. Null when the
+     * question or options are not sendable.
+     */
+    fun sendGroupPoll(
+        groupId: String,
+        question: String,
+        options: List<String>,
+        allowsMultipleAnswers: Boolean = false,
+        isAnonymous: Boolean = false,
+        closesAtUnix: Double? = null,
+    ): GroupSendReport? {
+        val (q, opts) = PollPayload.sanitize(question, options) ?: return null
+        val poll = PollPayload.Poll(
+            id = UUID.randomUUID().toString(),
+            question = q,
+            options = opts,
+            allowsMultipleAnswers = allowsMultipleAnswers,
+            isAnonymous = isAnonymous,
+            createdAtUnix = System.currentTimeMillis() / 1000.0,
+            closesAtUnix = closesAtUnix,
+            creatorPublicKey = address,
+        )
+        return sendGroupText(groupId, poll.encode(), allowPoll = true)
+    }
+
+    /**
+     * __GROUP_POLLS_2027__ A ballot in a group — Android `GroupManager.sendGroupPollBallot`:
+     * fanned out to every member as an EPHEMERAL body (no row, no self copy), and recorded
+     * locally first through the same [PollTally.record] an inbound ballot uses.
+     */
+    fun voteGroupPoll(groupId: String, pollId: String, picks: List<Int>): GroupSendReport? {
+        if (pollId.isEmpty()) return null
+        val g = groups.get(groupId) ?: return null
+        val vote = PollPayload.Vote(pollId = pollId, picks = picks.distinct().sorted(), atUnix = System.currentTimeMillis() / 1000.0)
+        pollBallots.record(pollId, address, vote.ballot)
+        return sendGroupBody(g, vote.encode())
     }
 
     /** Spec §2.3 content body inside a GroupMessage, fanned out; no self copy, no row. */
@@ -2388,6 +2731,38 @@ class OshiClient(
     /** __MESH_OFF_IS_A_SENTENCE_2026_10_29__ Is the LAN mesh running in this process? */
     val meshRunning: Boolean get() = mesh.isRunning
 
+    /** __DESKTOP_GROUP_DISCOVERY_2027__ public groups heard on the local mesh. */
+    val publicGroups = com.oshi.desktop.group.PublicGroupDirectory()
+
+    /**
+     * __DESKTOP_GROUP_DISCOVERY_2027__ Start the local-network mesh from the window (it is
+     * otherwise started only with `--mesh`): this computer then appears to OSHI devices on
+     * the same network and hears their public-group announcements. Idempotent.
+     */
+    fun startLocalMesh(): Boolean = runCatching { mesh.start(); true }.getOrElse {
+        log("client: mesh start failed: ${it.javaClass.simpleName}: ${it.message}"); false
+    }
+
+    /** Announce every public group we belong to, as the phones do every 30 s. */
+    fun announcePublicGroups(nowMs: Long = System.currentTimeMillis()): Int {
+        if (!mesh.isRunning) return 0
+        return groups.all()
+            .filter { it.type == com.oshi.desktop.group.GroupType.PUBLIC && it.isMember(address) && !groups.isBlocked(it.groupId) }
+            .sumOf { mesh.broadcast(com.oshi.desktop.group.PublicGroupDirectory.encode(it, nowMs), com.oshi.desktop.group.PublicGroupDirectory.TYPE) }
+    }
+
+    /**
+     * __DESKTOP_GROUP_DISCOVERY_2027__ Join a public group heard on the mesh: the invite-link
+     * path with the ad's admin as the inviter (a stub conversation now, an authenticated
+     * `member_sync_request` to the admin, the real definition when the admin answers) —
+     * what iOS `joinPublicGroup` and Android `joinDiscoveredGroup` do.
+     */
+    fun joinPublicGroup(groupId: String): Pair<JoinOutcome, String?> {
+        val ad = publicGroups.get(groupId) ?: return JoinOutcome.NOT_AN_INVITE to null
+        val link = com.oshi.desktop.group.GroupInvite.link(ad.groupId, ad.name, ad.adminPublicKey)
+        return joinGroupFromInvite(link)
+    }
+
     fun meshSetDiscovery(enabled: Boolean): Boolean = mesh.setDiscoveryEnabled(enabled)
 
     /** Dial a peer whose address discovery cannot see. Identity is still checked on connect. */
@@ -2405,6 +2780,26 @@ class OshiClient(
      * origin of the range diagram. Null when detached or without a fix — the
      * diagram then says so rather than drawing a guessed centre.
      */
+    /** __DESKTOP_TOOLS_2027__ The attached radio's battery, signal, airtime and config, for the radio card. */
+    fun loraRadioCard(nowMs: Long = System.currentTimeMillis()): com.oshi.desktop.lora.LoRaRadioCard? {
+        if (!loraAttached) return null
+        val me = loraRoster.myNodeNumOrZero()
+        val m = loraRoster.myMetrics()
+        val rx = loraRoster.lastRx()
+        val region = loraRadioState.regionCode?.let { com.oshi.desktop.lora.LoRaAdmin.Region.fromWire(it) }
+        return com.oshi.desktop.lora.LoRaRadioCard(
+            nodeNum = me,
+            name = loraRoster.onlineNodes(nowMs).firstOrNull { it.num == me }?.name?.takeIf { it.isNotBlank() },
+            batteryLevel = m?.batteryLevel, voltage = m?.voltage,
+            channelUtilization = m?.channelUtilization, airUtilTx = m?.airUtilTx, uptimeSeconds = m?.uptimeSeconds,
+            lastRssi = rx?.rssi, lastSnr = rx?.snr, lastPacketMs = rx?.atMs,
+            region = region, modemPreset = loraRadioState.modemPreset, txPowerDbm = loraRadioState.txPowerDbm,
+            muted = loraRadioState.known && !loraRadioState.transmitEnabled,
+            noRegion = loraRadioState.known && (region == null || region == com.oshi.desktop.lora.LoRaAdmin.Region.UNSET),
+            nodesNow = loraRoster.onlineCount(nowMs),
+        )
+    }
+
     fun loraMyPosition(): Pair<Double, Double>? =
         if (loraAttached) loraRoster.myPosition() else null
 
@@ -2682,6 +3077,45 @@ class OshiClient(
         )
 
         val msgId = com.oshi.desktop.lora.LoRaProto.randomPacketId()
+        // __LORA_LONG_TEXT_OMP_2026_11_18__ An OSHI Mesh radio takes the WHOLE message (64 × 182 B
+        // of OMP body, ~4,000 B of text) and owns repair, custody and receipts; the frames go to
+        // our own node, stamped as the phone stamps them. A stock radio keeps the 12-frame path.
+        val me = loraRoster.myNodeNumOrZero()
+        if (loraOshiFirmware && me != 0u) {
+            val body = com.oshi.desktop.lora.OshiMeshProtocol.encodeBody(envelope.toWireJson())
+            val ompId = kotlin.random.Random.nextInt(1, Int.MAX_VALUE).toUInt()
+            val omp = com.oshi.desktop.lora.OshiMeshProtocol.dataFrames(ompId, com.oshi.desktop.lora.LoRaProto.BROADCAST_ADDR, body, 0)
+            if (omp == null) {
+                onLoRa("lora: this message is ${body.size} bytes of OMP body, over the OSHI Mesh budget (64 frames) — refused, not truncated")
+                return false
+            }
+            if (ompOutgoing.size > 256) ompOutgoing.clear()
+            ompOutgoing[ompId] = messageId
+            var ompWritten = 0
+            for (frame in omp) {
+                val packet = com.oshi.desktop.lora.LoRaProto.toRadioPacket(
+                    to = me, portnum = com.oshi.desktop.lora.LoRaProto.PORT_OSHI, payload = frame,
+                    wantAck = false, packetId = com.oshi.desktop.lora.LoRaProto.randomPacketId(),
+                )
+                if (!link.send(packet)) break
+                ompWritten++
+            }
+            if (ompWritten != omp.size) {
+                onLoRa("lora: only $ompWritten of ${omp.size} OMP frames reached the radio — the message is incomplete")
+                return false
+            }
+            if (storeRow) {
+                val row = Message(
+                    id = messageId, conversationId = recipientKey, senderAddress = address, recipientAddress = recipientKey,
+                    fromMe = true, content = text, sentAtMs = now, sentAtSource = TimestampSource.LOCAL_CLOCK,
+                    deliveryStatus = DeliveryStatus.SENT, transport = "lora",
+                )
+                messages.append(row)
+                onMessage(row)
+            }
+            onLoRa("OSHI message handed to the OSHI Mesh radio in ${omp.size} frame(s), ${body.size} B")
+            return true
+        }
         val frames = com.oshi.desktop.lora.LoRaFrame.frames(msgId, envelope.toWireJson())
         if (frames == null) {
             val bytes = envelope.toWireJson().size
@@ -3133,9 +3567,81 @@ class OshiClient(
      * and is dropped rather than guessed at — a partial protobuf reader that invented
      * meanings for fields it does not implement would be worse than one that ignores them.
      */
+    // ------------------------------------------------ __LORA_LONG_TEXT_OMP_2026_11_18__
+
+    /** The attached radio answered the OSHI Mesh probe (BEACON). Reset with each new node number. */
+    @Volatile var loraOshiFirmware: Boolean = false
+        private set
+    @Volatile private var loraProbedNode: UInt = 0u
+    private val ompOutgoing = java.util.concurrent.ConcurrentHashMap<UInt, String>()
+    private val loraAirtimeWait = com.oshi.desktop.lora.LoRaAirtimeWait()
+
+    /** Repaint hook for the window: a STATUS changed, or a QUEUED message crossed the 60 s mark. */
+    @Volatile var onLoRaStatusChanged: () -> Unit = {}
+    private val airtimeTimer by lazy {
+        java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "oshi-lora-airtime").apply { isDaemon = true } }
+    }
+
+    /** Message ids an OSHI Mesh radio has held (QUEUED) for over a minute — the bubble's airtime hint. */
+    fun loraAwaitingAirtime(nowMs: Long = System.currentTimeMillis()): Set<String> =
+        if (loraAirtimeWait.hasPending()) loraAirtimeWait.waiting(nowMs) else emptySet()
+
+    /**
+     * Probe once per radio (node number): an OSHI Mesh radio answers BEACON, a stock one stays
+     * silent and keeps the 12-frame path. Android `startOshiMeshSetup`, same frame, to our own node.
+     */
+    private fun maybeProbeOshiFirmware() {
+        val me = loraRoster.myNodeNumOrZero()
+        if (me == 0u || me == loraProbedNode) return
+        val link = lora ?: return
+        if (!link.isConnected) return
+        loraProbedNode = me
+        loraOshiFirmware = false
+        val packet = com.oshi.desktop.lora.LoRaProto.toRadioPacket(
+            to = me,
+            portnum = com.oshi.desktop.lora.LoRaProto.PORT_OSHI,
+            payload = com.oshi.desktop.lora.OshiMeshProtocol.beaconProbe(),
+            wantAck = false,
+            packetId = com.oshi.desktop.lora.LoRaProto.randomPacketId(),
+        )
+        link.send(packet)
+    }
+
+    private fun onOmpControl(d: com.oshi.desktop.lora.LoRaInbound.Decision.OmpControl) {
+        val me = loraRoster.myNodeNumOrZero()
+        if (d.from != me) return   // peers' beacons/status stay in their firmware
+        when (d.type) {
+            com.oshi.desktop.lora.OshiMeshProtocol.FrameType.BEACON -> {
+                if (com.oshi.desktop.lora.OshiMeshProtocol.parseBeacon(d.payload) != null && !loraOshiFirmware) {
+                    loraOshiFirmware = true
+                    onLoRa("lora: radio runs OSHI Mesh firmware — long messages (up to 4,000 bytes) go whole")
+                }
+            }
+            com.oshi.desktop.lora.OshiMeshProtocol.FrameType.STATUS -> {
+                val st = com.oshi.desktop.lora.OshiMeshProtocol.parseStatus(d.payload) ?: return
+                val id = ompOutgoing[st.msgId] ?: return
+                if (st.state == com.oshi.desktop.lora.OshiMeshProtocol.State.QUEUED) {
+                    loraAirtimeWait.onQueued(id, System.currentTimeMillis())
+                    airtimeTimer.schedule({ runCatching { onLoRaStatusChanged() } },
+                        com.oshi.desktop.lora.LoRaAirtimeWait.DEFAULT_THRESHOLD_MS + 1_000, java.util.concurrent.TimeUnit.MILLISECONDS)
+                } else loraAirtimeWait.onProgress(id)
+                runCatching { onLoRaStatusChanged() }
+                when (st.state) {
+                    com.oshi.desktop.lora.OshiMeshProtocol.State.DELIVERED,
+                    com.oshi.desktop.lora.OshiMeshProtocol.State.FAILED,
+                    com.oshi.desktop.lora.OshiMeshProtocol.State.REJECTED -> ompOutgoing.remove(st.msgId)
+                    else -> Unit
+                }
+                onLoRa("lora: OSHI msg ${id.take(8)} ${st.state.name.lowercase()}")
+            }
+            else -> Unit
+        }
+    }
+
     private fun onFromRadio(fromRadio: ByteArray) {
         // Counts only — node_info/my_info are read for WHO was heard WHEN, nothing else.
         loraRoster.observeFromRadio(fromRadio, System.currentTimeMillis())
+        maybeProbeOshiFirmware()
         // __LORA_CHANNEL_IS_A_ROOM_2026_11_04__ `FromRadio.channel` (10) arrives in the same
         // stream as the node info above, unprompted, so learning the channel names costs
         // one more read of a frame already in hand.
@@ -3187,6 +3693,7 @@ class OshiClient(
                 onLoRa("interop text from node ${d.nodeNum}$where (UNVERIFIED — not authenticated): ${d.text.take(200)}")
             }
             is com.oshi.desktop.lora.LoRaInbound.Decision.Envelope -> openLoRaEnvelope(d)
+            is com.oshi.desktop.lora.LoRaInbound.Decision.OmpControl -> onOmpControl(d)
             is com.oshi.desktop.lora.LoRaInbound.Decision.Routing ->
                 onLoRa("routing ack from node ${d.nodeNum}")
             com.oshi.desktop.lora.LoRaInbound.Decision.Ignored -> {}
@@ -3296,8 +3803,7 @@ class OshiClient(
                 // Same naming and the same SEALING WRITE as every other inbound media path:
                 // `sealingStream` makes the file 0600 and encrypts as it writes, so the
                 // plaintext never lands on disk even briefly.
-                val safe = (m.fileName ?: "lora-media")
-                    .replace(Regex("[^A-Za-z0-9._-]"), "_").take(120).ifEmpty { "file" }
+                val safe = com.oshi.desktop.store.SafeFileName.sanitize(m.fileName ?: "lora-media")
                 val out = File(mediaDir, "${msg.id.take(8)}-$safe")
                 mediaVault.sealingStream(out).use { it.write(m.bytes) }
                 out.absolutePath
@@ -3438,7 +3944,14 @@ class OshiClient(
      * why it is that order. Internal so a test can drive one inbound plaintext without a
      * relay, a ratchet or a network.
      */
-    internal fun dispatch(inbound: V2Inbound) {
+    internal fun dispatch(raw: V2Inbound) {
+        // __RESTRICTED_NETWORK_HINT_2026_11_18__ strip the RN-HINT marker at ingestion, 1:1 only
+        // (never group content), so it can reach no screen, notification, quote or forward;
+        // the flag rides to [storeInbound] by message id.
+        val inbound = if (raw.groupId.isNullOrBlank()) {
+            val ing = com.oshi.desktop.msg.RestrictedNetworkHint.ingest(raw.text)
+            if (ing.flagged) { restrictedHinted += raw.msgId; raw.copy(text = ing.text) } else raw
+        } else raw
         val text = inbound.text
 
         // 2. A group MESSAGE (content channel, spec §1/§3). The envelope's groupId is what routes
@@ -3534,6 +4047,13 @@ class OshiClient(
                         PeerNickname.Read.Clear -> contacts.setSharedNickname(inbound.from, null)
                         PeerNickname.Read.Absent -> Unit
                     }
+                    // __PROFILE_PHOTOS_DESKTOP_2027__ the picture rides the same payload.
+                    // iOS's rule: absent/null removes it. A refused (oversize) one keeps ours.
+                    when (val pic = com.oshi.desktop.msg.ProfilePhotoWire.read(text)) {
+                        is com.oshi.desktop.msg.ProfilePhotoWire.Read.Set -> photos.set(inbound.from, pic.base64)
+                        com.oshi.desktop.msg.ProfilePhotoWire.Read.Clear -> photos.set(inbound.from, null)
+                        else -> Unit
+                    }
                     onControl(inbound.from, event, outcome)
                     return
                 }
@@ -3543,7 +4063,7 @@ class OshiClient(
                 // gate. Silent both ways; nothing stored.
                 if (event.prefix == ControlPrefix.PROFILE_REQUEST) {
                     contacts.seen(inbound.from, inbound.ts)
-                    if (mayBroadcastProfile && ownNickname != null && hasSentUserMessage(inbound.from)) {
+                    if (mayBroadcastProfile && hasOwnProfile && hasSentUserMessage(inbound.from)) {
                         runCatching { sendProfileUpdate(inbound.from) }
                     }
                     onControl(inbound.from, event, outcome)
@@ -3784,6 +4304,7 @@ class OshiClient(
             sentAtSource = TimestampSource.RELAY_ENVELOPE_MS,
             deliveryStatus = DeliveryStatus.DELIVERED,
             transport = "relay-v2",
+            restrictedNetwork = restrictedHinted.remove(inbound.msgId),
         )
         val outcome = messages.append(stored)
         contacts.seen(inbound.from, inbound.ts)
@@ -3834,6 +4355,15 @@ class OshiClient(
             ControlPrefix.GROUP_UPDATE, ControlPrefix.ACTION, ControlPrefix.DELIVERY_RECEIPT,
             ControlPrefix.READ_RECEIPT, ControlPrefix.CALL_SIGNAL, ControlPrefix.SESSION_RESET -> {
                 log("client: control payload on the group content channel from ${inbound.from.take(12)}… — dropped")
+                return
+            }
+            // __GROUP_POLLS_2027__ a member's ballot (Android `sendGroupPollBallot`): silent,
+            // never a row. The voter is the authenticated member who sent it, never the JSON.
+            ControlPrefix.POLL_VOTE -> {
+                contacts.seen(inbound.from, inbound.ts)
+                val vote = PollPayload.decodeVote(body)
+                if (vote == null) log("client: unparseable group ballot from ${inbound.from.take(12)}…")
+                else if (pollBallots.record(vote.pollId, inbound.from, vote.ballot)) onGroupContentChanged(gid)
                 return
             }
             else -> Unit
@@ -3958,7 +4488,7 @@ class OshiClient(
         val gid = GroupIdentity.canonicalGroupId(group.groupId)
         if (messages.messages(gid).any { GroupMessageWire.sameMessageId(it.id, payload.messageId) }) return
         val name = payload.mediaFileName ?: key.filename
-        val safeName = name.replace(Regex("[^A-Za-z0-9._-]"), "_").take(120).ifEmpty { "file" }
+        val safeName = com.oshi.desktop.store.SafeFileName.sanitize(name)
         val out = File(mediaDir, "${payload.messageId.take(8)}-$safeName")
         val written = blobs.downloadAndDecryptToFile(
             blobId = key.blobId,
@@ -4064,7 +4594,7 @@ class OshiClient(
             return
         }
 
-        val safeName = key.filename.replace(Regex("[^A-Za-z0-9._-]"), "_").take(120).ifEmpty { "file" }
+        val safeName = com.oshi.desktop.store.SafeFileName.sanitize(key.filename)
         // Layer 0 is the CARRIER and must be findable by the layers that follow, so its row id
         // is the `revealId` rather than the envelope's — which is exactly what iOS does
         // (`messages.firstIndex(where: { $0.id == reveal.revealId })`).
@@ -4168,7 +4698,7 @@ class OshiClient(
             log("client: reveal layer ${reveal.layerIndex} with no carrier message — dropped")
             return
         }
-        val safeName = key.filename.replace(Regex("[^A-Za-z0-9._-]"), "_").take(120).ifEmpty { "file" }
+        val safeName = com.oshi.desktop.store.SafeFileName.sanitize(key.filename)
         val out = File(mediaDir, "${reveal.revealId.take(8)}-L${reveal.layerIndex}-$safeName")
         val written = blobs.downloadAndDecryptToFile(
             blobId = key.blobId,
@@ -4261,6 +4791,34 @@ class OshiClient(
     fun conversationsIncludingBlocked(): List<MessageStore.ConversationSummary> = messages.conversations()
 
     fun history(peerAddress: String): List<Message> = messages.messages(peerAddress).filterNot { it.hiddenLocally }
+
+    /**
+     * __VIEW_ONCE_DESKTOP_2027__ The recipient opened a view-once attachment. Recorded at once
+     * (so a crash cannot turn it back into an unopened one), the bytes destroyed by
+     * [wipeOpenedViewOnce] when the user leaves the conversation — iOS
+     * `markViewOnceAsViewed` deletes the file at rest too (`__VIEW_ONCE_DISK_2026_09_29__`).
+     * Our OWN view-once rows are never consumed: the sender keeps the original, as on iOS.
+     */
+    fun markViewOnceOpened(conversationId: String, messageId: String): Boolean {
+        val m = messages.message(conversationId, messageId) ?: return false
+        if (!m.isViewOnce || m.fromMe || m.viewOnceOpened) return false
+        messages.append(m.copy(viewOnceOpened = true))
+        return true
+    }
+
+    /** Destroy the files of every OPENED inbound view-once row ([conversationId] null = all). Returns how many. */
+    fun wipeOpenedViewOnce(conversationId: String? = null): Int {
+        val ids = conversationId?.let { listOf(it) } ?: messages.conversations().map { it.conversationId }
+        var n = 0
+        for (cid in ids) for (m in messages.messages(cid)) {
+            if (!m.isViewOnce || m.fromMe || !m.viewOnceOpened) continue
+            val ref = m.mediaRef ?: continue
+            runCatching { File(ref).delete() }
+            messages.append(m.copy(mediaRef = null))
+            n++
+        }
+        return n
+    }
 
     /** __GROUP_PARITY_2026_09_23__ delete one message on this device only, 1:1 or group (iOS "Delete for me"). */
     fun deleteMessageForMe(conversationId: String, messageId: String): Boolean {
@@ -4600,6 +5158,7 @@ class OshiClient(
         prekeys.clear()
         IdentityStore.erase(vault)
         vault.delete(OWN_NICKNAME_ACCOUNT)   // __SHARED_NICKNAME_2026_09_22__ the name goes with the account
+        photos.clear()                       // __PROFILE_PHOTOS_DESKTOP_2027__ and the pictures
         routerState.clear()
         syncCursor.reset()
         return receipt

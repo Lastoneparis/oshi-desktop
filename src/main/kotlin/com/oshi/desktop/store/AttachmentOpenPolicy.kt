@@ -1,5 +1,7 @@
 package com.oshi.desktop.store
 
+import com.oshi.desktop.i18n.t
+
 /**
  * Whether a received attachment may be handed to the operating system.
  *
@@ -72,6 +74,14 @@ object AttachmentOpenPolicy {
         "py", "pyc", "pl", "rb", "php", "lua", "deb", "rpm", "snap", "flatpakref",
         // mobile packages a desktop may still be asked to open
         "apk", "ipa", "xapk",
+        // __WINDOWS_OPEN_POLICY_GAPS_2026_11_19__ Windows shell types the list above missed:
+        // script components, shell/search/library descriptors, Office add-ins, package
+        // installers, troubleshooters, disk images that mount (and drop Mark-of-the-Web),
+        // macro documents, and pages a browser would open from file:// with script.
+        "vb", "wsc", "sct", "settingcontent-ms", "library-ms", "search-ms", "searchconnector-ms",
+        "xll", "xbap", "website", "msix", "msixbundle", "appx", "appxbundle", "appinstaller",
+        "diagcab", "iso", "img", "vhd", "vhdx", "docm", "dotm", "xlsm", "xltm", "xlam", "pptm",
+        "potm", "ppam", "sldm", "htm", "html", "xhtml", "mht", "mhtml", "svg", "hlp", "cab",
     )
 
     /** Extension → the family a user would expect it to be, for the mismatch rule. */
@@ -85,7 +95,10 @@ object AttachmentOpenPolicy {
 
     /** The last extension, lowercased — which is the only one a shell looks at. */
     fun extensionOf(filename: String): String =
-        filename.substringAfterLast('.', "").lowercase().takeIf { it.isNotEmpty() && it.length <= 12 } ?: ""
+        // Windows drops trailing dots and spaces when it creates the file, so `invoice.exe.`
+        // lands on disk as `invoice.exe` and runs. Judge the name the OS will actually use.
+        filename.trimEnd('.', ' ').substringAfterLast('.', "").lowercase()
+            .takeIf { it.isNotEmpty() && it.length <= 20 } ?: ""
 
     /**
      * @param filename the name the file carries on disk, i.e. the SENDER's.
@@ -100,12 +113,8 @@ object AttachmentOpenPolicy {
             return Decision(Verdict.OPEN)
         }
         if (ext in EXECUTABLE) {
-            return Decision(
-                Verdict.REFUSE_EXECUTABLE,
-                "This attachment is named “$filename”, and a “.$ext” file is a program your " +
-                    "computer would RUN rather than show. OSHI will not hand it to the system. " +
-                    "Save a copy if you are certain you want it."
-            )
+            // __ATTACHMENT_REFUSAL_I18N_2026_11_20__ was English-only for every language.
+            return Decision(Verdict.REFUSE_EXECUTABLE, t("desktop.attach.refuse.executable", filename, ext))
         }
         val expected = FAMILY[ext]
         val shown = displayedKind?.lowercase()?.takeIf { it in setOf("image", "video", "audio", "document") }
@@ -115,11 +124,16 @@ object AttachmentOpenPolicy {
         if (expected != null && shown != null && expected != shown) {
             return Decision(
                 Verdict.REFUSE_MISMATCH,
-                "This attachment was shown as $shown but is named “$filename”, which your computer " +
-                    "would treat as $expected. OSHI cannot tell you which it really is, so it will not open it. " +
-                    "Save a copy to inspect it."
+                t("desktop.attach.refuse.mismatch", kindWord(shown), filename, kindWord(expected)),
             )
         }
         return Decision(Verdict.OPEN)
+    }
+
+    private fun kindWord(kind: String): String = when (kind) {
+        "image" -> t("desktop.attach.kind.image")
+        "video" -> t("desktop.attach.kind.video")
+        "audio" -> t("desktop.attach.kind.audio")
+        else -> t("desktop.attach.kind.document")
     }
 }

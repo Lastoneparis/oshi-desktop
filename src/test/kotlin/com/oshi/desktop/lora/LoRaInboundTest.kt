@@ -153,7 +153,11 @@ class LoRaInboundTest {
     fun `OMP status and beacon frames are not envelopes`() {
         val inbound = LoRaInbound()
         val status = byteArrayOf(0x4F, 0x53, 0x16, 1, 0, 0, 0, 3, 0, 0, 0, 0)
-        assertTrue(inbound.route(meshPacket(0x42u, LoRaProto.PORT_OSHI, status), myKey, t0) is LoRaInbound.Decision.Ignored)
+        // __LORA_LONG_TEXT_OMP_2026_11_18__ they are control frames for the client (probe answer,
+        // delivery state), never envelopes.
+        val d = inbound.route(meshPacket(0x42u, LoRaProto.PORT_OSHI, status), myKey, t0)
+        assertTrue(d is LoRaInbound.Decision.OmpControl)
+        assertEquals(OshiMeshProtocol.FrameType.STATUS, (d as LoRaInbound.Decision.OmpControl).type)
     }
 
     /** Partial frames are Ignored, not errors. */

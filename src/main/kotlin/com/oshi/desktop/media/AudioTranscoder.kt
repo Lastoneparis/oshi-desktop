@@ -120,16 +120,29 @@ internal object AudioProc {
     }
 
     /** `which`, without a shell. Null when the name is not an executable file on `PATH`. */
-    fun which(binary: String): String? {
-        val path = System.getenv("PATH") ?: return null
-        val separator = if (System.getProperty("os.name").orEmpty().lowercase().contains("win")) ";" else ":"
-        for (dir in path.split(separator)) {
-            if (dir.isEmpty()) continue
-            val f = File(dir, binary)
-            if (f.isFile && f.canExecute()) return f.absolutePath
-        }
-        return null
+    fun which(binary: String): String? = com.oshi.desktop.store.ExecutableLookup.which(binary)
+
+    /**
+     * __VOICE_NOTES_NEED_NO_SYSTEM_FFMPEG_2026_11_19__ The ffmpeg PROGRAM bytedeco ships inside
+     * the FFmpeg native jar this app already bundles for video calls (extracted to the javacpp
+     * cache on first use). Almost no Windows user has ffmpeg on PATH, so without this every
+     * AAC/M4A voice note from a phone failed to play there. Null when the natives are absent.
+     */
+    private val bundledLazy = lazy {
+        runCatching { org.bytedeco.javacpp.Loader.load(org.bytedeco.ffmpeg.ffmpeg::class.java) }
+            .getOrNull()?.takeIf { java.io.File(it).isFile }
     }
+    val bundledFfmpeg: String? get() = bundledLazy.value
+
+    /** PATH first (the user's own build wins), then the bundled program for ffmpeg. */
+    fun resolveTool(binary: String): String? =
+        which(binary) ?: if (binary == "ffmpeg") bundledFfmpeg else null
+
+    /** The command with argv[0] pointed at [exe] when that is the bundled program (not on PATH). */
+    internal fun withExecutable(args: List<String>, exe: String?): List<String> =
+        if (exe != null && bundledLazy.isInitialized() && exe == bundledLazy.value && args.isNotEmpty()) {
+            listOf(exe) + args.drop(1)
+        } else args
 }
 
 /**
@@ -219,7 +232,7 @@ data class TranscodeTool(
 class SystemAudioTranscoder(
     private val tools: List<TranscodeTool> = TranscodeTool.DEFAULTS,
     private val runner: ProcessRunner = DefaultRunner,
-    private val resolve: (String) -> String? = AudioProc::which,
+    private val resolve: (String) -> String? = AudioProc::resolveTool,
     private val workDir: File = DesktopPaths.file(com.oshi.desktop.store.MediaVault.SCRATCH_DIR_NAME),
     private val timeoutSeconds: Long = DEFAULT_TIMEOUT_SECONDS,
 ) : AudioTranscoder {
@@ -256,7 +269,8 @@ class SystemAudioTranscoder(
         target.parentFile?.mkdirs()
         val tried = mutableListOf<String>()
         for (tool in tools) {
-            if (resolve(tool.binary) == null) {
+            val exe = resolve(tool.binary)
+            if (exe == null) {
                 tried += "${tool.name}: not on PATH"
                 continue
             }
@@ -268,7 +282,7 @@ class SystemAudioTranscoder(
             } else {
                 tool.decodeArgs(source, target)
             }
-            val outcome = runner.run(args, timeoutSeconds)
+            val outcome = runner.run(AudioProc.withExecutable(args, exe), timeoutSeconds)
             when {
                 outcome.timedOut -> tried += "${tool.name}: timed out after ${timeoutSeconds}s"
                 outcome.exitCode != 0 ->
@@ -292,9 +306,9 @@ class SystemAudioTranscoder(
         return try {
             src.writeBytes(WavWriter.tone(millis = PROBE_MILLIS))
             for (tool in tools) {
-                if (resolve(tool.binary) == null) continue
+                val exe = resolve(tool.binary) ?: continue
                 runCatching { dst.delete() }
-                val outcome = runner.run(tool.encodeArgs(src, dst), timeoutSeconds)
+                val outcome = runner.run(AudioProc.withExecutable(tool.encodeArgs(src, dst), exe), timeoutSeconds)
                 val ok = !outcome.timedOut && outcome.exitCode == 0 &&
                     dst.isFile && dst.length() > 0L &&
                     AudioContainers.of(dst) == VoiceNoteContainer.M4A_AAC

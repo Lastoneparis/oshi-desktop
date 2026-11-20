@@ -128,14 +128,9 @@ class PinnedMessageStore(private val file: File) {
         val payload = obj.toString()
         runCatching {
             file.parentFile?.mkdirs()
-            val tmp = File(file.parentFile, file.name + ".tmp")
-            tmp.writeText(payload, Charsets.UTF_8)
-            tmp.setReadable(false, false); tmp.setReadable(true, true)
-            tmp.setWritable(false, false); tmp.setWritable(true, true)
-            if (!tmp.renameTo(file)) {
-                file.writeText(payload, Charsets.UTF_8)
-                tmp.delete()
-            }
+            // __ATOMIC_ON_WINDOWS_2026_11_19__ File.renameTo refuses to replace an existing file on
+            // Windows, so every save here fell back to a plain rewrite (torn by a crash or power cut).
+            com.oshi.desktop.store.AtomicFile.write(file, payload.toByteArray(Charsets.UTF_8))
         }
     }
 

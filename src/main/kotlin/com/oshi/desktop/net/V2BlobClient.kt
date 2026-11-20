@@ -140,14 +140,60 @@ class V2BlobClient(
     /** Download one chunk's opaque ciphertext-plus-tag. Null on any non-2xx / transport error. */
     fun downloadChunk(blobId: String, index: Int): ByteArray? {
         if (!isValidBlobId(blobId) || index < 0) return null
-        val (code, bytes) = http.getBytes(
+        // __BLOB_RANGE_2026_11_19__ On a network that already showed a per-connection stall
+        // (ShortConnections window), fetch the chunk in parts small enough for one connection
+        // each. A whole-chunk read that dies at the transport level is retried in parts at once
+        // (the stall is what opens the window).
+        if (DesktopCover.ShortConnections.active()) return downloadChunkRanged(blobId, index)
+        val r = http.getRaw(
             path = "/v2/blobs/$blobId/chunk/$index",
             withUserHeader = true,
             // Verify-first route: the two-byte string `""`, not zero bytes.
             bodyToHash = DesktopV2Signer.EMPTY_JSON_STRING_BODY,
             timeout = CHUNK_TIMEOUT,
         )
-        return if (code in 200..299) bytes else null
+        if (r.isSuccess) return r.body
+        val f = r.failure ?: return null
+        if (!DesktopCover.ShortConnections.isTransportFailure(f)) return null
+        DesktopCover.ShortConnections.onFailure(f)
+        return downloadChunkRanged(blobId, index)
+    }
+
+    /**
+     * __BLOB_RANGE_2026_11_19__ `GET …/chunk/{i}?offset=&length=` until the whole chunk is in
+     * (docs/CENSORSHIP_2026_THREAT_MODEL.md §7). 206 + Content-Range = a part; 200 = an old
+     * server sent the whole chunk (used as is). Anything else fails the chunk exactly like a
+     * whole-chunk failure. Each part is a fresh signed request (new timestamp). The query is
+     * not signed (the signature covers the path only), as for every V2 route.
+     */
+    internal fun downloadChunkRanged(blobId: String, index: Int): ByteArray? {
+        val path = "/v2/blobs/$blobId/chunk/$index"
+        val part = BlobRange.partLength(coverOn = http.coverOn())
+        val out = java.io.ByteArrayOutputStream()
+        var offset = 0L
+        var parts = 0
+        while (parts++ < BlobRange.MAX_PARTS) {
+            // A part is an idempotent GET: a transport failure retries THAT part (up to
+            // [PART_ATTEMPTS]) instead of failing the chunk. Measured (netem loss10, 19/11): with
+            // ~45 parts per 120 KB photo and 10 % of requests reset, "one failure = start the
+            // chunk over" delivered 0/1 photos per run (0.9^45 ≈ 1 %).
+            var r = http.getRaw(path, "offset=$offset&length=$part", withUserHeader = true,
+                bodyToHash = DesktopV2Signer.EMPTY_JSON_STRING_BODY, timeout = CHUNK_TIMEOUT)
+            var attempt = 1
+            while (r.failure != null && attempt < PART_ATTEMPTS) {
+                DesktopCover.ShortConnections.onFailure(r.failure!!)
+                attempt++
+                r = http.getRaw(path, "offset=$offset&length=$part", withUserHeader = true,
+                    bodyToHash = DesktopV2Signer.EMPTY_JSON_STRING_BODY, timeout = CHUNK_TIMEOUT)
+            }
+            if (r.failure != null) { DesktopCover.ShortConnections.onFailure(r.failure!!); return null }
+            when (val j = BlobRange.accept(r.code, r.contentRange, offset, r.body.size)) {
+                BlobRange.Result.Whole -> return r.body
+                is BlobRange.Result.Part -> { out.write(r.body); offset = j.nextOffset; if (j.complete) return out.toByteArray() }
+                BlobRange.Result.Fail -> return null
+            }
+        }
+        return null
     }
 
     /** Delete-after-delivery. 404 counts as success — the blob is already gone. */
@@ -336,6 +382,9 @@ class V2BlobClient(
          * transfer that resumes, so a timeout here costs a retry of 2 MiB, never the file.
          */
         private val CHUNK_TIMEOUT: Duration = Duration.ofSeconds(60)
+
+        /** __BLOB_RANGE_2026_11_19__ tries per ranged part before the chunk counts as failed. */
+        internal const val PART_ATTEMPTS = 3
     }
 }
 

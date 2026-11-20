@@ -173,7 +173,7 @@ class FluidityBench {
                 val before = errors.get()
                 val sc = edt {
                     val content: @androidx.compose.runtime.Composable () -> Unit = {
-                        MaterialTheme(colorScheme = OshiTheme.colors, typography = OshiTheme.typography) {
+                        OshiMaterialTheme {
                             val th = st.thread
                             SideEffect { comps++ }
                             if (th != null) ThreadPane(
@@ -214,7 +214,7 @@ class FluidityBench {
             var threadCompositions = 0
             val scene = edt {
                 ImageComposeScene(w, h, Density(scale), coroutineContext = org.jetbrains.skiko.MainUIDispatcher) {
-                    MaterialTheme(colorScheme = OshiTheme.colors, typography = OshiTheme.typography) {
+                    OshiMaterialTheme {
                         Surface(Modifier.fillMaxSize(), color = OshiTheme.background) {
                             Row(Modifier.fillMaxSize()) {
                                 val s: ShellState = state

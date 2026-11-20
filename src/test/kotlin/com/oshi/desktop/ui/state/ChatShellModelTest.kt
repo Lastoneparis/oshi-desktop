@@ -40,9 +40,14 @@ class ChatShellModelTest {
     private val direct = Executor { it.run() }
     private val models = ArrayList<ChatShellModel>()
 
+    // The notices are translated now; these assertions read the English catalog.
+    private val savedTag = com.oshi.desktop.i18n.Strings.activeTag
+    @org.junit.Before fun english() { com.oshi.desktop.i18n.Strings.activeTag = "en" }
+
     @After fun tearDown() {
         models.forEach { runCatching { it.close() } }
         fx.close()
+        com.oshi.desktop.i18n.Strings.activeTag = savedTag
     }
 
     private fun model(client: com.oshi.desktop.app.OshiClient): ChatShellModel =
@@ -139,9 +144,14 @@ class ChatShellModelTest {
         val composer = m.state.thread!!.composer
         assertFalse("a plaintext lane must not get a composer", composer.enabled)
         assertTrue(
-            composer.disabledReason.orEmpty().contains(
-                com.oshi.desktop.app.OshiClient.BOT_CHANNEL_IS_PLAINTEXT
-            )
+            composer.disabledReason.orEmpty().contains("NOT end-to-end encrypted"),
+        )
+        // The window's sentence is the console's warning (OshiClient.BOT_CHANNEL_IS_PLAINTEXT),
+        // translated; its English must still open with that warning word for word.
+        assertTrue(
+            com.oshi.desktop.app.OshiClient.BOT_CHANNEL_IS_PLAINTEXT.startsWith(
+                composer.disabledReason.orEmpty().substringBefore(":"),
+            ),
         )
         assertEquals(ConversationKind.BOT, m.state.thread!!.kind)
 
@@ -172,6 +182,33 @@ class ChatShellModelTest {
         fx.seedIncoming(alice, bob.address, "m1", "hi")
         m.select(bob.address)
         assertTrue(m.state.thread!!.composer.enabled)
+    }
+
+    /** __UNREAD_DIVIDER_2027__ / __SEARCH_MESSAGE_TEXT_2027__ / __DELETE_CONVERSATION_2027__ */
+    @Test
+    fun `unread count at open, message-text search and deleting a conversation`() {
+        val alice = fx.client("alice")
+        val bob = fx.client("bob")
+        val carol = fx.client("carol")
+        fx.seedIncoming(alice, bob.address, "m1", "about the harbour")
+        val m = model(alice)
+        m.select(bob.address)
+        fx.inbound(alice, from = carol.address, text = "first")
+        fx.inbound(alice, from = carol.address, text = "second")
+        m.select(carol.address)
+        assertEquals("the divider sits above the two unread", 2, m.state.thread!!.unreadAtOpen)
+        m.select(bob.address)
+        assertEquals(0, m.state.thread!!.unreadAtOpen)
+
+        // A word from an OLD message (not the preview, not the name) finds its conversation.
+        assertEquals(setOf(bob.address), m.conversationsContaining("HARBOUR"))
+        assertEquals(emptySet<String>(), m.conversationsContaining("h"))
+
+        m.deleteConversation(bob.address)
+        assertNull(m.state.thread)
+        assertTrue(alice.history(bob.address).isEmpty())
+        assertFalse(m.state.conversations.any { it.id == bob.address && it.preview.isNotBlank() })
+        assertEquals(emptySet<String>(), m.conversationsContaining("harbour"))
     }
 
     /**

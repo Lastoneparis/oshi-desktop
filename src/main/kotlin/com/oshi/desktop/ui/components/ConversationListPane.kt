@@ -1,7 +1,13 @@
 package com.oshi.desktop.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -31,18 +37,21 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.oshi.desktop.i18n.dt
 import com.oshi.desktop.i18n.t
 import com.oshi.desktop.ui.OshiTheme
+import com.oshi.desktop.ui.state.ChatListMerge
 import com.oshi.desktop.ui.state.ConversationKind
 import com.oshi.desktop.ui.state.ConversationRow
 import com.oshi.desktop.ui.state.IncomingShare
@@ -89,14 +98,48 @@ fun ConversationListPane(
     incomingShares: List<IncomingShare> = emptyList(),
     /** Read when the reach badge is clicked. Null leaves the badge a plain indicator. */
     onReach: (() -> com.oshi.desktop.ui.state.MeshReach)? = null,
+    /** __MERGED_CHATS_2026_11_18__ "New chat" / "Scan an invite" in the New… menu: the New screen. */
+    onNewChat: () -> Unit = {},
+    /** __CONVERSATION_PIN_MUTE_2027__ the row menu (right-click or "⋯" on hover). */
+    onSetPinned: (String, Boolean) -> Unit = { _, _ -> },
+    onSetMuted: (String, Boolean) -> Unit = { _, _ -> },
+    onMarkRead: (String) -> Unit = {},
+    /** __DELETE_CONVERSATION_2027__ delete this device's copy of a direct conversation. */
+    onDeleteConversation: ((String) -> Unit)? = null,
+    /** __SEARCH_MESSAGE_TEXT_2027__ ids of conversations whose messages contain the query. */
+    textMatches: (String) -> Set<String> = { emptySet() },
     modifier: Modifier = Modifier,
 ) {
+    var confirmDelete by remember { mutableStateOf<ConversationRow?>(null) }
+    // Message text is read off the store on a worker, after a short pause in typing.
+    val textHits by androidx.compose.runtime.produceState(emptySet<String>(), query, state.conversations) {
+        val q = query.trim()
+        value = if (q.length < 2) emptySet() else {
+            kotlinx.coroutines.delay(150)
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { textMatches(q) }
+        }
+    }
+    // __MERGED_CHATS_2026_11_18__ More › Appearance › "Combine messages and groups".
+    val merged = com.oshi.desktop.ui.ChatListSettings.merged
+    var filter by remember { mutableStateOf(ChatListMerge.Filter.ALL) }
+    var groupSub by remember { mutableStateOf(ChatListMerge.GroupSub.ALL) }
+    val listPreview = LocalConversationListPreview.current
+    var creatingGroup by remember { mutableStateOf(listPreview.creatingGroup) }
+    var newMenu by remember { mutableStateOf(false) }
+    val showingGroups = if (merged) filter == ChatListMerge.Filter.GROUPS else half == ConversationFilter.Half.GROUPS
+
     // The two filters compose in ONE order and it matters: the kind split first, the typed
     // query second. The other way round, an empty Groups tab would report "nothing matched
     // <query>" while the user had typed nothing at all, because the query filter would have
     // been handed a list that the kind filter then emptied.
-    val inHalf = remember(state.conversations, half) { ConversationFilter.ofKind(state.conversations, half) }
-    val rows = remember(inHalf, query) { ConversationFilter.apply(inHalf, query) }
+    val inHalf = remember(state.conversations, half, merged, filter, groupSub) {
+        if (merged) state.conversations.filter { ChatListMerge.matches(it, filter) && (filter != ChatListMerge.Filter.GROUPS || ChatListMerge.matches(it, groupSub)) }
+        else ConversationFilter.ofKind(state.conversations, half)
+            .filter { half != ConversationFilter.Half.GROUPS || ChatListMerge.matches(it, groupSub) }
+    }
+    val rows = remember(inHalf, query, merged, filter, groupSub, textHits) {
+        if (merged) ChatListMerge.arrange(state.conversations, filter, groupSub, query, textHits) else ConversationFilter.apply(inHalf, query, textHits)
+    }
     val emptyReason = ConversationFilter.emptyReason(inHalf.size, rows.size, query)
 
     // __LIST_TOP_2026_09_22__ The list is keyed (`key = { it.id }`) and sorted newest-first
@@ -126,7 +169,8 @@ fun ConversationListPane(
         Hairline()
 
         // The shipped list's own control, in its own place — first thing under the header.
-        SegmentedControl(
+        // Merged mode replaces it by the chips under the search field (as on both phones).
+        if (!merged) SegmentedControl(
             options = listOf(ConversationFilter.Half.MESSAGES, ConversationFilter.Half.GROUPS),
             selected = half,
             label = { if (it == ConversationFilter.Half.MESSAGES) t("tab.messages") else t("tab.groups") },
@@ -136,7 +180,7 @@ fun ConversationListPane(
         )
 
         Row(
-            Modifier.fillMaxWidth().padding(start = OshiTheme.lg, end = OshiTheme.lg, bottom = OshiTheme.md),
+            Modifier.fillMaxWidth().padding(start = OshiTheme.lg, end = OshiTheme.lg, bottom = OshiTheme.md, top = if (merged) OshiTheme.lg else 0.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm),
         ) {
@@ -145,7 +189,11 @@ fun ConversationListPane(
                 // are NOT the same keys: `tab.*` is what a five-across control has room for and
                 // `*.title` is what a screen title reads like, and the catalogs spell them apart in
                 // several locales. Reusing one for the other is a guess that happens to be right here.
-                if (half == ConversationFilter.Half.GROUPS) t("groups.title") else t("messages.title"),
+                when {
+                    merged -> t("chats.merged.segment")
+                    half == ConversationFilter.Half.GROUPS -> t("groups.title")
+                    else -> t("messages.title")
+                },
                 style = OshiTheme.typography.headlineLarge,
                 color = Ink.strong,
                 maxLines = 1,
@@ -157,79 +205,190 @@ fun ConversationListPane(
             // comes and goes, and only when a share starts or ends.
             IncomingSharesChip(incomingShares, onSelect)
             NetworkBadgeChip(badge, reach = onReach)
+            if (merged) {
+                Box {
+                    NewButton(open = newMenu) { newMenu = !newMenu }
+                    NewMenu(
+                        expanded = newMenu,
+                        onDismiss = { newMenu = false },
+                        onNewChat = { newMenu = false; onNewChat() },
+                        onNewGroup = { newMenu = false; creatingGroup = true; filter = ChatListMerge.Filter.GROUPS },
+                        onScanInvite = { newMenu = false; onNewChat() },
+                        onDiscover = { newMenu = false; onShow(Pane.DISCOVER_GROUPS) },
+                    )
+                }
+            }
         }
 
         FilterField(query, onQuery, Modifier.padding(horizontal = OshiTheme.lg))
         Spacer(Modifier.height(OshiTheme.md))
 
-        if (half == ConversationFilter.Half.GROUPS) {
-            GroupCreateCard(state.contacts, onCreateGroup, Modifier.padding(horizontal = OshiTheme.lg))
+        if (merged) {
+            MergedFilterChips(filter, ChatListMerge.counts(state.conversations)) { filter = it; if (it != ChatListMerge.Filter.GROUPS) creatingGroup = false }
+            Spacer(Modifier.height(OshiTheme.sm))
+        }
+        if (showingGroups) {
+            GroupSubChips(groupSub) { groupSub = it }
+            Spacer(Modifier.height(OshiTheme.sm))
+        }
+
+        // Merged mode: the create card is behind "New… › New group" (it was always open in
+        // the Groups half, which keeps doing exactly that).
+        if (if (merged) creatingGroup else half == ConversationFilter.Half.GROUPS) {
+            GroupCreateCard(
+                state.contacts,
+                { name, members -> onCreateGroup(name, members); if (merged) creatingGroup = false },
+                Modifier.padding(horizontal = OshiTheme.lg),
+                onClose = if (merged) ({ creatingGroup = false }) else null,
+            )
             Spacer(Modifier.height(OshiTheme.md))
         }
 
         when (emptyReason) {
             ConversationFilter.EmptyReason.NO_CONVERSATIONS ->
                 Box(Modifier.weight(1f)) {
-                    if (half == ConversationFilter.Half.GROUPS) NoGroupsYet() else NoConversationsYet()
+                    when {
+                        merged && state.conversations.isNotEmpty() && filter == ChatListMerge.Filter.UNREAD ->
+                            MergedEmpty(t("chats.merged.empty_unread"), "ok")
+                        merged && state.conversations.isNotEmpty() && filter == ChatListMerge.Filter.PEOPLE ->
+                            MergedEmpty(t("chats.merged.empty_people"), "wave")
+                        showingGroups -> NoGroupsYet(
+                            if (merged) ({ creatingGroup = true }) else null,
+                        )
+                        else -> NoConversationsYet(onNewChat)
+                    }
                 }
             ConversationFilter.EmptyReason.NO_MATCHES ->
                 Box(Modifier.weight(1f)) { NoMatches(query) }
             null -> LazyColumn(Modifier.weight(1f), state = listState) {
                 items(rows, key = { it.id }) { row ->
-                    ConversationListRow(row, row.id == state.selectedId, today) { onSelect(row.id) }
+                    ConversationListRow(
+                        row, row.id == state.selectedId, today, groupMark = merged,
+                        menu = ConversationRowMenuActions(
+                            onSetPinned = { onSetPinned(row.id, it) },
+                            onSetMuted = if (row.kind == ConversationKind.DIRECT || row.kind == ConversationKind.GROUP) ({ onSetMuted(row.id, it) }) else null,
+                            onMarkRead = if (row.unread > 0) ({ onMarkRead(row.id) }) else null,
+                            onOpen = { onSelect(row.id) },
+                            onDelete = if (onDeleteConversation != null && row.kind == ConversationKind.DIRECT) ({ confirmDelete = row }) else null,
+                        ),
+                    ) { onSelect(row.id) }
                     Hairline(inset = OshiTheme.lg + Metrics.separatorInset)
                 }
             }
         }
 
+        confirmDelete?.let { row ->
+            OshiAlertDialog(
+                onDismissRequest = { confirmDelete = null },
+                title = { Text(t("alert.delete_conversation"), style = OshiTheme.typography.titleMedium, color = OshiTheme.textPrimary) },
+                text = { Text(row.label + "\n\n" + t("alert.delete_conversation_message"), style = OshiTheme.typography.bodyMedium, color = Ink.soft) },
+                confirmButton = {
+                    androidx.compose.material3.TextButton(onClick = { confirmDelete = null; onDeleteConversation?.invoke(row.id) }) {
+                        Text(t("common.delete"), color = OshiTheme.danger, fontWeight = FontWeight.SemiBold)
+                    }
+                },
+                dismissButton = {
+                    androidx.compose.material3.TextButton(onClick = { confirmDelete = null }) { Text(t("common.cancel"), color = OshiTheme.textPrimary) }
+                },
+            )
+        }
+
         Hairline()
-        SidebarNav(dt("desktop.nav.account"), Glyph.LOCK, state.pane == Pane.ACCOUNT) { onShow(Pane.ACCOUNT) }
-        SidebarNav(dt("desktop.nav.limits"), Glyph.ALERT, state.pane == Pane.LIMITS) { onShow(Pane.LIMITS) }
+        SidebarNav(t("settings.account"), Glyph.LOCK, state.pane == Pane.ACCOUNT) { onShow(Pane.ACCOUNT) }
+        SidebarNav(t("conv.nav.limits"), Glyph.ALERT, state.pane == Pane.LIMITS) { onShow(Pane.LIMITS) }
         Spacer(Modifier.height(OshiTheme.sm))
     }
 }
 
-/** A group starts from contacts, never arbitrary pasted key text or an invisible roster. */
+/**
+ * A group starts from contacts, never arbitrary pasted key text or an invisible roster.
+ *
+ * __NEW_GROUP_2027__ The phones' "New Group" sheet in a card: the name, then the people as
+ * avatar rows with a check, a count, and ONE Create button that is enabled only when there is
+ * a name and at least one member — the old "Add / Remove" text links per row are gone.
+ */
 @Composable
 private fun GroupCreateCard(
     contacts: List<com.oshi.desktop.ui.state.ContactRow>,
     onCreate: (String, List<String>) -> Unit,
     modifier: Modifier = Modifier,
+    onClose: (() -> Unit)? = null,
 ) {
     var name by remember { mutableStateOf("") }
     var selected by remember(contacts) { mutableStateOf(emptySet<String>()) }
     val eligible = contacts.filterNot { it.blocked }
-    Column(modifier.fillMaxWidth().clip(OshiTheme.radiusMd).background(OshiTheme.surface).padding(OshiTheme.md)) {
-        Text(t("nav_title_new_group"), style = OshiTheme.typography.titleSmall, color = Ink.strong)
-        Spacer(Modifier.height(OshiTheme.xxs))
-        Text(dt("desktop.group.create.hint"), style = OshiTheme.typography.bodySmall, color = Ink.soft)
+    Column(modifier.fillMaxWidth().glass(OshiTheme.radiusMd, OshiTheme.surface).padding(vertical = OshiTheme.md)) {
+        Row(Modifier.padding(horizontal = OshiTheme.md), verticalAlignment = Alignment.CenterVertically) {
+            Text(t("nav_title_new_group"), style = OshiTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = Ink.strong, modifier = Modifier.weight(1f))
+            if (onClose != null) GlyphButton(Glyph.CLOSE, t("common.close"), size = 26.dp, glyphSize = 12.dp, onClick = onClose)
+        }
         Spacer(Modifier.height(OshiTheme.sm))
-        BasicTextField(
-            value = name,
-            onValueChange = { name = it },
-            singleLine = true,
-            textStyle = OshiTheme.typography.bodySmall.copy(color = Ink.strong),
-            cursorBrush = SolidColor(OshiTheme.brand),
-            modifier = Modifier.fillMaxWidth().padding(vertical = OshiTheme.xxs),
-            decorationBox = { inner ->
-                if (name.isBlank()) Text(t("Group Name"), style = OshiTheme.typography.bodySmall, color = Ink.soft)
-                inner()
-            },
-        )
+        Row(
+            Modifier.padding(horizontal = OshiTheme.md).fillMaxWidth().clip(OshiTheme.radiusSm).background(OshiTheme.background)
+                .padding(horizontal = OshiTheme.md, vertical = OshiTheme.sm),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                if (name.isBlank()) Text(t("groups.group_name_placeholder"), style = OshiTheme.typography.bodyMedium, color = Ink.soft)
+                BasicTextField(
+                    value = name,
+                    onValueChange = { name = it.take(100) },
+                    singleLine = true,
+                    textStyle = OshiTheme.typography.bodyMedium.copy(color = Ink.strong),
+                    cursorBrush = SolidColor(OshiTheme.brand),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+        Spacer(Modifier.height(OshiTheme.sm))
         if (eligible.isEmpty()) {
-            Text(dt("desktop.group.create.noContacts"), style = OshiTheme.typography.bodySmall, color = Ink.soft)
+            Text(t("group.no_contacts"), style = OshiTheme.typography.bodySmall, color = Ink.soft, modifier = Modifier.padding(horizontal = OshiTheme.md))
         } else {
-            for (contact in eligible) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text(contact.label, style = OshiTheme.typography.bodySmall, color = Ink.strong, modifier = Modifier.weight(1f))
-                    TextAction(if (contact.address in selected) t("common.remove") else t("common.add")) {
-                        selected = if (contact.address in selected) selected - contact.address else selected + contact.address
+            Text(
+                t("group_members") + if (selected.isEmpty()) "" else " · " + t("attach.selected_count", selected.size),
+                style = OshiTheme.typography.labelMedium, color = Ink.soft,
+                modifier = Modifier.padding(horizontal = OshiTheme.md, vertical = OshiTheme.xxs),
+            )
+            Column(Modifier.heightIn(max = 260.dp).verticalScroll(rememberScrollState())) {
+                for (contact in eligible) {
+                    val on = contact.address in selected
+                    val (src, hov) = rememberRowInteraction()
+                    Row(
+                        Modifier.fillMaxWidth()
+                            .background(if (hov.value) OshiTheme.textPrimary.copy(alpha = 0.05f) else Color.Transparent)
+                            .selectable(selected = on, role = androidx.compose.ui.semantics.Role.Checkbox, interactionSource = src, indication = null) {
+                                selected = if (on) selected - contact.address else selected + contact.address
+                            }
+                            .padding(horizontal = OshiTheme.md, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(OshiTheme.md),
+                    ) {
+                        Monogram(contact.label, contact.address, 30.dp)
+                        Text(contact.label, style = OshiTheme.typography.bodyMedium, color = Ink.strong, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                        CheckCircle(on)
                     }
                 }
             }
-            TextAction(t("button_create_group")) { onCreate(name, selected.toList()) }
+            Spacer(Modifier.height(OshiTheme.sm))
+            Box(Modifier.fillMaxWidth().padding(horizontal = OshiTheme.md), contentAlignment = Alignment.CenterEnd) {
+                PrimaryButton(t("button_create_group"), enabled = name.isNotBlank() && selected.isNotEmpty()) {
+                    onCreate(name, selected.toList())
+                    name = ""; selected = emptySet()
+                }
+            }
         }
     }
+}
+
+/** The round check of a multi-select row: an empty ring, or a filled brand disc with a tick. */
+@Composable
+private fun CheckCircle(on: Boolean) {
+    Box(
+        Modifier.size(22.dp).clip(CircleShape)
+            .background(if (on) OshiTheme.brand else Color.Transparent)
+            .then(if (on) Modifier else Modifier.border(1.5.dp, Ink.soft.copy(alpha = 0.6f), CircleShape)),
+        contentAlignment = Alignment.Center,
+    ) { if (on) GlyphIcon(Glyph.CHECK, onBrandBadge(), 13.dp) }
 }
 
 /**
@@ -241,25 +400,16 @@ private fun GroupCreateCard(
  * produce a group.
  */
 @Composable
-private fun NoGroupsYet() {
-    Column(
-        Modifier.fillMaxWidth().padding(OshiTheme.lg),
-        horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally,
-    ) {
-        Spacer(Modifier.height(OshiTheme.xxl))
-        BrandDisc(Glyph.LOCK)
-        Spacer(Modifier.height(OshiTheme.md))
-        Text(t("empty.no_groups"), style = OshiTheme.typography.titleMedium, color = Ink.strong)
-        Spacer(Modifier.height(OshiTheme.xs))
-        Text(
-            // Desktop-only: the phone's equivalent copy sends you to a button that does not
-            // exist here, and `/group new` is a REPL command no iOS string has ever named.
-            dt("desktop.empty.groups.body"),
-            style = OshiTheme.typography.bodySmall,
-            color = Ink.soft,
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-        )
-    }
+private fun NoGroupsYet(onNewGroup: (() -> Unit)?) {
+    // __MASCOT_EMPTY_2027__ The phones' copy, and the action that actually makes a group here.
+    MascotEmptyState(
+        mascot = "party",
+        title = t("empty_groups_title"),
+        body = t("empty_groups_subtitle"),
+        modifier = Modifier.padding(top = OshiTheme.xl),
+        size = 96.dp,
+        action = onNewGroup?.let { t("chats.merged.new_group") to it },
+    )
 }
 
 // ---------------------------------------------------------------------------- account strip
@@ -277,7 +427,7 @@ private fun AccountStrip(state: ShellState, onShow: (Pane) -> Unit) {
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(OshiTheme.md),
     ) {
-        Monogram(state.displayName, state.selfAddress, Metrics.avatarHeader)
+        GroupAvatar(state.selfPictureBase64, state.displayName, state.selfAddress, Metrics.avatarHeader)   // __PROFILE_PHOTOS_DESKTOP_2027__
         Column(Modifier.weight(1f)) {
             Text(
                 state.displayName,
@@ -324,9 +474,9 @@ private fun GateChip(open: Boolean, answered: Boolean) {
         Box(Modifier.size(6.dp).clip(CircleShape).background(tint))
         Text(
             when (shown) {
-                com.oshi.desktop.ui.state.GateDisplay.OPEN -> dt("desktop.gate.open.chip")
+                com.oshi.desktop.ui.state.GateDisplay.OPEN -> t("conv.gate.open")
                 com.oshi.desktop.ui.state.GateDisplay.ASKING -> t("connection.connecting")
-                com.oshi.desktop.ui.state.GateDisplay.CLOSED -> dt("desktop.gate.closed.chip")
+                com.oshi.desktop.ui.state.GateDisplay.CLOSED -> t("conv.gate.closed")
             },
             fontSize = 11.sp,
             fontWeight = FontWeight.Medium,
@@ -385,13 +535,19 @@ private fun ConversationListRow(
     row: ConversationRow,
     selected: Boolean,
     today: LocalDate,
+    /** Merged list: group-like rows carry a small people glyph on the avatar (the phones' cue). */
+    groupMark: Boolean = false,
+    menu: ConversationRowMenuActions? = null,
     onClick: () -> Unit,
 ) {
     val (source, hovered) = rememberRowInteraction()
+    val previewMenu = LocalConversationListPreview.current.rowMenuId == row.id
+    var menuOpen by remember(row.id) { mutableStateOf(previewMenu) }
     Row(
         Modifier
             .fillMaxWidth()
             .defaultMinSize(minHeight = Metrics.rowHeight)
+            .then(if (menu == null) Modifier else Modifier.onSecondaryClick { menuOpen = true })
             .background(
                 when {
                     selected -> OshiTheme.brand.copy(alpha = 0.09f)
@@ -405,17 +561,38 @@ private fun ConversationListRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(OshiTheme.md),
     ) {
-        GroupAvatar(row.pictureBase64, row.label, row.id, Metrics.avatarList)
+        Box {
+            GroupAvatar(row.pictureBase64, row.label, row.id, Metrics.avatarList)
+            if (groupMark && ChatListMerge.isGroupLike(row)) {
+                Box(
+                    Modifier
+                        .align(Alignment.BottomEnd)
+                        .size(18.dp)
+                        .clip(CircleShape)
+                        .background(OshiTheme.background)
+                        .padding(2.dp)
+                        .clip(CircleShape)
+                        .background(OshiTheme.brand)
+                        .semantics { contentDescription = t("chats.merged.group_a11y") },
+                    contentAlignment = Alignment.Center,
+                ) { GlyphIcon(Glyph.PEOPLE, onBrandBadge(), 11.dp) }
+            }
+        }
 
         Column(Modifier.weight(1f)) {
-            Text(
-                row.label,
-                style = OshiTheme.typography.bodyLarge,
-                fontWeight = FontWeight.SemiBold,
-                color = Ink.strong,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(OshiTheme.xs)) {
+                Text(
+                    row.label,
+                    style = OshiTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Bold,   // iOS 1441b479: the NAME leads, in bold, preview under it
+                    color = Ink.strong,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                // __CONVERSATION_PIN_MUTE_2027__ the two quiet marks the phones put by the name.
+                if (row.muted) GlyphIcon(Glyph.BELL_SLASH, Ink.soft, 13.dp, Modifier.semantics { contentDescription = t("group.notifications.muted") })
+            }
             // A group, a bot post and a quarantined radio message are NOT the same kind of
             // thing as a ratcheted 1:1 message. The list says which is which rather than
             // letting them all read alike — `ChatShellModel`'s "what it refuses to show".
@@ -434,6 +611,7 @@ private fun ConversationListRow(
         }
 
         Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(OshiTheme.xs)) {
+          Box(contentAlignment = Alignment.CenterEnd) {
             Text(
                 DayBreaks.compactStamp(row.lastActivity, today),
                 fontSize = 11.sp,
@@ -441,8 +619,26 @@ private fun ConversationListRow(
                 // Violet on an unread row is the capture's own cue. `brand` on white is
                 // 7.74:1, so it carries a timestamp safely.
                 color = if (row.unread > 0) OshiTheme.brand else Ink.soft,
+                // Hidden (not removed) under the hover "⋯" so the column keeps its width.
+                modifier = Modifier.then(if (menu != null && (hovered.value || menuOpen)) Modifier.graphicsLayer(alpha = 0f) else Modifier),
             )
+            if (menu != null && (hovered.value || menuOpen)) {
+                Box {
+                    GlyphButton(Glyph.MORE, t("a11y.more_options"), size = 24.dp, glyphSize = 15.dp, active = menuOpen) { menuOpen = true }
+                    OshiDropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }, offset = androidx.compose.ui.unit.DpOffset(0.dp, 4.dp)) {
+                        ConversationRowMenuItems(row, menu) { menuOpen = false }
+                    }
+                }
+            } else if (menuOpen && menu != null) {
+                Box {
+                    OshiDropdownMenu(expanded = true, onDismissRequest = { menuOpen = false }) {
+                        ConversationRowMenuItems(row, menu) { menuOpen = false }
+                    }
+                }
+            }
+          }
             Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.xs), verticalAlignment = Alignment.CenterVertically) {
+                if (row.pinned) GlyphIcon(Glyph.PIN, Ink.soft, 13.dp, Modifier.semantics { contentDescription = t("conv.pinned") })
                 // __MENTIONS_2026_09_23__ "@" pill: an unseen message here mentions you.
                 if (row.mentionedYou) MentionBadge()
                 UnreadBadge(row.unread)
@@ -466,8 +662,8 @@ fun KindBadge(kind: ConversationKind) {
         // Desktop-only, and these two are the ones that cost something: they are the warning
         // labels on the two lanes that are NOT end-to-end encrypted, and they stay English in
         // the other 33 locales until somebody translates them into the iOS tree.
-        ConversationKind.BOT -> dt("desktop.badge.bot") to OshiTheme.danger
-        ConversationKind.LORA -> dt("desktop.badge.lora") to OshiTheme.warning
+        ConversationKind.BOT -> t("conv.badge.bot") to OshiTheme.danger
+        ConversationKind.LORA -> t("conv.badge.lora") to OshiTheme.warning
     }
     Text(
         text,
@@ -516,84 +712,210 @@ private fun SidebarNav(label: String, glyph: Glyph, selected: Boolean, onClick: 
 }
 
 /**
- * The onboarding empty state, adapted from `EmptyStateView` in `MessagesListView.swift`.
- *
- * The phone's three steps end in a "Scan their code" button. There is no camera here
- * (`DesktopLimits.MISSING`, VIEWS.md §6), so the steps name the REPL commands that actually
- * exist instead of offering a control that would open nothing.
+ * The onboarding empty state, `EmptyStateView` in `MessagesListView.swift`: the mascot,
+ * "No conversations yet", one line, and the one action that starts one.
  */
 @Composable
-private fun NoConversationsYet() {
-    Column(
-        Modifier.fillMaxWidth().padding(OshiTheme.lg),
-        verticalArrangement = Arrangement.spacedBy(OshiTheme.md),
-    ) {
-        BrandDisc(Glyph.LOCK, 52.dp)
-        // `ai_no_conversations` is filed under the AI screen upstream and its value is exactly
-        // this sentence in all 34 catalogs. The alternative was a `desktop.` key shipping
-        // English to 33 locales for a string this project has already paid to translate.
-        Text(t("ai_no_conversations"), style = OshiTheme.typography.titleMedium, color = Ink.strong)
-        Text(
-            dt("desktop.empty.conversations.body"),
-            style = OshiTheme.typography.bodyMedium,
-            color = Ink.soft,
-        )
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .clip(OshiTheme.radiusMd)
-                .background(OshiTheme.surface)
-                .padding(OshiTheme.md),
-            verticalArrangement = Arrangement.spacedBy(OshiTheme.sm),
-        ) {
-            Step(1, dt("desktop.empty.conversations.step1.title"), dt("desktop.empty.conversations.step1.detail"))
-            Step(2, dt("desktop.empty.conversations.step2.title"), dt("desktop.empty.conversations.step2.detail"))
-            Step(3, dt("desktop.empty.conversations.step3.title"), dt("desktop.empty.conversations.step3.detail"))
-        }
-        Text(
-            dt("desktop.empty.conversations.footnote"),
-            fontSize = 11.sp,
-            color = Ink.soft,
-        )
-    }
-}
-
-@Composable
-private fun Step(n: Int, title: String, detail: String) {
-    Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.md), verticalAlignment = Alignment.Top) {
-        Box(
-            Modifier.size(24.dp).clip(CircleShape).background(OshiTheme.brand.copy(alpha = 0.15f)),
-            contentAlignment = Alignment.Center,
-        ) {
-            // A WESTERN digit, deliberately, and this was measured rather than assumed.
-            // `NumberFormat.getIntegerInstance(locale)` follows CLDR's default numbering system,
-            // which emits extended Arabic-Indic digits for `fa` and Arabic-Indic ones for `ar`.
-            // Counting the non-ASCII digits actually present in the 34 catalogs says that would
-            // agree with the asset in one locale and contradict it in another: `fa` writes
-            // extended Arabic-Indic digits 156 times, `ar` writes an Arabic-Indic digit ONCE in
-            // 3800+ strings, and `hi` writes Devanagari digits not at all. So localising this
-            // step number would set an Arabic-Indic 1 beside Arabic sentences that write "1".
-            // The shipped asset's own convention wins until somebody changes the asset.
-            Text("$n", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = OshiTheme.brand)
-        }
-        Column {
-            Text(title, style = OshiTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, color = Ink.strong)
-            Text(detail, fontSize = 11.sp, color = Ink.soft, fontFamily = FontFamily.Default)
-        }
-    }
+private fun NoConversationsYet(onNewChat: () -> Unit) {
+    MascotEmptyState(
+        mascot = "wave",
+        title = t("ai_no_conversations"),
+        body = t("messages_empty_subtitle"),
+        modifier = Modifier.padding(top = OshiTheme.xl),
+        size = 96.dp,
+        action = t("chats.merged.new_chat") to onNewChat,
+    )
 }
 
 @Composable
 private fun NoMatches(query: String) {
-    Column(
-        Modifier.fillMaxWidth().padding(OshiTheme.lg),
-        verticalArrangement = Arrangement.spacedBy(OshiTheme.sm),
+    MascotEmptyState(
+        mascot = "thinking",
+        title = t("search.no_results"),
+        body = t("conv.search.no_match", query.trim()),
+        modifier = Modifier.padding(top = OshiTheme.xl),
+        size = 80.dp,
+    )
+}
+
+
+// ---------------------------------------------------------------------------- merged list
+
+/**
+ * __MERGED_CHATS_2026_11_18__ All · Unread · Groups · People, each with its count of threads
+ * that have something unread (Android `MergedFilterChips`, iOS the same). Selected = brand
+ * fill; Light/Dark = the field fill; OLED = glass. One focusable target per chip.
+ */
+@Composable
+internal fun MergedFilterChips(
+    selected: ChatListMerge.Filter,
+    counts: ChatListMerge.Counts,
+    onSelect: (ChatListMerge.Filter) -> Unit,
+) {
+    // __FILTER_CHIPS_WRAP_2027__ A FlowRow, not a horizontally scrolled Row: in French
+    // ("Personnes") and Arabic the four chips are wider than the list column, and the scrolled
+    // row simply cut the last one at the pane edge ("Pers…") with no hint that it scrolled. A
+    // chip that does not fit now goes to a second line, whole.
+    @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+    androidx.compose.foundation.layout.FlowRow(
+        Modifier.fillMaxWidth().padding(horizontal = OshiTheme.lg),
+        horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm),
+        verticalArrangement = Arrangement.spacedBy(OshiTheme.xs),
     ) {
-        Text(t("search.no_results"), style = OshiTheme.typography.titleMedium, color = Ink.strong)
-        Text(
-            dt("desktop.empty.matches.body", query.trim()),
-            style = OshiTheme.typography.bodyMedium,
-            color = Ink.soft,
-        )
+        for (f in ChatListMerge.Filter.entries) {
+            val (label, count) = when (f) {
+                ChatListMerge.Filter.ALL -> t("chats.merged.filter_all") to 0
+                ChatListMerge.Filter.UNREAD -> t("chats.merged.filter_unread") to counts.unread
+                ChatListMerge.Filter.GROUPS -> t("chats.merged.filter_groups") to counts.groups
+                ChatListMerge.Filter.PEOPLE -> t("chats.merged.filter_people") to counts.people
+            }
+            ListChip(label, count, f == selected) { onSelect(f) }
+        }
     }
 }
+
+/** The Groups sub-filter: All · Admin Only · Collaborative · Public (the phones' Groups tab chips). */
+@Composable
+internal fun GroupSubChips(selected: ChatListMerge.GroupSub, onSelect: (ChatListMerge.GroupSub) -> Unit) {
+    @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+    androidx.compose.foundation.layout.FlowRow(
+        Modifier.fillMaxWidth().padding(horizontal = OshiTheme.lg),
+        horizontalArrangement = Arrangement.spacedBy(OshiTheme.xs),
+        verticalArrangement = Arrangement.spacedBy(OshiTheme.xs),
+    ) {
+        for (g in ChatListMerge.GroupSub.entries) {
+            val label = when (g) {
+                ChatListMerge.GroupSub.ALL -> t("chats.merged.filter_all")
+                ChatListMerge.GroupSub.ADMIN_ONLY -> t("group_type_admin_only")
+                ChatListMerge.GroupSub.COLLABORATIVE -> t("group_type_collaborative")
+                ChatListMerge.GroupSub.PUBLIC -> t("group_type_public")
+            }
+            ListChip(label, 0, g == selected, small = true) { onSelect(g) }
+        }
+    }
+}
+
+@Composable
+private fun ListChip(label: String, count: Int, selected: Boolean, small: Boolean = false, onClick: () -> Unit) {
+    val (source, hovered) = rememberRowInteraction()
+    val glassy = OshiTheme.glass != null
+    // Dark/OLED lift `brand` to #A98BFF so it reads as INK; as a FILL it then needs dark text
+    // (white on #A98BFF is ~2.6:1). Light keeps white on the deep violet.
+    val onBrand = if (OshiTheme.palette.isDark) Color(0xFF14082E) else Color.White
+    Row(
+        Modifier
+            .then(
+                when {
+                    selected -> Modifier.clip(OshiTheme.pill).background(OshiTheme.brand)
+                    glassy -> Modifier.glass(OshiTheme.pill, OshiTheme.surface)
+                    else -> Modifier.clip(OshiTheme.pill).background(if (hovered.value) OshiTheme.separator.copy(alpha = 0.18f) else OshiTheme.surface)
+                }
+            )
+            .focusRing(OshiTheme.pill)
+            .selectable(selected = selected, role = androidx.compose.ui.semantics.Role.Tab, interactionSource = source, indication = null, onClick = onClick)
+            .semantics { contentDescription = if (count > 0) "$label, $count" else label }
+            .padding(horizontal = if (small) OshiTheme.md else 14.dp, vertical = if (small) 4.dp else 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            label,
+            fontSize = if (small) 12.sp else 13.sp,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+            color = if (selected) onBrand else Ink.strong,
+            maxLines = 1,
+        )
+        if (count > 0) {
+            Spacer(Modifier.width(6.dp))
+            Box(
+                Modifier.clip(OshiTheme.pill)
+                    .background(if (selected) onBrand.copy(alpha = 0.18f) else OshiTheme.brand)
+                    .padding(horizontal = 6.dp, vertical = 1.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(if (count > 99) "99+" else "$count", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = if (selected) onBrand else onBrandBadge())
+            }
+        }
+    }
+}
+
+/** The compose button beside the title in merged mode: opens "New…". */
+@Composable
+private fun NewButton(open: Boolean, onClick: () -> Unit) {
+    val (source, hovered) = rememberRowInteraction()
+    Box(
+        Modifier
+            .size(30.dp)
+            .clip(CircleShape)
+            .background(if (open || hovered.value) OshiTheme.brand.copy(alpha = 0.14f) else Color.Transparent)
+            .focusRing(CircleShape)
+            .clickable(interactionSource = source, indication = null, onClickLabel = t("chats.merged.new_title"), onClick = onClick)
+            .semantics { contentDescription = t("chats.merged.new_title") },
+        contentAlignment = Alignment.Center,
+    ) { GlyphIcon(Glyph.COMPOSE, OshiTheme.brand, 18.dp) }
+}
+
+/**
+ * "New…" (Android `NewChatSheet`, iOS the compose sheet). Desktop offers what it can DO:
+ * New chat, New group, Scan / import an invite (the New screen, which takes a pasted link, a
+ * QR image file or the camera). "Discover public channels" and the "group nearby" card are
+ * not offered: they are fed by Bluetooth / radio discovery the desktop does not have, and a
+ * row that opens nothing is the greyed-out control `DesktopLimits` argues against.
+ */
+@Composable
+private fun NewMenu(
+    expanded: Boolean,
+    onDismiss: () -> Unit,
+    onNewChat: () -> Unit,
+    onNewGroup: () -> Unit,
+    onScanInvite: () -> Unit,
+    onDiscover: () -> Unit = {},
+) {
+    OshiDropdownMenu(expanded = expanded, onDismissRequest = onDismiss, offset = androidx.compose.ui.unit.DpOffset(0.dp, 4.dp)) {
+        Text(
+            t("chats.merged.new_title"),
+            style = OshiTheme.typography.labelMedium,
+            color = Ink.soft,
+            modifier = Modifier.padding(horizontal = OshiTheme.md, vertical = OshiTheme.xs),
+        )
+        NewMenuRow(Glyph.PERSON, t("chats.merged.new_chat"), t("chats.merged.new_chat_desc"), onNewChat)
+        NewMenuRow(Glyph.PEOPLE, t("chats.merged.new_group"), t("chats.merged.new_group_desc"), onNewGroup)
+        NewMenuRow(Glyph.QR, t("chats.merged.scan_invite"), t("chats.merged.scan_invite_desc"), onScanInvite)
+        // __DESKTOP_GROUP_DISCOVERY_2027__
+        NewMenuRow(Glyph.SEARCH, t("pc.groups.discover.title"), t("pc.groups.discover.menu"), onDiscover)
+    }
+}
+
+@Composable
+private fun NewMenuRow(glyph: Glyph, title: String, detail: String, onClick: () -> Unit) {
+    val (source, hovered) = rememberRowInteraction()
+    Row(
+        Modifier
+            .width(300.dp)
+            .background(if (hovered.value) OshiTheme.textPrimary.copy(alpha = 0.06f) else Color.Transparent)
+            .clickable(interactionSource = source, indication = null, onClick = onClick)
+            .padding(horizontal = OshiTheme.md, vertical = OshiTheme.sm),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(OshiTheme.md),
+    ) {
+        Box(Modifier.size(34.dp).clip(CircleShape).background(OshiTheme.brand.copy(alpha = 0.14f)), contentAlignment = Alignment.Center) {
+            GlyphIcon(glyph, OshiTheme.brand, 18.dp)
+        }
+        Column(Modifier.weight(1f)) {
+            Text(title, style = OshiTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, color = Ink.strong)
+            Text(detail, style = OshiTheme.typography.bodySmall, color = Ink.soft)
+        }
+    }
+}
+
+@Composable
+private fun MergedEmpty(title: String, mascot: String) {
+    MascotEmptyState(mascot = mascot, title = title, modifier = Modifier.padding(top = OshiTheme.xl), size = 88.dp)
+}
+
+@Composable
+private fun onBrandBadge(): Color = if (OshiTheme.palette.isDark) Color(0xFF14082E) else Color.White
+
+/** Forces list state for the headless renderer (`MessagesScreens`); the window never provides it. */
+data class ConversationListPreview(val rowMenuId: String? = null, val creatingGroup: Boolean = false)
+
+val LocalConversationListPreview = androidx.compose.runtime.staticCompositionLocalOf { ConversationListPreview() }

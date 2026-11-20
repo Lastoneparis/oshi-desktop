@@ -31,7 +31,7 @@ import com.oshi.desktop.ui.OshiTheme
  * (0.6 of the outer radius instead of 7/13) so a smile fits inside at 14sp.
  */
 @Composable
-fun OshiSmileMark(size: Dp, modifier: Modifier = Modifier, color: Color = OshiTheme.brand) {
+fun OshiSmileMark(size: Dp, modifier: Modifier = Modifier, color: Color = OshiTheme.brand, face: Boolean = true) {
     Canvas(
         modifier
             .size(size)
@@ -61,7 +61,8 @@ fun OshiSmileMark(size: Dp, modifier: Modifier = Modifier, color: Color = OshiTh
             style = Stroke(width = ringWidth),
         )
 
-        // Face inside the hole.
+        // Face inside the hole — none on the plain OSHI "O" (__OSHI_O_REACTION_2026_11_15__).
+        if (!face) return@Canvas
         val rIn = rOut - ringWidth
         val eyeR = 0.13f * rIn
         drawCircle(color, eyeR, Offset(cx - 0.38f * rIn, cy - 0.22f * rIn))
@@ -81,13 +82,21 @@ fun OshiSmileMark(size: Dp, modifier: Modifier = Modifier, color: Color = OshiTh
 
 /**
  * One reaction as it is drawn on a chip or in the picker: the exact OSHI wire
- * value becomes [OshiSmileMark]; everything else is text, as before.
+ * value becomes [OshiSmileMark]; an emoji with an O-bubble mascot (canonical or
+ * alias, `__O_BUBBLE_MASCOT_2026_11_16__`) becomes that mascot; everything else is
+ * text, as before. Only the DRAWING changes — the key is stored and sent as it came.
  */
 @Composable
 fun ReactionGlyph(code: String, fontSize: TextUnit = 14.sp, modifier: Modifier = Modifier) {
-    if (OshiReaction.isOshiSmile(code)) {
+    val mascot = com.oshi.desktop.mascot.OshiMascot.forEmoji(code)
+    if (OshiReaction.isOshiO(code)) {
+        // __OSHI_O_REACTION_2026_11_15__ the plain "⭕" is the brand O, ring + tail, no face.
+        OshiSmileMark(size = (fontSize.value * 1.25f).dp, modifier = modifier, face = false)
+    } else if (OshiReaction.isOshiSmile(code)) {
         // An emoji at N sp occupies roughly 1.25·N of line height.
         OshiSmileMark(size = (fontSize.value * 1.25f).dp, modifier = modifier)
+    } else if (mascot != null) {
+        MascotReactionGlyph(mascot, fontSize, modifier)
     } else {
         Text(text = code, fontSize = fontSize, modifier = modifier)
     }

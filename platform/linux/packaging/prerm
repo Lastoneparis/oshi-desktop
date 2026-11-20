@@ -8,7 +8,7 @@
 
 set -e
 
-APPDIR=/opt/oshi-desktop
+APPDIR=/opt/oshi-desktop/oshi-desktop
 
 unregister_menu() {
     command -v xdg-desktop-menu >/dev/null 2>&1 || return 0

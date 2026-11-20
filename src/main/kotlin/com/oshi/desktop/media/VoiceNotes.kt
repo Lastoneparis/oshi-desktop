@@ -123,6 +123,40 @@ class VoiceNotes(
 
     fun cancelRecording() = recorder.cancel()
 
+    // ------------------------------------------------------- preview + voice effects
+
+    /**
+     * __VOICE_EFFECTS_DESKTOP_2027__ Stop and keep the raw WAV for the preview, where the user
+     * listens, picks a voice (iOS's voice preview sheet) and only then sends. [render] makes
+     * the note that is sent; [discardPreview] throws everything away.
+     */
+    fun stopForPreview(): VoicePreviewStop =
+        when (val stopped = recorder.stop()) {
+            is RecordingStop.Failure -> VoicePreviewStop.Failure(stopped.reason)
+            is RecordingStop.Captured -> VoicePreviewStop.Captured(stopped.recording)
+        }
+
+    /** A playable WAV of [recording] with [effect] — the original itself for none. Cached per effect by the caller. */
+    fun previewWav(recording: Recording, effect: com.oshi.desktop.call.media.CallVoiceEffects.Effect): File {
+        if (effect == com.oshi.desktop.call.media.CallVoiceEffects.Effect.NONE) return recording.file
+        val out = File(workDir, "voice-fx-${UUID.randomUUID()}.${VoiceNoteContainer.WAV_PCM.extension}")
+        VoiceEffectRender.apply(recording.file, effect, out)
+        return out
+    }
+
+    /** The note to send: the effect baked into the samples, then the usual m4a encode. Deletes the raw WAV. */
+    fun render(recording: Recording, effect: com.oshi.desktop.call.media.CallVoiceEffects.Effect): VoiceNote {
+        if (effect == com.oshi.desktop.call.media.CallVoiceEffects.Effect.NONE) return finish(recording)
+        val fx = previewWav(recording, effect)
+        recording.file.delete()
+        return finish(recording.copy(file = fx))
+    }
+
+    fun discardPreview(recording: Recording, extra: Collection<File> = emptyList()) {
+        runCatching { recording.file.delete() }
+        extra.forEach { runCatching { it.delete() } }
+    }
+
     private fun finish(recording: Recording): VoiceNote {
         val m4a = File(workDir, "voice-${UUID.randomUUID()}.${VoiceNoteContainer.M4A_AAC.extension}")
         val encoded = transcoder.toM4a(recording.file, m4a)
@@ -222,6 +256,8 @@ data class VoiceNote(
     val truncated: Boolean,
     val encoder: String?,
     val encodeFailure: String?,
+    /** __VIEW_ONCE_DESKTOP_2027__ the user asked for this voice note to play once (1:1 only). */
+    val viewOnce: Boolean = false,
 ) {
     val mime: String get() = container.mime
 
@@ -242,6 +278,46 @@ data class VoiceNote(
             "This voice note is WAV/PCM, not the m4a/AAC both phones record — a phone may " +
                 "not play it." + (encodeFailure?.let { " ($it)" } ?: "")
         }
+}
+
+sealed interface VoicePreviewStop {
+    data class Captured(val recording: Recording) : VoicePreviewStop
+    data class Failure(val reason: RecordingFailure) : VoicePreviewStop
+}
+
+/**
+ * __VOICE_EFFECTS_DESKTOP_2027__ Offline rendering of a call voice effect over a recorded WAV.
+ *
+ * The call chain ([com.oshi.desktop.call.media.CallVoiceEffects.Chain]) is length-preserving
+ * and stateful, so feeding it the whole recording in blocks is exactly what a live call does
+ * frame by frame — the same voice in both places, with the time constants scaled to the
+ * message's 44.1 kHz. The WAV is the canonical 44-byte-header PCM this client's own recorder
+ * writes ([WavWriter]); anything else is refused rather than guessed at.
+ */
+object VoiceEffectRender {
+    private const val BLOCK = 8_192
+
+    fun apply(src: File, effect: com.oshi.desktop.call.media.CallVoiceEffects.Effect, dst: File) {
+        val chain = com.oshi.desktop.call.media.CallVoiceEffects.Chain(effect, VoiceNoteFormat.SAMPLE_RATE)
+        src.inputStream().buffered().use { input ->
+            val header = input.readNBytes(WavWriter.HEADER_BYTES)
+            require(header.size == WavWriter.HEADER_BYTES && String(header, 0, 4, Charsets.US_ASCII) == "RIFF") { "not a WAV this client wrote" }
+            dst.outputStream().buffered().use { out ->
+                out.write(header)
+                val buf = ByteArray(BLOCK)
+                var carry: Byte? = null
+                while (true) {
+                    val n = input.read(buf)
+                    if (n <= 0) break
+                    var block = buf.copyOf(n)
+                    carry?.let { block = byteArrayOf(it) + block; carry = null }
+                    if (block.size % 2 == 1) { carry = block.last(); block = block.copyOf(block.size - 1) }
+                    out.write(chain.apply(block))
+                }
+                carry?.let { out.write(byteArrayOf(it)) }
+            }
+        }
+    }
 }
 
 sealed interface VoiceNoteResult {

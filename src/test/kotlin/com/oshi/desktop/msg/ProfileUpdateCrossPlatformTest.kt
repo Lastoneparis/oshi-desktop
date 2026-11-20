@@ -149,8 +149,12 @@ class ProfileUpdateCrossPlatformTest {
 
     @Test
     fun `Desktop output is the documented fixture and decodes under the iOS rules`() {
-        val out = ProfileUpdateWire.encode("Hugo desk")
+        // Last Seen off (Settings › Privacy) — the documented fixture.
+        val out = ProfileUpdateWire.encode("Hugo desk", lastSeen = 0.0)
         assertTrue(out, jsonEquals(out, DESKTOP))
+        // __DESKTOP_PRIVACY_PARITY_2027__ Last Seen on: a Double of seconds, still iOS-decodable.
+        val shared = ProfileUpdateWire.encode("Hugo desk", lastSeen = 1_790_000_000.25)
+        assertEquals(PeerNickname.Read.Set("Hugo desk"), IosDecoderRules.decode(shared))
         assertEquals(PeerNickname.Read.Set("Hugo desk"), IosDecoderRules.decode(out))
         assertEquals(PeerNickname.Read.Set("Hugo desk"), PeerNickname.readProfileUpdate(out))
         assertTrue("silent on every lane", ControlPrefix.suppressesPush(out))
@@ -158,7 +162,7 @@ class ProfileUpdateCrossPlatformTest {
 
     @Test
     fun `Desktop never claims an avatar or a capability it does not have`() {
-        val o = JSONObject(ProfileUpdateWire.encode("Hugo").removePrefix(P))
+        val o = JSONObject(ProfileUpdateWire.encode("Hugo", lastSeen = 0.0).removePrefix(P))
         for (k in listOf("profileImageData", "groupEnvelopeV3", "ratchetV3", "pqPublicKey", "appVersion", "appPlatform")) {
             assertFalse("unexpected key $k", o.has(k))
         }

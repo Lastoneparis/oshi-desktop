@@ -95,11 +95,10 @@ fun DeleteAccountPane(host: DeleteAccountHost) {
     var phase by remember { mutableStateOf<DeletePhase>(DeletePhase.Idle) }
     val confirmWord = t("account.delete.confirm.word")
 
-    Column(
-        Modifier.fillMaxSize().background(OshiTheme.surface)
-            .verticalScroll(rememberScrollState()).padding(OshiTheme.xxl),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
+    // __DESKTOP_SETTINGS_2027__ the Settings frame and header: a capped width, so the cards do
+    // not stretch across a 2560-px screen.
+    SettingsPageFrame {
+        SettingsPageHeader(SettingsIcon.DELETE, t("account.delete.title"), null, tint = OshiTheme.danger)
         PaneCard {
             Text(t("account.delete.headline"), style = OshiTheme.typography.titleLarge, color = Ink.strong)
             Spacer(Modifier.height(OshiTheme.xs))

@@ -29,7 +29,7 @@ import javax.crypto.spec.SecretKeySpec
  *
  * FORMAT (JSON, so it can be inspected without this code):
  *
- *     {"v":1,"protection":"os-store"|"passphrase","kdf":{...}?,"nonce":b64,"ct":b64}
+ *     {"v":1,"protection":"os-store"|"passphrase","keyAccount":"master-key.<id>"?,"kdf":{...}?,"nonce":b64,"ct":b64}
  *
  * `ct` is AES-256-GCM over a JSON object of `{account: base64(secret)}`, with the
  * 12-byte nonce and the 128-bit tag GCM's defaults, matching the parameters the shared
@@ -41,9 +41,18 @@ class KeyVault private constructor(
     private val protection: String,
     private val kdfHeader: String?,
     private var entries: MutableMap<String, ByteArray>,
+    /**
+     * __PER_PROFILE_MASTER_KEY_2026_11_19__ The OS key store account holding THIS vault's
+     * master key. Null for a passphrase vault (no OS entry at all), [MASTER_ACCOUNT] for a
+     * legacy vault whose key could not be copied to its own entry yet.
+     */
+    private val keyAccount: String?,
 ) {
 
     val protectedBy: String get() = protection
+
+    /** The OS key store account this vault's master key lives under, or null (passphrase). */
+    val masterKeyAccount: String? get() = keyAccount
     val path: String get() = file.absolutePath
 
     @Synchronized
@@ -98,13 +107,33 @@ class KeyVault private constructor(
     @Synchronized
     fun accounts(): Set<String> = entries.keys.toSortedSet()
 
-    /** Wipe the vault file AND the master key. Account deletion, and nothing less. */
+    /**
+     * Wipe the vault file AND the master key that is THIS vault's own. Account deletion,
+     * and nothing less — and nothing more.
+     *
+     * __PER_PROFILE_MASTER_KEY_2026_11_19__ Until 1.5.0 every profile on a machine (the
+     * default data directory, every `--home`/`OSHI_HOME` profile) shared ONE OS entry,
+     * `com.oshi.desktop` / `master-key`, and this method deleted it unconditionally — even
+     * when the vault being destroyed was a PASSPHRASE vault that never used it. Destroying
+     * a throwaway profile therefore made every other OS-store profile on the machine
+     * undecryptable: a new identity on next start, every contact writing into the void.
+     *
+     * Now: a passphrase vault deletes NO OS entry; an os-store vault deletes only its own
+     * per-vault entry ([masterKeyAccount]); and the legacy shared entry is never deleted,
+     * because there is no way to know which other profile still reads it.
+     */
     @Synchronized
-    fun destroy(secretStore: SecretStore?, masterAccount: String = MASTER_ACCOUNT) {
+    fun destroy(secretStore: SecretStore?) {
         entries = HashMap()
         file.delete()
-        secretStore?.delete(masterAccount)
+        val own = keyAccount
+        if (protection == "os-store" && own != null && own != MASTER_ACCOUNT) {
+            secretStore?.delete(own)
+        }
     }
+
+    @Synchronized
+    internal fun persistLocked() = persist()
 
     private fun persist() {
         val plain = StringBuilder("{")
@@ -126,6 +155,9 @@ class KeyVault private constructor(
         val json = buildString {
             append("{\"v\":").append(VERSION)
             append(",\"protection\":\"").append(protection).append('"')
+            if (keyAccount != null && keyAccount != MASTER_ACCOUNT) {
+                append(",\"keyAccount\":\"").append(jsonEscape(keyAccount)).append('"')
+            }
             if (kdfHeader != null) append(",\"kdf\":").append(kdfHeader)
             append(",\"nonce\":\"").append(b64.encodeToString(nonce)).append('"')
             append(",\"ct\":\"").append(b64.encodeToString(ct)).append("\"}")
@@ -135,7 +167,22 @@ class KeyVault private constructor(
 
     companion object {
         const val VERSION = 1
+        /**
+         * The LEGACY master key entry, shared by every profile on the machine until 1.5.0.
+         * Still READ (an existing install must open after the upgrade, and a downgrade to
+         * 1.4.x must still open a migrated vault), never written for a new vault, never deleted.
+         */
         const val MASTER_ACCOUNT = "master-key"
+
+        /** Prefix of the per-vault entry: `master-key.<16 hex>`. */
+        const val MASTER_ACCOUNT_PREFIX = "master-key."
+
+        private val KEY_ACCOUNT_SHAPE = Regex("^master-key\\.[0-9a-f]{16,64}$")
+
+        internal fun newKeyAccount(): String {
+            val id = ByteArray(8).also { SecureRandom().nextBytes(it) }
+            return MASTER_ACCOUNT_PREFIX + id.joinToString("") { "%02x".format(it) }
+        }
         const val FILE_NAME = "keyvault.json"
 
         /** OWASP's floor for PBKDF2-HMAC-SHA256 at the time of writing. Recorded in the file so it can be raised. */
@@ -170,22 +217,39 @@ class KeyVault private constructor(
                                 "machine.\n  vault: ${file.absolutePath}\n" +
                                 "  Without that key the vault cannot be decrypted; it must not be replaced."
                         )
-                    val key = if (existing == null) {
-                        // First run: mint a key, hand it to the OS, and only then write a file.
-                        store.get(MASTER_ACCOUNT) ?: ByteArray(32).also {
-                            SecureRandom().nextBytes(it)
-                            store.put(MASTER_ACCOUNT, it)      // verifies its own read-back
-                        }
-                    } else {
-                        store.get(MASTER_ACCOUNT) ?: throw KeyVaultException(
-                            "the master key is missing from ${store.id}, but the vault exists.\n" +
-                                "  vault: ${file.absolutePath}\n" +
-                                "  This is recoverable ONLY by restoring the key store entry " +
-                                "($SERVICE_HINT). Deleting the vault would create a NEW identity " +
-                                "with a NEW address, and every contact would keep writing to the old one."
-                        )
+                    if (existing == null) {
+                        // First run: mint a key under THIS vault's own entry, hand it to the
+                        // OS (verified read-back), and write the (empty) vault at once so the
+                        // entry is never orphaned by a process that exits before its first put.
+                        val account = newKeyAccount()
+                        val key = ByteArray(32).also { SecureRandom().nextBytes(it) }
+                        store.put(account, key)
+                        val v = KeyVault(file, key, "os-store", null, HashMap(), account)
+                        v.persistLocked()
+                        return v
                     }
-                    load(file, key, "os-store", null, existing)
+                    val recorded = existing.keyAccount
+                    if (recorded != null) {
+                        val key = store.get(recorded) ?: throw missingKey(store, file, recorded)
+                        return load(file, key, "os-store", null, existing, recorded)
+                    }
+                    // A vault written before 1.5.0: its key is the shared legacy entry.
+                    val legacy = store.get(MASTER_ACCOUNT) ?: throw missingKey(store, file, MASTER_ACCOUNT)
+                    val opened = load(file, legacy, "os-store", null, existing, MASTER_ACCOUNT)
+                    // Migrate: copy (never move) the key to an entry of this vault's own, then
+                    // record it in the file. The legacy entry stays — another profile, or a
+                    // downgrade to 1.4.x, may still read it. Any failure keeps the legacy
+                    // binding, which is exactly how 1.4.5 ran.
+                    val account = newKeyAccount()
+                    return try {
+                        store.put(account, legacy)
+                        val migrated = KeyVault(file, legacy, "os-store", null, opened.entries, account)
+                        migrated.persistLocked()
+                        migrated
+                    } catch (e: Exception) {
+                        runCatching { store.delete(account) }
+                        opened
+                    }
                 }
                 "passphrase" -> {
                     val pass = passphrase ?: throw KeyVaultException(
@@ -205,10 +269,22 @@ class KeyVault private constructor(
             }
         }
 
-        private const val SERVICE_HINT = "service ${SecretStore.SERVICE}, account $MASTER_ACCOUNT"
+        /** True when [file] is an existing vault whose master key is in the OS store. Never throws. */
+        fun isOsStoreVault(file: File): Boolean = runCatching {
+            file.isFile && org.json.JSONObject(file.readText(Charsets.UTF_8)).optString("protection", "os-store") == "os-store"
+        }.getOrDefault(false)
+
+        private fun missingKey(store: SecretStore, file: File, account: String) = KeyVaultException(
+            "the master key is missing from ${store.id}, but the vault exists.\n" +
+                "  vault: ${file.absolutePath}\n" +
+                "  This is recoverable ONLY by restoring the key store entry " +
+                "(service ${SecretStore.SERVICE}, account $account). Deleting the vault would create a NEW identity " +
+                "with a NEW address, and every contact would keep writing to the old one."
+        )
 
         private fun load(
             file: File, key: ByteArray, protection: String, kdfHeader: String?, existing: Parsed?,
+            keyAccount: String? = null,
         ): KeyVault {
             val entries: MutableMap<String, ByteArray> = if (existing == null) {
                 HashMap()
@@ -230,7 +306,7 @@ class KeyVault private constructor(
                 }
                 parseEntries(plain)
             }
-            return KeyVault(file, key, protection, kdfHeader, entries)
+            return KeyVault(file, key, protection, kdfHeader, entries, keyAccount)
         }
 
         fun deriveKey(passphrase: CharArray, salt: ByteArray, iterations: Int): ByteArray =
@@ -239,7 +315,7 @@ class KeyVault private constructor(
 
         private class Parsed(
             val protection: String, val nonce: ByteArray, val ct: ByteArray,
-            val salt: ByteArray?, val iterations: Int?,
+            val salt: ByteArray?, val iterations: Int?, val keyAccount: String?,
         )
 
         private fun parse(file: File): Parsed {
@@ -260,6 +336,11 @@ class KeyVault private constructor(
                 ct = Base64.getDecoder().decode(o.getString("ct")),
                 salt = kdf?.optString("salt")?.takeIf { it.isNotEmpty() }?.let { Base64.getDecoder().decode(it) },
                 iterations = kdf?.optInt("iterations")?.takeIf { it > 0 },
+                keyAccount = o.optString("keyAccount", "").takeIf { it.isNotEmpty() }?.also {
+                    if (!KEY_ACCOUNT_SHAPE.matches(it)) throw KeyVaultException(
+                        "vault names an unexpected key store entry '$it': ${file.absolutePath}"
+                    )
+                },
             )
         }
 

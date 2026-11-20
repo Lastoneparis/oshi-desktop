@@ -217,6 +217,9 @@ enum class CallRefusal {
     /** The peer is blocked. Nothing was sent back. See [BlockPolicy.incomingCall]. */
     BLOCKED,
 
+    /** __DESKTOP_PRIVACY_PARITY_2027__ "Calls from Contacts Only" and no conversation with the caller. */
+    NOT_A_CONTACT,
+
     /**
      * __BLOCKED_BY_PEER_2026_09_24__ outgoing only: the peer told us (🚫BLOCKED🚫) that it
      * blocks us. Not dialled — no offer, no VoIP push — and shown as "Contact unavailable".
@@ -386,6 +389,13 @@ class CallStateMachine(
      * [startCall] only. Default: nobody did.
      */
     @Volatile var isBlockedBy: (String) -> Boolean = { false }
+
+    /**
+     * __DESKTOP_PRIVACY_PARITY_2027__ Settings › Privacy › Calls from Contacts Only. Asked
+     * for an incoming OFFER only, after the block check: false = the caller does not ring and
+     * nothing is sent back (iOS `shouldRejectUnknownCaller` just returns). Default: everyone rings.
+     */
+    @Volatile var mayRing: (String) -> Boolean = { true }
 
     /**
      * __CALL_LOG_AT_REST_2026_09_23__ Observer for the sealed call log's
@@ -588,6 +598,11 @@ class CallStateMachine(
         val store = contacts
         if (store != null && BlockPolicy.incomingCall(store, from) == BlockPolicy.Inbound.DROP_BLOCKED) {
             return CallDecision(state, refusal = CallRefusal.BLOCKED)
+        }
+
+        // 1b. CONTACTS ONLY — an offer from someone we have no conversation with stays silent.
+        if (packet.type.isOffer && !mayRing(from)) {
+            return CallDecision(state, refusal = CallRefusal.NOT_A_CONTACT)
         }
 
         // 2. STALE. Off the header inside the AEAD, never off the envelope — see

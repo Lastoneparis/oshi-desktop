@@ -79,4 +79,20 @@ class SleepInhibitorTest {
         assertEquals(listOf("video0", "video2", "video10"), cams)
         dev.deleteRecursively()
     }
+
+    @Test
+    fun `the Linux inhibitor dies with OSHI, never sleep infinity`() {
+        val cmd = SleepInhibitor(os = "Linux", pid = 4242).command()!!
+        assertTrue("an orphaned `sleep infinity` kept the machine awake after a crash", !cmd.contains("infinity"))
+        assertTrue(cmd.last().contains("kill -0 4242"))
+    }
+
+    @Test
+    fun `open at login writes the registry value through an environment variable, not reg add argv`() {
+        val script = LoginItem.windowsRegistryScript()
+        assertTrue(script.contains("\$env:OSHI_RUN_VALUE"))
+        assertTrue("New-Item -Force recreates the Run key and drops other programs", !script.contains("New-Item"))
+        val line = LoginItem.windowsCommandLine(listOf("C:\\Users\\Jean Dupont\\AppData\\Local\\OSHI\\OSHI.exe", "--hidden"))
+        assertEquals("\"C:\\Users\\Jean Dupont\\AppData\\Local\\OSHI\\OSHI.exe\" --hidden", line)
+    }
 }

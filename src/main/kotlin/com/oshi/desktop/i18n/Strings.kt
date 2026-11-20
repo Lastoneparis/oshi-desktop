@@ -103,6 +103,16 @@ object Strings {
         offer(available.firstOrNull { it.equals(norm, ignoreCase = true) })
         offer(ALIASES[lower])
 
+        // 1b. __SYSTEM_LANGUAGE_LIST_2027__ language + SCRIPT, the region dropped. macOS lists
+        // Traditional Chinese as `zh-Hant-TW` and the JVM reports the same tag; without this
+        // step the bare `zh` below won and Taiwan got Simplified Chinese.
+        val parts = lower.split('-')
+        if (parts.size >= 3 && parts[1].length == 4) {
+            val ls = "${parts[0]}-${parts[1]}"
+            offer(available.firstOrNull { it.equals(ls, ignoreCase = true) })
+            offer(ALIASES[ls])
+        }
+
         // 2. the language alone, then ITS alias
         val lang = lower.substringBefore('-')
         offer(available.firstOrNull { it.equals(lang, ignoreCase = true) })

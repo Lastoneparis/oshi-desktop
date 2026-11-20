@@ -112,11 +112,36 @@ object LoginItem {
         when (os()) {
             Os.MAC -> macPlist().apply { parentFile.mkdirs() }.writeText(plist(cmd))
             Os.LINUX -> linuxDesktop().apply { parentFile.mkdirs() }.writeText(desktopEntry(cmd))
-            Os.WINDOWS -> run("reg", "add", WIN_RUN_KEY, "/v", WIN_VALUE, "/t", "REG_SZ", "/d", windowsCommandLine(cmd), "/f")
+            // __LOGIN_ITEM_PATH_WITH_A_SPACE_2026_11_19__ NOT `reg add /d "<cmdline>"`: the value
+            // itself contains quotes ("C:\Users\Jean Dupont\…\OSHI.exe" --hidden), and Java's
+            // Windows argv quoting wraps it in a second pair without escaping the inner ones, so
+            // reg.exe received `C:\Users\Jean` and failed with "Invalid syntax" for every user
+            // whose profile folder has a space. The value travels in an environment variable,
+            // which no command-line parser touches.
+            Os.WINDOWS -> runWithEnv(
+                mapOf("OSHI_RUN_VALUE" to windowsCommandLine(cmd)),
+                "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                windowsRegistryScript(),
+            )
             Os.OTHER -> return "Open at login is not available on this operating system."
         }
         null
     }.getOrElse { it.message ?: it.javaClass.simpleName }
+
+    internal fun windowsRegistryScript(): String =
+        // Never `New-Item -Force` here: on the registry provider it RECREATES the Run key and
+        // drops every other program's entry. The key exists on every Windows install.
+        "Set-ItemProperty -LiteralPath 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' " +
+            "-Name '$WIN_VALUE' -Value \$env:OSHI_RUN_VALUE -Type String"
+
+    private fun runWithEnv(env: Map<String, String>, vararg argv: String) {
+        val pb = ProcessBuilder(*argv).redirectErrorStream(true)
+        pb.environment().putAll(env)
+        val p = pb.start()
+        p.outputStream.close()
+        val out = p.inputStream.readAllBytes().decodeToString()
+        check(p.waitFor() == 0) { out.trim().ifEmpty { "${argv[0]} failed" } }
+    }
 
     private fun run(vararg argv: String) {
         val p = ProcessBuilder(*argv).redirectErrorStream(true).start()

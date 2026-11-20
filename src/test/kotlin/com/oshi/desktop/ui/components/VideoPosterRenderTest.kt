@@ -11,6 +11,7 @@ import com.oshi.desktop.media.TestClips
 import com.oshi.desktop.media.VideoNoteReader
 import com.oshi.desktop.media.VideoNoteThumbnails
 import com.oshi.desktop.ui.state.MessageRow
+import com.oshi.desktop.ui.OshiMaterialTheme
 import com.oshi.desktop.ui.OshiTheme
 import org.jetbrains.skia.EncodedImageFormat
 import org.junit.Assert.assertTrue
@@ -105,7 +106,7 @@ class VideoPosterRenderTest {
             reactions = "",
         )
         val scene = ImageComposeScene(width = (520 * scale).toInt(), height = (440 * scale).toInt(), density = Density(scale)) {
-            MaterialTheme(colorScheme = OshiTheme.colors, typography = OshiTheme.typography) {
+            OshiMaterialTheme {
                 Surface(Modifier.fillMaxSize(), color = OshiTheme.background) {
                     Box(Modifier.fillMaxSize()) {
                         MessageBubbleRow(

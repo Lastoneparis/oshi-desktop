@@ -36,6 +36,11 @@ import com.oshi.desktop.i18n.t
 import com.oshi.desktop.store.MediaType
 import com.oshi.desktop.ui.OshiTheme
 import com.oshi.desktop.ui.state.MediaItemRow
+import com.oshi.desktop.ui.state.GalleryCategories
+import com.oshi.desktop.ui.state.GalleryCategory
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.layout.size
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -66,40 +71,138 @@ import kotlinx.coroutines.withContext
  * squares is harder to search than the thread it replaces.
  */
 @Composable
-fun MediaGalleryPane(items: List<MediaItemRow>, onClose: () -> Unit) {
+fun MediaGalleryPane(
+    items: List<MediaItemRow>,
+    links: List<com.oshi.desktop.ui.state.LinkItemRow> = emptyList(),
+    initialTab: GalleryCategory? = null,
+    onClose: () -> Unit,
+) {
+    // __GALLERY_BY_TYPE_DESKTOP_2027__ iOS `MediaGalleryView`'s categories — Photos, Videos,
+    // Documents, Voice messages, Links — each with its count; opens on the first non-empty one.
+    var tab by remember(items.isEmpty(), links.isEmpty()) {
+        mutableStateOf(initialTab ?: GalleryCategories.firstNonEmpty(items, links))
+    }
     Column(Modifier.fillMaxSize().background(OshiTheme.background)) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = OshiTheme.xl, vertical = OshiTheme.md),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("🖼", fontSize = 14.sp)
+            GlyphIcon(Glyph.IMAGE, OshiTheme.brand, 18.dp)
             Spacer(Modifier.width(OshiTheme.sm))
             Column(Modifier.weight(1f)) {
-                // The shared catalogs already carry these, extracted from the iOS tree —
-                // `DesktopStrings` is explicit that a `desktop.` key where an iOS key exists
-                // "ships English to 33 locales for nothing". The count is a bare number
-                // beside a translated noun rather than a sentence, because a pluralised
-                // count would need a key that does not exist and `String.format` cannot
-                // choose a plural form.
-                Text(t("media_gallery.title"), style = OshiTheme.typography.labelMedium, color = OshiTheme.brand)
+                Text(t("media_gallery.title"), style = OshiTheme.typography.titleSmall, color = Ink.strong)
                 Text(
-                    if (items.isEmpty()) t("media_gallery.empty") else "${items.size}",
+                    if (items.isEmpty() && links.isEmpty()) t("media_gallery.empty") else "${items.size + links.size}",
                     style = OshiTheme.typography.bodySmall,
                     color = Ink.soft,
                 )
             }
             TextAction(t("common.close")) { onClose() }
         }
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = OshiTheme.xl, vertical = OshiTheme.xs)) {
+            ToolTabs(
+                options = GalleryCategory.entries,
+                selected = tab,
+                label = { c -> "${categoryLabel(c)}  ${GalleryCategories.count(items, links, c)}" },
+                icon = { c -> categoryIcon(c) },
+                onSelect = { tab = it },
+            )
+        }
         Hairline()
-        if (items.isEmpty()) return@Column
+        val shownMedia = remember(items, tab) { GalleryCategories.media(items, tab) }
+        val empty = if (tab == GalleryCategory.LINKS) links.isEmpty() else shownMedia.isEmpty()
+        if (empty) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                MascotEmptyState(
+                    mascot = "peek",
+                    title = t("conv.fa.gallery.empty_title", categoryLabel(tab)),
+                    body = t("conv.fa.gallery.empty_body"),
+                )
+            }
+            return@Column
+        }
+        if (tab == GalleryCategory.LINKS) {
+            val uri = androidx.compose.ui.platform.LocalUriHandler.current
+            androidx.compose.foundation.lazy.LazyColumn(
+                Modifier.fillMaxSize().padding(horizontal = OshiTheme.xl, vertical = OshiTheme.md),
+                verticalArrangement = Arrangement.spacedBy(OshiTheme.sm),
+            ) {
+                items(links.size, key = { links[it].messageId }) { i -> LinkRow(links[i]) { runCatching { uri.openUri(GalleryCategories.openable(links[i].url)) } } }
+            }
+            return@Column
+        }
         LazyVerticalGrid(
-            columns = GridCells.Adaptive(minSize = 120.dp),
+            columns = GridCells.Adaptive(minSize = if (tab == GalleryCategory.PHOTOS || tab == GalleryCategory.VIDEOS) 120.dp else 220.dp),
             modifier = Modifier.fillMaxSize().padding(OshiTheme.md),
             horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm),
             verticalArrangement = Arrangement.spacedBy(OshiTheme.sm),
         ) {
-            items(items, key = { it.messageId }) { item -> GalleryTile(item) }
+            items(shownMedia, key = { it.messageId }) { item ->
+                if (tab == GalleryCategory.DOCUMENTS || tab == GalleryCategory.AUDIO) DocumentRow(item) else GalleryTile(item)
+            }
         }
+    }
+}
+
+private fun categoryLabel(c: GalleryCategory): String = when (c) {
+    GalleryCategory.PHOTOS -> t("media_gallery.category.photos")
+    GalleryCategory.VIDEOS -> t("media_gallery.category.videos")
+    GalleryCategory.DOCUMENTS -> t("media_gallery.category.documents")
+    GalleryCategory.AUDIO -> t("media_gallery.category.audio")
+    GalleryCategory.LINKS -> t("media_gallery.category.links")
+}
+
+private fun categoryIcon(c: GalleryCategory): ToolGlyph = when (c) {
+    GalleryCategory.PHOTOS -> ToolGlyph.LAYERS
+    GalleryCategory.VIDEOS -> ToolGlyph.VIDEO
+    GalleryCategory.DOCUMENTS -> ToolGlyph.DOC
+    GalleryCategory.AUDIO -> ToolGlyph.WAVE
+    GalleryCategory.LINKS -> ToolGlyph.LINK
+}
+
+/** A link: its host in bold, the full address under it, the date; a click opens the browser. */
+@Composable
+private fun LinkRow(link: com.oshi.desktop.ui.state.LinkItemRow, onOpen: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clip(OshiTheme.radiusMd).background(OshiTheme.surface)
+            .clickable(onClickLabel = link.url, onClick = onOpen)
+            .padding(horizontal = OshiTheme.md, vertical = OshiTheme.sm),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(OshiTheme.md),
+    ) {
+        Box(Modifier.size(36.dp).clip(OshiTheme.radiusSm).background(OshiTheme.brand.copy(alpha = 0.12f)), contentAlignment = Alignment.Center) {
+            ToolIcon(ToolGlyph.LINK, OshiTheme.brand, 18.dp)
+        }
+        Column(Modifier.weight(1f)) {
+            Text(link.host, style = OshiTheme.typography.bodyMedium, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold, color = Ink.strong, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(ltrIsolate(link.url), style = OshiTheme.typography.bodySmall, color = OshiTheme.brand, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        Text(link.stamp, fontSize = 11.sp, color = Ink.soft)
+    }
+}
+
+/** A document or voice message as a wide row: icon, name, date — a name is what is searched for. */
+@Composable
+private fun DocumentRow(item: MediaItemRow) {
+    val opener = LocalMediaOpener.current
+    val target = remember(item.path, item.kind) {
+        MediaViewerTarget(kind = item.kind, path = item.path, fileName = item.fileName, viewOnce = false)
+    }
+    Row(
+        Modifier.fillMaxWidth().clip(OshiTheme.radiusMd).background(OshiTheme.surface)
+            .clickable { opener.open(target) }
+            .padding(horizontal = OshiTheme.md, vertical = OshiTheme.sm),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(OshiTheme.md),
+    ) {
+        Box(Modifier.size(36.dp).clip(OshiTheme.radiusSm).background(OshiTheme.brand.copy(alpha = 0.12f)), contentAlignment = Alignment.Center) {
+            ToolIcon(if (item.kind == MediaType.AUDIO) ToolGlyph.WAVE else ToolGlyph.DOC, OshiTheme.brand, 18.dp)
+        }
+        Column(Modifier.weight(1f)) {
+            Text(item.fileName, style = OshiTheme.typography.bodyMedium, color = Ink.strong, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(MediaPresentation.cardLabel(item.kind), style = OshiTheme.typography.bodySmall, color = Ink.soft, maxLines = 1)
+        }
+        Text(item.stamp, fontSize = 11.sp, color = Ink.soft)
     }
 }
 

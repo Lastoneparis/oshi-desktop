@@ -1,6 +1,29 @@
 package com.oshi.desktop.ui.components
 
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.hoverable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isMetaPressed
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.isSecondaryPressed
+import androidx.compose.ui.input.pointer.onPointerEvent
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.zIndex
+import androidx.compose.foundation.layout.offset
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.foundation.Image
@@ -30,6 +53,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Shape
@@ -73,6 +97,7 @@ import org.jetbrains.skia.Image as SkiaImage
  * painting our own receipt bookkeeping beside somebody else's bubble reads as a claim about
  * THEIR delivery. And a send that did not leave is red, always: `MessageRow.failed`.
  */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class, ExperimentalComposeUiApi::class)
 @Composable
 fun MessageBubbleRow(
     row: MessageRow,
@@ -94,29 +119,124 @@ fun MessageBubbleRow(
     pinned: Boolean = false,
     /** Delete on this device only. */
     onDeleteForMe: (() -> Unit)? = null,
-    /** Contacts a message can be forwarded to (address → label), and the action. */
-    forwardTargets: List<Pair<String, String>> = emptyList(),
-    onForward: ((toAddress: String) -> Unit)? = null,
+    /**
+     * Contacts a message can be forwarded to, and the action.
+     * __FORWARD_MANY_DESKTOP_2027__ several at once: one sheet, one 1:1 forward per person.
+     */
+    forwardTargets: List<com.oshi.desktop.ui.state.GroupCandidateRow> = emptyList(),
+    onForward: ((toAddresses: List<String>) -> Unit)? = null,
+    /** __REPLY_PRIVATELY_DESKTOP_2027__ a group member's message: answer them in a 1:1. */
+    onReplyPrivately: (() -> Unit)? = null,
     /** __DESKTOP_POLLS_2026_10_29__ cast or toggle a vote on this row's poll. */
     onVote: ((optionIndex: Int) -> Unit)? = null,
+    /** __THREAD_CHROME_2027__ copy the text to the clipboard. */
+    onCopy: (() -> Unit)? = null,
 ) {
-    var forwarding by remember(row.id) { mutableStateOf(false) }
+    val chromePreviewA = LocalThreadChromePreview.current
+    var forwarding by remember(row.id) { mutableStateOf(chromePreviewA.forwardMessageId == row.id) }
+    var reactionPickerOpen by remember(row.id) { mutableStateOf(false) }
     var editing by remember(row.id) { mutableStateOf(false) }
     val editFocus = remember { FocusRequester() }
     var editedBody by remember(row.id, row.body) { mutableStateOf(row.body) }
     var confirmingDelete by remember(row.id) { mutableStateOf(false) }
-    val media = remember(row.attachment, viewOnce, revealed) {
-        MediaPresentation.of(row.attachment, viewOnce, revealed)
+    // __VIEW_ONCE_DESKTOP_2027__ one decision for the whole row: ours wears a badge, theirs is
+    // sealed, open for this visit, or gone ("Viewed") — iOS `MediaMessageView`'s four states.
+    val look = com.oshi.desktop.ui.state.ViewOnceRules.look(
+        viewOnce = viewOnce || row.viewOnce, fromMe = row.fromMe, opened = row.viewOnceOpened,
+        revealedNow = revealed, hasFile = row.attachment != null,
+    )
+    val media = remember(row.attachment, look) {
+        when (look) {
+            com.oshi.desktop.ui.state.ViewOnceRules.Look.VIEWED -> null
+            com.oshi.desktop.ui.state.ViewOnceRules.Look.SEALED -> MediaPresentation.of(row.attachment, true, false)
+            com.oshi.desktop.ui.state.ViewOnceRules.Look.OPEN -> MediaPresentation.of(row.attachment, true, true)
+            else -> MediaPresentation.of(row.attachment, false, false)
+        }
     }
+    var reactorsOpen by remember(row.id) { mutableStateOf(chromePreviewA.reactorsMessageId == row.id) }
+    // __THREAD_CHROME_2027__ hover/focus toolbar, right-click menu, keyboard shortcuts.
+    val preview = LocalThreadChromePreview.current
+    val hoverSource = remember { MutableInteractionSource() }
+    val hovered by hoverSource.collectIsHoveredAsState()
+    var focused by remember { mutableStateOf(false) }
+    var reactBar by remember(row.id) { mutableStateOf(preview.reactBarMessageId == row.id) }
+    var moreMenu by remember(row.id) { mutableStateOf(preview.moreMenuMessageId == row.id) }
+    var contextAt by remember(row.id) { mutableStateOf<Offset?>(if (preview.contextMenuMessageId == row.id) Offset(160f, 24f) else null) }
+    var infoOpen by remember(row.id) { mutableStateOf(false) }
+    // __DESKTOP_PRIVACY_PARITY_2027__ Settings › Privacy › Block Forwarding & Copying — also hides
+    // the multi-forward sheet (Mac-parity A); Reply privately is not a forward and stays.
+    val blockForwardCopy = com.oshi.desktop.store.PrivacyPreferences.values.blockForwardCopy
+    val canForward = !blockForwardCopy && onForward != null && forwardTargets.isNotEmpty() && row.body.isNotBlank() &&
+        look == com.oshi.desktop.ui.state.ViewOnceRules.Look.NONE
+    val actions = MessageActions(
+        onReplyPrivately = onReplyPrivately,
+        onReply = onReply,
+        onReact = onReact,
+        onForward = if (canForward) ({ forwarding = true }) else null,
+        onPin = onPin?.let { pin -> { pin(!pinned) } },
+        pinned = pinned,
+        onCopy = onCopy.takeUnless { blockForwardCopy },
+        onEdit = onEdit?.let { { editing = true } },
+        onInfo = { infoOpen = true },
+        onDelete = if (onDelete != null || onDeleteForMe != null) ({ confirmingDelete = true }) else null,
+        onOpenPicker = { reactionPickerOpen = true },
+    )
+    val showActions = !row.deleted && !editing && actions.any
+    val toolbarVisible = showActions && (hovered || focused || reactBar || moreMenu || forwarding || preview.toolbarMessageId == row.id)
+    val density = androidx.compose.ui.platform.LocalDensity.current
     Column(
         Modifier
             .fillMaxWidth()
+            .hoverable(hoverSource)
+            .onFocusChanged { focused = it.hasFocus }
+            .then(
+                if (!showActions) Modifier else Modifier
+                    .onPointerEvent(PointerEventType.Press) { e ->
+                        if (e.buttons.isSecondaryPressed) {
+                            val pos = e.changes.firstOrNull()?.position ?: Offset.Zero
+                            contextAt = pos
+                        }
+                    }
+                    .onPreviewKeyEvent { e ->
+                        if (e.type != KeyEventType.KeyDown || editing) return@onPreviewKeyEvent false
+                        val meta = e.isMetaPressed || e.isCtrlPressed
+                        when {
+                            e.key == Key.R && !meta && onReply != null -> { onReply(); true }
+                            e.key == Key.E && !meta && onReact != null -> { reactBar = true; true }
+                            e.key == Key.F && !meta && canForward -> { forwarding = true; true }
+                            e.key == Key.P && !meta && onPin != null -> { onPin(!pinned); true }
+                            e.key == Key.I && !meta -> { infoOpen = true; true }
+                            e.key == Key.C && meta && onCopy != null -> { onCopy(); true }
+                            e.key == Key.Enter && !meta && onEdit != null && row.fromMe -> { editing = true; true }
+                            (e.key == Key.Delete || e.key == Key.Backspace) && actions.onDelete != null -> { confirmingDelete = true; true }
+                            (e.key == Key.F10 && e.isShiftPressed) || e.key == Key.Menu -> { contextAt = Offset(80f, 16f); true }
+                            else -> false
+                        }
+                    }
+                    .focusable()
+                    .semantics { contentDescription = listOf(row.who, row.body, row.stamp).filter { it.isNotBlank() }.joinToString(", ") },
+            )
             // 2pt when grouped, 10pt otherwise — `ChatView.swift`'s own two values.
             .padding(top = if (grouped) OshiTheme.xxs else 10.dp),
         horizontalAlignment = if (row.fromMe) Alignment.End else Alignment.Start,
     ) {
+      Box {
+        // The right-click menu opens where the pointer was.
+        contextAt?.let { at ->
+            Box(Modifier.offset { androidx.compose.ui.unit.IntOffset(at.x.toInt(), at.y.toInt()) }.size(1.dp)) {
+                OshiDropdownMenu(expanded = true, onDismissRequest = { contextAt = null }) {
+                    MessageActionMenuItems(actions) { contextAt = null }
+                }
+            }
+        }
+        Row(verticalAlignment = Alignment.Top) {
+        // The toolbar floats on the INNER side of the bubble without taking layout space,
+        // so showing it never reflows the thread.
+        if (row.fromMe) ToolbarAnchor(toolbarVisible, alignEnd = true, topInset = 0.dp) {
+            MessageHoverToolbar(actions, reactBar, { reactBar = it }, moreMenu, { moreMenu = it }) { reactionPickerOpen = it }
+        }
         Column(
-            Modifier.widthIn(max = Metrics.bubbleMax),
+            Modifier.widthIn(max = Metrics.bubbleMax).weight(1f, fill = false),
             horizontalAlignment = if (row.fromMe) Alignment.End else Alignment.Start,
         ) {
             if (showSender && !row.fromMe) {
@@ -127,70 +247,22 @@ fun MessageBubbleRow(
                     modifier = Modifier.padding(start = OshiTheme.sm, bottom = OshiTheme.xxs),
                 )
             }
-            BubbleBody(row, lastInRun, wallpaper, media, onReveal, onVote)
+            BubbleBody(row, lastInRun, wallpaper, media, onReveal, onVote, look)
 
-            if (row.reactionKeys.isNotEmpty()) {
-                // __OSHI_SMILE_REACTION_2026_11_09__ one glyph per KEY, so the exact
-                // `⭕😊` reaction is drawn as the OSHI mark and a "⭕" beside a "😊" is not.
+            if (row.reactionKeys.isNotEmpty() || row.reactions.isNotEmpty()) {
+                // __WHO_REACTED_DESKTOP_2027__ the pill opens "Reactions" — who chose what
+                // (iOS `ReactorsListView`), with each count beside its glyph as iOS draws it.
                 Spacer(Modifier.height(OshiTheme.xs))
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .clip(OshiTheme.pill)
-                        .background(OshiTheme.surfaceElevated)
-                        .border(Metrics.hairline, OshiTheme.separator, OshiTheme.pill)
-                        .padding(horizontal = OshiTheme.sm, vertical = OshiTheme.xxs),
-                ) {
-                    row.reactionKeys.forEach { key -> ReactionGlyph(key, fontSize = 13.sp) }
-                }
-            } else if (row.reactions.isNotEmpty()) {
-                Spacer(Modifier.height(OshiTheme.xs))
-                Text(
-                    row.reactions,
-                    fontSize = 13.sp,
-                    modifier = Modifier
-                        .clip(OshiTheme.pill)
-                        .background(OshiTheme.surfaceElevated)
-                        .border(Metrics.hairline, OshiTheme.separator, OshiTheme.pill)
-                        .padding(horizontal = OshiTheme.sm, vertical = OshiTheme.xxs),
-                )
+                ReactionPill(row, onOpen = if (row.reactors.isNotEmpty()) ({ reactorsOpen = true }) else null)
             }
 
-            if (!row.deleted && (onReact != null || onEdit != null || onDelete != null || onReply != null)) {
+            if (reactionPickerOpen && onReact != null && !row.deleted) {
                 Spacer(Modifier.height(OshiTheme.xs))
-                Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm)) {
-                    onReply?.let { reply -> TextAction(t("message.action.reply")) { reply() } }
-                    if (onForward != null && forwardTargets.isNotEmpty() && row.body.isNotBlank()) {
-                        TextAction(t("message.action.forward")) { forwarding = !forwarding }
-                    }
-                    onPin?.let { pin -> TextAction(if (pinned) t("message.unpin") else t("message.pin")) { pin(!pinned) } }
-                    onReact?.let { react ->
-                        TextAction("♥") { react("♥") }
-                        TextAction("👍") { react("👍") }
-                        TextAction("😂") { react("😂") }
-                    }
-                    // __DESKTOP_EDIT_STRINGS_WERE_ENGLISH_2026_11_05__ `t(...)`,
-                    // like the Reply and Forward actions beside it. These four
-                    // keys already ship in every locale in Desktop's own bundle;
-                    // they were unlocalized by omission, not by absence.
-                    onEdit?.let { TextAction(t("message.action.edit")) { editing = true } }
-                    onDelete?.let { delete ->
-                        TextAction(if (confirmingDelete) "Confirm delete" else "Delete") {
-                            if (confirmingDelete) delete() else confirmingDelete = true
-                        }
-                        if (confirmingDelete) TextAction("Cancel") { confirmingDelete = false }
-                    }
-                    onDeleteForMe?.let { hide -> TextAction(t("group.delete.for_me")) { hide() } }
-                }
+                MascotReactionPicker(onReact, onClose = { reactionPickerOpen = false })
             }
 
-            if (forwarding && onForward != null) {
-                Spacer(Modifier.height(OshiTheme.xs))
-                Text(t("message.forward_to"), style = OshiTheme.typography.labelMedium, color = Ink.soft)
-                for ((address, label) in forwardTargets) {
-                    TextAction(label) { onForward(address); forwarding = false }
-                }
+            if (forwarding && canForward && onForward != null) {
+                ForwardSheet(forwardTargets, onSend = { onForward(it) }, onDismiss = { forwarding = false })
             }
 
             if (editing && onEdit != null) {
@@ -263,6 +335,81 @@ fun MessageBubbleRow(
                 Spacer(Modifier.height(OshiTheme.xs))
                 Footer(row)
             }
+            if (row.restrictedNetwork && !row.fromMe && !row.deleted) {
+                Spacer(Modifier.height(OshiTheme.xs))
+                RestrictedNetworkChip()
+            }
+        }
+        if (!row.fromMe) ToolbarAnchor(toolbarVisible, alignEnd = false, topInset = if (showSender) 18.dp else 0.dp) {
+            MessageHoverToolbar(actions, reactBar, { reactBar = it }, moreMenu, { moreMenu = it }) { reactionPickerOpen = it }
+        }
+        }
+      }
+    }
+
+    if (infoOpen) MessageInfoDialog(row) { infoOpen = false }
+    if (reactorsOpen) ReactorsDialog(row.reactors) { reactorsOpen = false }
+    if (confirmingDelete) {
+        ConfirmDestructiveDialog(
+            title = t("message.delete.confirm_title"),
+            text = t("message.delete.confirm_message"),
+            confirmLabel = if (onDelete != null) t("group.delete.for_everyone") else t("group.delete.for_me"),
+            onConfirm = { (onDelete ?: onDeleteForMe)?.invoke() },
+            onDismiss = { confirmingDelete = false },
+            secondaryLabel = if (onDelete != null && onDeleteForMe != null) t("group.delete.for_me") else null,
+            onSecondary = if (onDelete != null) onDeleteForMe else null,
+        )
+    }
+}
+
+/**
+ * A zero-size anchor beside the bubble: the toolbar is measured and drawn, but takes no
+ * space, so it can appear on hover without moving anything. [alignEnd] = it hangs to the
+ * LEFT of the anchor (outgoing bubbles), otherwise to the right.
+ */
+@Composable
+private fun ToolbarAnchor(visible: Boolean, alignEnd: Boolean, topInset: androidx.compose.ui.unit.Dp, content: @Composable () -> Unit) {
+    if (!visible) return
+    val gap = with(androidx.compose.ui.platform.LocalDensity.current) { 6.dp.roundToPx() }
+    val top = with(androidx.compose.ui.platform.LocalDensity.current) { topInset.roundToPx() }
+    Box(
+        Modifier
+            .zIndex(2f)
+            .layout { measurable, _ ->
+                val p = measurable.measure(androidx.compose.ui.unit.Constraints())
+                layout(0, 0) { p.place(if (alignEnd) -p.width - gap else gap, top) }
+            },
+    ) { content() }
+}
+
+/**
+ * __RESTRICTED_NETWORK_HINT_2026_11_18__ RN-HINT v1: the discreet chip under an incoming bubble
+ * whose sender had the disguise on ("Sent through a restricted network"). Click (or hover)
+ * opens the explanation; it never says more than the sender chose to share.
+ */
+@Composable
+fun RestrictedNetworkChip(initiallyOpen: Boolean = false) {
+    var open by remember { mutableStateOf(initiallyOpen) }
+    Column(Modifier.widthIn(max = Metrics.bubbleMax)) {
+        Row(
+            Modifier
+                .clip(androidx.compose.foundation.shape.RoundedCornerShape(10.dp))
+                .background(Ink.soft.copy(alpha = 0.10f))
+                .clickable { open = !open }
+                .padding(horizontal = OshiTheme.sm, vertical = 3.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(OshiTheme.xs),
+        ) {
+            GlyphIcon(Glyph.EYE_SLASH, Ink.soft, 12.dp)
+            Text(t("rnhint.chip"), fontSize = 10.sp, color = Ink.soft)
+        }
+        if (open) {
+            Text(
+                t("rnhint.explain"),
+                fontSize = 11.sp,
+                color = Ink.soft,
+                modifier = Modifier.padding(top = OshiTheme.xs, start = OshiTheme.xs),
+            )
         }
     }
 }
@@ -277,7 +424,13 @@ private fun BubbleBody(
     media: MediaPresentation?,
     onReveal: () -> Unit,
     onVote: ((optionIndex: Int) -> Unit)? = null,
+    look: com.oshi.desktop.ui.state.ViewOnceRules.Look = com.oshi.desktop.ui.state.ViewOnceRules.Look.NONE,
 ) {
+    // __VIEW_ONCE_DESKTOP_2027__ opened before: the bytes are gone, only the fact remains.
+    if (look == com.oshi.desktop.ui.state.ViewOnceRules.Look.VIEWED) {
+        ViewOnceViewedPill()
+        return
+    }
     // __VIDEO_NOTE_2026_09_24__ A round video note has no bubble, no tail and no caption box
     // (VIDEO_NOTE_SPEC §4): the circle IS the message. A sealed view-once row keeps the
     // ordinary sealed card below — the seal is decided in one place, `MediaPresentation`.
@@ -288,7 +441,7 @@ private fun BubbleBody(
             VideoNoteBubble(
                 path = media.path,
                 announcedDurationMs = row.mediaDurationMs,
-                missingNote = if (media.note == MediaPresentation.MISSING_FILE_NOTE) com.oshi.desktop.i18n.dt("desktop.videonote.missing") else null,
+                missingNote = if (media.note == MediaPresentation.MISSING_FILE_NOTE) t("conv.videonote.missing") else null,
             )
             if (row.body.isNotBlank()) {
                 Text(row.body, style = OshiTheme.typography.bodyMedium, color = Ink.strong, modifier = Modifier.padding(top = OshiTheme.xs))
@@ -302,11 +455,22 @@ private fun BubbleBody(
     val ink = if (row.fromMe) Ink.onBrandStrong else OshiTheme.bubbleIncomingText
     val inkSoft = if (row.fromMe) Ink.onBrandSoft else Ink.soft
 
+    // __OLED_GLASS_2026_11_16__ In OLED, with no wallpaper, the incoming bubble is raised
+    // glass on the black thread, and the outgoing violet gets a rim lit from above instead
+    // of a flat one. Both are a gradient and a stroke: nothing per-row is blurred.
+    val glass = OshiTheme.glass
+    val surfaceModifier = when {
+        glass == null -> Modifier.clip(shape).background(fill).border(Metrics.hairline, rim, shape)
+        !row.fromMe && wallpaper == WallpaperId.NONE -> Modifier.glass(shape, fill, raised = true)
+        else -> Modifier.clip(shape).background(fill).border(
+            Metrics.hairline,
+            Brush.verticalGradient(listOf(Color.White.copy(alpha = 0.30f), Color.White.copy(alpha = 0.06f))),
+            shape,
+        )
+    }
     Column(
         Modifier
-            .clip(shape)
-            .background(fill)
-            .border(Metrics.hairline, rim, shape)
+            .then(surfaceModifier)
             .padding(OshiTheme.md),
         horizontalAlignment = Alignment.Start,
     ) {
@@ -337,9 +501,18 @@ private fun BubbleBody(
             }
             Spacer(Modifier.height(OshiTheme.xs))
         }
+        // __GROUP_GIF_2026_11_16__ A file sent with no caption stores its NAME as the body
+        // (that is what the list preview shows). Under the media itself it is noise —
+        // "64f7cfd7-oshi-love.gif" under a GIF — and the phones draw the GIF bare.
+        val nameOnly = media != null && row.body.isNotBlank() &&
+            (media.fileName == row.body || media.fileName.endsWith("-" + row.body))
         if (media != null) {
             MediaContent(media, row.fromMe, inkSoft, onReveal)
-            if (row.body.isNotBlank()) Spacer(Modifier.height(OshiTheme.sm))
+            if (look == com.oshi.desktop.ui.state.ViewOnceRules.Look.SENDER) {
+                Spacer(Modifier.height(OshiTheme.xs))
+                ViewOnceBadge(onBrand = row.fromMe)
+            }
+            if (row.body.isNotBlank() && !nameOnly) Spacer(Modifier.height(OshiTheme.sm))
         }
         // __DESKTOP_POLLS_2026_10_29__ A poll draws a card instead of a body. `row.body` is
         // blank for a poll (the model empties it), so without this the bubble would be an
@@ -348,7 +521,7 @@ private fun BubbleBody(
         row.poll?.let { card ->
             PollCard(card, row.fromMe, ink, inkSoft, onVote)
         }
-        if (row.poll == null && (row.body.isNotBlank() || media == null)) {
+        if (row.poll == null && !nameOnly && (row.body.isNotBlank() || media == null)) {
             // __MENTIONS_2026_09_23__ `@name` of a picked member is highlighted (MentionUi.kt).
             MentionAwareText(
                 row.body,
@@ -399,14 +572,34 @@ private fun Footer(row: MessageRow) {
         horizontalArrangement = Arrangement.spacedBy(OshiTheme.xs),
     ) {
         if (row.edited) {
-            Text("edited", fontSize = 10.sp, fontStyle = FontStyle.Italic, color = Ink.soft)
+            Text(t("message.edited"), fontSize = 10.sp, fontStyle = FontStyle.Italic, color = Ink.soft)
         }
         Text(DayBreaks.timeOf(row.stamp), fontSize = 10.sp, color = Ink.soft)
         // Only outgoing rows carry a status; the model refuses to produce one for inbound.
         row.status?.let { DeliveryMark(it, row.failed) }
+        // __PRIVACY_DISGUISE_2026_11_18__ The phones' words ("Waiting for disguised connection"):
+        // a clock alone would read as "sending", and this row is deliberately NOT being sent
+        // any other way.
+        if (row.coverWaiting) {
+            Text(
+                t("conv.cover.waiting"),
+                fontSize = 10.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = OshiTheme.brand,
+            )
+        }
+        // __LORA_AIRTIME_HINT_2026_11_18__ Android's words; the radio is obeying the law, not stuck.
+        if (row.awaitingAirtime) {
+            Text(
+                t("conv.lora.waiting_airtime"),
+                fontSize = 10.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = Ink.soft,
+            )
+        }
         if (row.failed) {
             Text(
-                "not delivered",
+                t("desktop.bubble.not_delivered"),
                 fontSize = 10.sp,
                 fontWeight = FontWeight.SemiBold,
                 // `danger` (#FF3B30) is 3.77:1 on white and is the phone's own failure hue.
@@ -480,15 +673,16 @@ private fun SealedViewOnce(media: MediaPresentation, onReveal: () -> Unit) {
     ) {
         Spacer(Modifier.height(OshiTheme.md))
         GlyphIcon(Glyph.EYE_SLASH, Color.White, 34.dp)
-        Text("View once", color = Color.White, style = OshiTheme.typography.titleMedium)
+        Text(t("chat.view_once"), color = Color.White, style = OshiTheme.typography.titleMedium)
         Text(
-            MediaPresentation.cardLabel(media.kind) + " · not shown until you ask",
+            t("desktop.bubble.view_once_hidden", MediaPresentation.cardLabel(media.kind)),
             color = Ink.onBrandSoft,
             fontSize = 11.sp,
         )
         Text(
-            "Reveal",
-            color = OshiTheme.brand,
+            t("desktop.bubble.reveal"),
+            // On a WHITE pill in every theme, so the fill violet, not the dark-mode ink.
+            color = OshiTheme.brandFill,
             style = OshiTheme.typography.bodyMedium,
             fontWeight = FontWeight.SemiBold,
             modifier = Modifier
@@ -616,7 +810,7 @@ private fun VideoPoster(media: MediaPresentation, fromMe: Boolean, inkSoft: Colo
     // A video this window cannot decode falls back to the card it used to be, with the
     // reason on it. Silently drawing an empty box would be worse than the card ever was.
     if (thumb?.error != null) {
-        FileCard(media, fromMe, inkSoft, overrideNote = "No preview: ${thumb?.error}")
+        FileCard(media, fromMe, inkSoft, overrideNote = t("conv.media.no_preview"))
         return
     }
 
@@ -740,9 +934,7 @@ internal object InlineBitmaps {
     }
 }
 
-private const val DECODE_FAILED =
-    "The file is on disk but this window could not decode it as an image. The bytes are not " +
-        "damaged by being unreadable here — every OSHI client decodes with its own library."
+private val DECODE_FAILED: String get() = t("conv.media.decode_failed")
 
 /**
  * Everything that is not an inline image: a named file, its type, and where it is.
@@ -880,10 +1072,11 @@ private fun PollCard(
         Text(
             buildString {
                 // "people", counting VOTERS — see the class note on why this is not the sum.
-                append(if (card.voterCount == 1) "1 vote" else "${card.voterCount} votes")
-                if (card.allowsMultipleAnswers) append(" \u00b7 pick several")
-                if (card.isAnonymous) append(" \u00b7 anonymous")
-                if (card.closed) append(" \u00b7 closed")
+                // __MESSAGES_PARITY_2027__ the phones' own words (poll.votes / poll.*.badge / poll.closed).
+                append(if (card.voterCount == 1) t("poll.votes.one") else t("poll.votes", card.voterCount))
+                if (card.allowsMultipleAnswers) append(" \u00b7 " + t("poll.multiple_answers.badge"))
+                if (card.isAnonymous) append(" \u00b7 " + t("poll.anonymous.badge"))
+                if (card.closed) append(" \u00b7 " + t("poll.closed"))
             },
             style = OshiTheme.typography.labelMedium,
             color = inkSoft,

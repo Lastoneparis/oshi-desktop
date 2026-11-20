@@ -6,7 +6,6 @@ import com.oshi.desktop.app.OshiClient
 import com.oshi.desktop.app.short
 import com.oshi.desktop.app.stamp
 import com.oshi.desktop.group.GroupIdentity
-import com.oshi.desktop.i18n.dt
 import com.oshi.desktop.i18n.t
 import com.oshi.desktop.lora.LoRaNodeBindings
 import com.oshi.desktop.msg.ControlPrefix
@@ -133,6 +132,8 @@ class ChatShellModel(
 
     private val lock = Any()
     private val unread = HashMap<String, Int>()
+    /** __UNREAD_DIVIDER_2027__ [ThreadView.unreadAtOpen] for the selected conversation. */
+    private var unreadAtOpen = 0
     /** __MENTIONS_2026_09_23__ conversations with an unseen `@you`; cleared when opened. */
     private val mentionedYou = HashSet<String>()
     /** __MENTIONS_2026_09_23__ members picked from the `@` picker for the current draft, per group. */
@@ -149,6 +150,8 @@ class ChatShellModel(
     private var destination: Destination = Destination.MESSAGES
     private var pane: Pane = Pane.CONVERSATION
     private var draftText: String = ""
+    /** __DRAFT_CLEAR_RACE_2026_11_18__ bumped when a text send settles; see [ShellState.sendSerial]. */
+    private var sendSerial: Int = 0
     /** __GROUP_PARITY_2026_09_23__ the message the next send replies to, and in which conversation. */
     private var replyTarget: Pair<String, com.oshi.desktop.msg.ReplyEnvelope.Quote>? = null
     /** __GROUP_PARITY_2026_09_23__ group id → member key → typing-until (epoch ms). */
@@ -232,6 +235,12 @@ class ChatShellModel(
         client.onGroupEvent = { r -> previousGroupEvent(r); publish() }
         val previousGroupContent = client.onGroupContentChanged
         client.onGroupContentChanged = { gid -> previousGroupContent(gid); publish() }
+        client.onLoRaStatusChanged = { publish() }
+        // __PROFILE_PHOTOS_DESKTOP_2027__ a contact's new picture repaints the list and header.
+        client.photos.addChangeListener { publish() }
+        com.oshi.desktop.store.PrivacyPreferences.addChangeListener(photoPrivacyListener)
+        // __VIEW_ONCE_DESKTOP_2027__ anything opened before a quit or crash is destroyed now.
+        worker.execute { if (runCatching { client.wipeOpenedViewOnce() }.getOrDefault(0) > 0) publish() }
         refresh()
     }
 
@@ -249,7 +258,22 @@ class ChatShellModel(
         previousOnPlace?.let { client.onPlace = it }
         previousOnPlace = null
         typingExpiry.shutdownNow()
+        com.oshi.desktop.store.PrivacyPreferences.removeChangeListener(photoPrivacyListener)
     }
+
+    /**
+     * __MERGE_AB_PROFILE_PHOTO_PRIVACY__ Profile Photo switched: tell the contacts again, so
+     * the ones holding our picture drop it (OFF) or get it back (ON). Only when there IS a
+     * picture — with none, the next profile update says the same thing anyway.
+     */
+    private val photoPrivacyListener: (com.oshi.desktop.store.PrivacyPreferences.Values, com.oshi.desktop.store.PrivacyPreferences.Values) -> Unit =
+        { old, new ->
+            if (old.profilePhotoVisible != new.profilePhotoVisible) worker.execute {
+                runCatching {
+                    if (client.ownPhotoBase64 != null) client.broadcastProfile(clear = client.ownNickname == null)
+                }
+            }
+        }
 
     // ------------------------------------------------------------------ commands
 
@@ -309,7 +333,8 @@ class ChatShellModel(
     }
 
     /** Privacy controls are enforced in [OshiClient] at each send site. */
-    fun setReceiptPrivacy(delivery: Boolean? = null, read: Boolean? = null) {
+    fun setReceiptPrivacy(delivery: Boolean? = null, read: Boolean? = null, typing: Boolean? = null) {
+        typing?.let { client.typingIndicatorsEnabled = it }
         delivery?.let { client.deliveryReceiptsEnabled = it }
         read?.let { client.readReceiptsEnabled = it }
         publish()
@@ -324,8 +349,8 @@ class ChatShellModel(
             synchronized(lock) {
                 busy = false
                 syncNotice = result.fold(
-                    onSuccess = { Notice("Archived ${it.accepted.size} contact record(s); server head is seq ${it.maxSeq}.", Severity.OK) },
-                    onFailure = { Notice("Could not archive contacts: ${it.message ?: it.javaClass.simpleName}", Severity.ERROR) },
+                    onSuccess = { Notice(t("conv.n.sync_archived", it.accepted.size, it.maxSeq), Severity.OK) },
+                    onFailure = { Notice(t("conv.n.sync_archive_failed", it.message ?: it.javaClass.simpleName), Severity.ERROR) },
                 )
             }
             publish()
@@ -346,12 +371,12 @@ class ChatShellModel(
                 backupNotice = result.fold(
                     onSuccess = { r ->
                         if (r.unreadableConversations > 0) Notice(
-                            dt("desktop.export.done", r.messages, r.file.path) + " " +
-                                dt("desktop.export.done.partial", r.unreadableConversations),
+                            t("desktop.export.done", r.messages, r.file.path) + " " +
+                                t("desktop.export.done.partial", r.unreadableConversations),
                             Severity.ERROR,
-                        ) else Notice(dt("desktop.export.done", r.messages, r.file.path), Severity.OK)
+                        ) else Notice(t("desktop.export.done", r.messages, r.file.path), Severity.OK)
                     },
-                    onFailure = { Notice(dt("desktop.export.failed", it.message ?: it.javaClass.simpleName), Severity.ERROR) },
+                    onFailure = { Notice(t("desktop.export.failed", it.message ?: it.javaClass.simpleName), Severity.ERROR) },
                 )
             }
             publish()
@@ -372,10 +397,10 @@ class ChatShellModel(
                 busy = false
                 backupNotice = result.fold(
                     onSuccess = { f ->
-                        if (f == null) Notice(dt("desktop.calldiag.empty"), Severity.ERROR)
-                        else Notice(dt("desktop.calldiag.done", f.path), Severity.OK)
+                        if (f == null) Notice(t("desktop.calldiag.empty"), Severity.ERROR)
+                        else Notice(t("desktop.calldiag.done", f.path), Severity.OK)
                     },
-                    onFailure = { Notice(dt("desktop.calldiag.failed", it.message ?: it.javaClass.simpleName), Severity.ERROR) },
+                    onFailure = { Notice(t("desktop.calldiag.failed", it.message ?: it.javaClass.simpleName), Severity.ERROR) },
                 )
             }
             publish()
@@ -396,9 +421,9 @@ class ChatShellModel(
                 busy = false
                 backupNotice = result.fold(
                     onSuccess = { r ->
-                        val invalid = if (r.invalid > 0) " " + dt("desktop.import.invalid", r.invalid) else ""
+                        val invalid = if (r.invalid > 0) " " + t("desktop.import.invalid", r.invalid) else ""
                         Notice(
-                            t("import.messages_imported", r.imported) + " " + dt("desktop.import.alreadyPresent", r.alreadyPresent) + invalid,
+                            t("import.messages_imported", r.imported) + " " + t("desktop.import.alreadyPresent", r.alreadyPresent) + invalid,
                             if (r.invalid > 0) Severity.INFO else Severity.OK,
                         )
                     },
@@ -424,12 +449,11 @@ class ChatShellModel(
                 syncNotice = result.fold(
                     onSuccess = {
                         Notice(
-                            "Applied ${it.applied}; skipped ${it.skippedUndecryptable} undecryptable, " +
-                                "${it.skippedStale} stale and ${it.skippedOwn} own record(s). Cursor: ${it.lastSeq}/${it.headMaxSeq}.",
+                            t("conv.n.sync_pulled", it.applied, it.skippedUndecryptable, it.skippedStale, it.skippedOwn, it.lastSeq, it.headMaxSeq),
                             Severity.OK,
                         )
                     },
-                    onFailure = { Notice("Could not pull the archive: ${it.message ?: it.javaClass.simpleName}", Severity.ERROR) },
+                    onFailure = { Notice(t("conv.n.sync_pull_failed", it.message ?: it.javaClass.simpleName), Severity.ERROR) },
                 )
             }
             publish()
@@ -464,6 +488,9 @@ class ChatShellModel(
     fun select(id: String?) {
         val kind = id?.let { kindOf(it) }
         var stopTyping: String? = null
+        val leaving = synchronized(lock) { selectedId }
+        // __VIEW_ONCE_DESKTOP_2027__ leaving a conversation destroys what was opened in it.
+        if (leaving != null && leaving != id) worker.execute { runCatching { client.wipeOpenedViewOnce(leaving) }; publish() }
         synchronized(lock) {
             stopTyping = typingTarget
             typingTarget = null
@@ -473,6 +500,7 @@ class ChatShellModel(
             replyTarget = null
             notice = null
             reach = Reach.UNKNOWN
+            unreadAtOpen = if (id != null) unread[id] ?: 0 else 0
             if (id != null) { unread.remove(id); mentionedYou.remove(id) }
         }
         publish()
@@ -525,6 +553,8 @@ class ChatShellModel(
     private fun emitTyping(peer: String, typing: Boolean) {
         // Typing is ephemeral: it never freezes the editor or creates a message-status claim.
         // __GROUP_E2E_V2_2026_09_23__ a group gets the group typing fan-out (skipped over 20 members).
+        // __TYPING_PRIVACY_2027__ switched off: nothing leaves, neither start nor stop.
+        if (!client.typingIndicatorsEnabled) return
         val group = kindOf(peer) == ConversationKind.GROUP
         worker.execute { runCatching { if (group) client.sendGroupTyping(peer, typing) else client.sendTyping(peer, typing) } }
     }
@@ -589,12 +619,12 @@ class ChatShellModel(
             when {
                 id == null -> return
                 !composer.enabled -> {
-                    notice = Notice(composer.disabledReason ?: "This conversation cannot be sent to.", Severity.ERROR)
+                    notice = Notice(composer.disabledReason ?: t("conv.n.cannot_send"), Severity.ERROR)
                     null to ""
                 }
                 busy -> null to ""
                 draftText.isBlank() -> {
-                    notice = Notice("Nothing to send.", Severity.INFO)
+                    notice = Notice(t("conv.n.nothing_to_send"), Severity.INFO)
                     null to ""
                 }
                 else -> {
@@ -619,7 +649,7 @@ class ChatShellModel(
             } catch (e: Exception) {
                 synchronized(lock) {
                     busy = false
-                    notice = Notice("Send failed: ${e.javaClass.simpleName}: ${e.message}", Severity.ERROR)
+                    notice = Notice(t("conv.n.send_failed", "${e.javaClass.simpleName}: ${e.message}"), Severity.ERROR)
                 }
                 publish()
                 return@execute
@@ -631,6 +661,7 @@ class ChatShellModel(
                 // send paths return before reaching the store — so clearing the box would
                 // delete what the user typed and leave no trace of it anywhere.
                 if (!result.keepDraft) { draftText = ""; replyTarget = null }
+                sendSerial++
             }
             publish()
         }
@@ -696,6 +727,8 @@ class ChatShellModel(
         discardAfterSend: Boolean = false,
         /** __VIDEO_NOTE_2026_09_24__ send as a round video note (the file is a sealed MP4 kept for our own bubble). */
         videoNote: com.oshi.desktop.media.VideoNoteWire.Meta? = null,
+        /** __VIEW_ONCE_DESKTOP_2027__ send it view-once (1:1 photo/video/voice only; ignored elsewhere). */
+        viewOnce: Boolean = false,
     ) {
         val target = synchronized(lock) {
             val id = selectedId
@@ -705,13 +738,13 @@ class ChatShellModel(
                 busy -> return
                 !composer.attachEnabled -> {
                     notice = Notice(
-                        composer.attachDisabledReason ?: "This conversation takes no attachments.",
+                        composer.attachDisabledReason ?: t("conv.n.no_attachments"),
                         Severity.ERROR,
                     )
                     null
                 }
                 !file.isFile -> {
-                    notice = Notice("Not a readable file: ${file.path}", Severity.ERROR)
+                    notice = Notice(t("conv.n.not_readable_file", file.path), Severity.ERROR)
                     null
                 }
                 else -> { busy = true; id }
@@ -724,13 +757,13 @@ class ChatShellModel(
             val result = try {
                 // __GROUP_E2E_V2_2026_09_23__ group media: one sealed file, one blob per member (spec §4).
                 if (group) client.sendGroupFile(target, file, videoNote = videoNote)?.let(::groupSendResult)
-                    ?: SendResult(dt("desktop.group.media.refused"), Severity.ERROR, keepDraft = false)
-                else directSendResult(client.sendFile(target, file, mediaType, videoNote))
+                    ?: SendResult(t("desktop.group.media.refused"), Severity.ERROR, keepDraft = false)
+                else directSendResult(client.sendFile(target, file, mediaType, videoNote, viewOnce = viewOnce))
             } catch (e: Exception) {
                 if (discardAfterSend) runCatching { file.delete() }
                 synchronized(lock) {
                     busy = false
-                    notice = Notice("Attach failed: ${e.javaClass.simpleName}: ${e.message}", Severity.ERROR)
+                    notice = Notice(t("conv.n.attach_failed", "${e.javaClass.simpleName}: ${e.message}"), Severity.ERROR)
                 }
                 publish()
                 return@execute
@@ -739,7 +772,7 @@ class ChatShellModel(
                 busy = false
                 notice = Notice(
                     if (result.severity == Severity.OK)
-                        "Sent ${file.name} (${file.length()} bytes), encrypted before it left."
+                        t("conv.n.file_sent", file.name, com.oshi.desktop.ui.components.humanBytes(file.length()))
                     else result.text,
                     result.severity,
                 )
@@ -775,19 +808,19 @@ class ChatShellModel(
                 busy -> return
                 !composer.attachEnabled -> {
                     notice = Notice(
-                        composer.attachDisabledReason ?: "This conversation takes no attachments.",
+                        composer.attachDisabledReason ?: t("conv.n.no_attachments"),
                         Severity.ERROR,
                     )
                     null
                 }
                 kindOf(id) == ConversationKind.GROUP -> {
-                    notice = Notice("A contact card goes to one person, not a group.", Severity.ERROR)
+                    notice = Notice(t("conv.n.card_one_person"), Severity.ERROR)
                     null
                 }
                 cardAddress == id -> {
                     // Sending someone their own card is not an error the client would catch,
                     // and it is never what was meant.
-                    notice = Notice("That is this conversation's own contact.", Severity.ERROR)
+                    notice = Notice(t("conv.n.card_own"), Severity.ERROR)
                     null
                 }
                 else -> { busy = true; id }
@@ -802,7 +835,7 @@ class ChatShellModel(
             } catch (e: Exception) {
                 synchronized(lock) {
                     busy = false
-                    notice = Notice("Contact card failed: ${e.javaClass.simpleName}: ${e.message}", Severity.ERROR)
+                    notice = Notice(t("conv.n.card_failed", "${e.javaClass.simpleName}: ${e.message}"), Severity.ERROR)
                 }
                 publish()
                 return@execute
@@ -810,7 +843,7 @@ class ChatShellModel(
             synchronized(lock) {
                 busy = false
                 notice = Notice(
-                    if (result.severity == Severity.OK) "Sent $name's contact card." else result.text,
+                    if (result.severity == Severity.OK) t("conv.n.card_sent", name) else result.text,
                     result.severity,
                 )
             }
@@ -832,6 +865,26 @@ class ChatShellModel(
      * has a name to draw rather than a truncated key. No message is sent, nothing is
      * published to the relay, and the peer is not told: adding someone here is a local act.
      */
+    /**
+     * __DESKTOP_GROUP_DISCOVERY_2027__ Join a public group heard on the mesh, then open it —
+     * the same outcomes, in the same words, as joining from an invite link.
+     */
+    fun joinPublicGroup(groupId: String) {
+        val (outcome, gid) = client.joinPublicGroup(groupId)
+        if (gid != null && outcome != OshiClient.JoinOutcome.NO_INVITER && outcome != OshiClient.JoinOutcome.NOT_AN_INVITE) select(gid)
+        synchronized(lock) {
+            destination = Destination.MESSAGES
+            pane = Pane.CONVERSATION
+            notice = when (outcome) {
+                OshiClient.JoinOutcome.ALREADY_MEMBER -> Notice(t("conv.n.already_member"), Severity.INFO)
+                OshiClient.JoinOutcome.REQUESTED -> Notice(t("conv.n.join_requested"), Severity.OK)
+                OshiClient.JoinOutcome.NO_INVITER -> Notice(t("conv.n.join_old_link"), Severity.ERROR)
+                OshiClient.JoinOutcome.NOT_AN_INVITE -> Notice(t("pc.groups.discover.gone"), Severity.ERROR)
+            }
+        }
+        publish()
+    }
+
     fun startConversation(raw: String) {
         // __GROUP_PARITY_2026_09_23__ a pasted or scanned GROUP invite joins the group instead.
         if (com.oshi.desktop.group.GroupInvite.parse(raw) != null) {
@@ -840,10 +893,10 @@ class ChatShellModel(
             synchronized(lock) {
                 destination = Destination.MESSAGES
                 notice = when (outcome) {
-                    OshiClient.JoinOutcome.ALREADY_MEMBER -> Notice("You are already in this group.", Severity.INFO)
-                    OshiClient.JoinOutcome.REQUESTED -> Notice("Join request sent to the person who invited you. The group fills in when they answer.", Severity.OK)
-                    OshiClient.JoinOutcome.NO_INVITER -> Notice("This is an old-style group link with no inviter; ask for a new invite link.", Severity.ERROR)
-                    OshiClient.JoinOutcome.NOT_AN_INVITE -> Notice("That is not a group invite.", Severity.ERROR)
+                    OshiClient.JoinOutcome.ALREADY_MEMBER -> Notice(t("conv.n.already_member"), Severity.INFO)
+                    OshiClient.JoinOutcome.REQUESTED -> Notice(t("conv.n.join_requested"), Severity.OK)
+                    OshiClient.JoinOutcome.NO_INVITER -> Notice(t("conv.n.join_old_link"), Severity.ERROR)
+                    OshiClient.JoinOutcome.NOT_AN_INVITE -> Notice(t("conv.n.not_invite"), Severity.ERROR)
                 }
             }
             publish()
@@ -862,7 +915,7 @@ class ChatShellModel(
                 synchronized(lock) {
                     destination = Destination.MESSAGES
                     notice = Notice(
-                        "Added ${short(scan.address)}. Nothing was sent and the relay was not told.",
+                        t("conv.n.contact_added", short(scan.address)),
                         Severity.OK,
                     )
                 }
@@ -870,7 +923,7 @@ class ChatShellModel(
             }
             is ContactQr.Scan.Rejected -> {
                 synchronized(lock) {
-                    notice = Notice("That code was not usable: ${scan.detail}", Severity.ERROR)
+                    notice = Notice(t("conv.n.code_unusable", scan.detail), Severity.ERROR)
                 }
                 publish()
             }
@@ -891,7 +944,7 @@ class ChatShellModel(
                 busy = false
                 profileNotice = result.fold(
                     onSuccess = { u -> nicknameNotice(u) },
-                    onFailure = { Notice(dt("desktop.nickname.failed", it.message ?: it.javaClass.simpleName), Severity.ERROR) },
+                    onFailure = { Notice(t("desktop.nickname.failed", it.message ?: it.javaClass.simpleName), Severity.ERROR) },
                 )
             }
             publish()
@@ -907,8 +960,8 @@ class ChatShellModel(
             synchronized(lock) {
                 busy = false
                 profileNotice = result.fold(
-                    onSuccess = { u -> if (u == null) Notice(dt("desktop.nickname.pull.none"), Severity.INFO) else nicknameNotice(u) },
-                    onFailure = { Notice(dt("desktop.nickname.sync.failed", it.message ?: it.javaClass.simpleName), Severity.ERROR) },
+                    onSuccess = { u -> if (u == null) Notice(t("desktop.nickname.pull.none"), Severity.INFO) else nicknameNotice(u) },
+                    onFailure = { Notice(t("desktop.nickname.sync.failed", it.message ?: it.javaClass.simpleName), Severity.ERROR) },
                 )
             }
             publish()
@@ -924,8 +977,8 @@ class ChatShellModel(
             synchronized(lock) {
                 busy = false
                 profileNotice = result.fold(
-                    onSuccess = { Notice(dt("desktop.nickname.pushed"), Severity.OK) },
-                    onFailure = { Notice(dt("desktop.nickname.sync.failed", it.message ?: it.javaClass.simpleName), Severity.ERROR) },
+                    onSuccess = { Notice(t("desktop.nickname.pushed"), Severity.OK) },
+                    onFailure = { Notice(t("desktop.nickname.sync.failed", it.message ?: it.javaClass.simpleName), Severity.ERROR) },
                 )
             }
             publish()
@@ -933,10 +986,10 @@ class ChatShellModel(
     }
 
     private fun nicknameNotice(u: OshiClient.NicknameUpdate): Notice = when {
-        !u.changed -> Notice(dt("desktop.nickname.unchanged"), Severity.INFO)
-        u.withheld -> Notice(dt("desktop.nickname.withheld"), Severity.INFO)
-        u.nickname == null -> Notice(dt("desktop.nickname.cleared", u.sent, u.eligible), Severity.OK)
-        else -> Notice(dt("desktop.nickname.saved", u.sent, u.eligible), Severity.OK)
+        !u.changed -> Notice(t("desktop.nickname.unchanged"), Severity.INFO)
+        u.withheld -> Notice(t("desktop.nickname.withheld"), Severity.INFO)
+        u.nickname == null -> Notice(t("desktop.nickname.cleared", u.sent, u.eligible), Severity.OK)
+        else -> Notice(t("desktop.nickname.saved", u.sent, u.eligible), Severity.OK)
     }
 
     fun renameContact(address: String, name: String?) {
@@ -945,13 +998,16 @@ class ChatShellModel(
     }
 
     /** PARITY.md row 0.21 — blocked peers are WITHHELD from the list, never deleted. */
-    fun setBlocked(address: String, blocked: Boolean) {
+    fun setBlocked(address: String, blocked: Boolean, keepOpen: Boolean = false) {
         if (blocked) client.block(address) else client.unblock(address)
         synchronized(lock) {
-            if (blocked && selectedId == address) selectedId = null
+            // __CONVERSATION_BLOCK_2027__ blocking from INSIDE the conversation keeps it on
+            // screen behind the "Contact Blocked" banner, with Unblock one click away — the
+            // phones' order. From the contacts list the thread closes, as before.
+            if (blocked && selectedId == address && !keepOpen) selectedId = null
             notice = Notice(
-                if (blocked) "Blocked ${short(address)}. Their conversation is hidden, not deleted."
-                else "Unblocked ${short(address)}.",
+                if (blocked) t("conv.n.blocked", short(address))
+                else t("conv.n.unblocked", short(address)),
                 Severity.OK,
             )
         }
@@ -968,8 +1024,8 @@ class ChatShellModel(
         val verified = client.verifySafetyNumber(address, payload.trim())
         synchronized(lock) {
             notice = Notice(
-                if (verified) "Safety number verified for ${short(address)}."
-                else "That safety QR does not match ${short(address)}. Verify the identity before continuing.",
+                if (verified) t("conv.n.verified", short(address))
+                else t("conv.n.verify_mismatch", short(address)),
                 if (verified) Severity.OK else Severity.ERROR,
             )
         }
@@ -986,12 +1042,12 @@ class ChatShellModel(
         val groupName = name.trim()
         val recipients = members.map(String::trim).filter(String::isNotBlank).distinct()
         if (groupName.isBlank()) {
-            synchronized(lock) { notice = Notice("A group needs a name.", Severity.ERROR) }
+            synchronized(lock) { notice = Notice(t("conv.n.group_needs_name"), Severity.ERROR) }
             publish()
             return
         }
         if (recipients.isEmpty()) {
-            synchronized(lock) { notice = Notice("Choose at least one contact for the group.", Severity.ERROR) }
+            synchronized(lock) { notice = Notice(t("conv.n.group_needs_member"), Severity.ERROR) }
             publish()
             return
         }
@@ -1006,11 +1062,11 @@ class ChatShellModel(
                     destination = Destination.MESSAGES
                     pane = Pane.CONVERSATION
                     notice = Notice(
-                        "Created ${group.name} locally. Group definitions were sent to ${recipients.size} contact(s).",
+                        t("conv.n.group_created", group.name, recipients.size),
                         Severity.OK,
                     )
                 }.onFailure { error ->
-                    notice = Notice("Could not create the group: ${error.message ?: error.javaClass.simpleName}", Severity.ERROR)
+                    notice = Notice(t("conv.n.group_create_failed", error.message ?: error.javaClass.simpleName), Severity.ERROR)
                 }
             }
             publish()
@@ -1021,7 +1077,7 @@ class ChatShellModel(
     fun renameGroup(groupId: String, name: String) {
         val nextName = name.trim()
         if (nextName.isBlank()) {
-            synchronized(lock) { notice = Notice("A group needs a name.", Severity.ERROR) }
+            synchronized(lock) { notice = Notice(t("conv.n.group_needs_name"), Severity.ERROR) }
             publish()
             return
         }
@@ -1032,9 +1088,9 @@ class ChatShellModel(
             synchronized(lock) {
                 busy = false
                 notice = when {
-                    updated.isFailure -> Notice("Could not rename the group: ${updated.exceptionOrNull()?.message ?: "network error"}", Severity.ERROR)
-                    updated.getOrNull() == null -> Notice("This account is no longer a group admin.", Severity.ERROR)
-                    else -> Notice("Renamed the group locally. The update was sent to its members.", Severity.OK)
+                    updated.isFailure -> Notice(t("conv.n.failed", updated.exceptionOrNull()?.message ?: t("conv.error.network")), Severity.ERROR)
+                    updated.getOrNull() == null -> Notice(t("conv.n.not_admin"), Severity.ERROR)
+                    else -> Notice(t("conv.n.group_renamed"), Severity.OK)
                 }
             }
             publish()
@@ -1045,7 +1101,7 @@ class ChatShellModel(
     fun addGroupMember(groupId: String, memberAddress: String) {
         val contact = client.contacts.get(memberAddress)
         if (contact == null || contact.blocked) {
-            synchronized(lock) { notice = Notice("Only known, unblocked contacts can be added to a group.", Severity.ERROR) }
+            synchronized(lock) { notice = Notice(t("conv.n.add_known_only"), Severity.ERROR) }
             publish()
             return
         }
@@ -1056,9 +1112,9 @@ class ChatShellModel(
             synchronized(lock) {
                 busy = false
                 notice = when {
-                    updated.isFailure -> Notice("Could not add the member: ${updated.exceptionOrNull()?.message ?: "network error"}", Severity.ERROR)
-                    updated.getOrNull() == null -> Notice("This account is no longer a group admin.", Severity.ERROR)
-                    else -> Notice("Added ${contact.label(short(memberAddress))} to the group.", Severity.OK)
+                    updated.isFailure -> Notice(t("conv.n.failed", updated.exceptionOrNull()?.message ?: t("conv.error.network")), Severity.ERROR)
+                    updated.getOrNull() == null -> Notice(t("conv.n.not_admin"), Severity.ERROR)
+                    else -> Notice(t("conv.n.member_added", contact.label(short(memberAddress))), Severity.OK)
                 }
             }
             publish()
@@ -1068,7 +1124,7 @@ class ChatShellModel(
     /** Removing this account is deliberately not offered: it could strand the local group view. */
     fun removeGroupMember(groupId: String, memberAddress: String) {
         if (GroupIdentity.sameIdentity(memberAddress, client.address)) {
-            synchronized(lock) { notice = Notice("Leave a group from the REPL; this window cannot safely remove its own admin.", Severity.ERROR) }
+            synchronized(lock) { notice = Notice(t("conv.n.remove_self"), Severity.ERROR) }
             publish()
             return
         }
@@ -1079,9 +1135,9 @@ class ChatShellModel(
             synchronized(lock) {
                 busy = false
                 notice = when {
-                    updated.isFailure -> Notice("Could not remove the member: ${updated.exceptionOrNull()?.message ?: "network error"}", Severity.ERROR)
-                    updated.getOrNull() == null -> Notice("This account is no longer a group admin.", Severity.ERROR)
-                    else -> Notice("Removed ${short(memberAddress)} from the group.", Severity.OK)
+                    updated.isFailure -> Notice(t("conv.n.failed", updated.exceptionOrNull()?.message ?: t("conv.error.network")), Severity.ERROR)
+                    updated.getOrNull() == null -> Notice(t("conv.n.not_admin"), Severity.ERROR)
+                    else -> Notice(t("conv.n.member_removed", short(memberAddress)), Severity.OK)
                 }
             }
             publish()
@@ -1097,9 +1153,9 @@ class ChatShellModel(
             synchronized(lock) {
                 busy = false
                 notice = when {
-                    updated.isFailure -> Notice("Could not change the member role: ${updated.exceptionOrNull()?.message ?: "network error"}", Severity.ERROR)
-                    updated.getOrNull() == null -> Notice("That role change is not permitted for this group.", Severity.ERROR)
-                    else -> Notice("${if (isAdmin) "Promoted" else "Demoted"} ${short(memberAddress)} ${if (isAdmin) "to" else "from"} admin.", Severity.OK)
+                    updated.isFailure -> Notice(t("conv.n.failed", updated.exceptionOrNull()?.message ?: t("conv.error.network")), Severity.ERROR)
+                    updated.getOrNull() == null -> Notice(t("conv.n.role_refused"), Severity.ERROR)
+                    else -> Notice(if (isAdmin) t("conv.n.promoted", short(memberAddress)) else t("conv.n.demoted", short(memberAddress)), Severity.OK)
                 }
             }
             publish()
@@ -1115,9 +1171,9 @@ class ChatShellModel(
             synchronized(lock) {
                 busy = false
                 notice = when {
-                    cancelled.isFailure -> Notice("Could not cancel the scheduled message: ${cancelled.exceptionOrNull()?.message ?: "storage error"}", Severity.ERROR)
-                    cancelled.getOrNull() == true -> Notice("Scheduled message cancelled. It remains listed as cancelled.", Severity.OK)
-                    else -> Notice("That scheduled message is no longer pending and cannot be cancelled.", Severity.ERROR)
+                    cancelled.isFailure -> Notice(t("desktop.sched.cancel_failed", cancelled.exceptionOrNull()?.message ?: t("desktop.sched.storage_error")), Severity.ERROR)
+                    cancelled.getOrNull() == true -> Notice(t("desktop.sched.cancelled"), Severity.OK)
+                    else -> Notice(t("desktop.sched.cancel_not_pending"), Severity.ERROR)
                 }
             }
             publish()
@@ -1130,22 +1186,22 @@ class ChatShellModel(
         val body = content.trim()
         when {
             isGroup && (client.groups.get(recipient)?.isMember(client.address) != true) -> {
-                synchronized(lock) { notice = Notice("Choose a group this account belongs to for a scheduled message.", Severity.ERROR) }
+                synchronized(lock) { notice = Notice(t("desktop.sched.need_group"), Severity.ERROR) }
                 publish()
                 return
             }
             !isGroup && (contact == null || contact.blocked) -> {
-                synchronized(lock) { notice = Notice("Choose a known, unblocked contact for a scheduled message.", Severity.ERROR) }
+                synchronized(lock) { notice = Notice(t("desktop.sched.need_contact"), Severity.ERROR) }
                 publish()
                 return
             }
             body.isEmpty() -> {
-                synchronized(lock) { notice = Notice("A scheduled message needs text.", Severity.ERROR) }
+                synchronized(lock) { notice = Notice(t("desktop.sched.need_text"), Severity.ERROR) }
                 publish()
                 return
             }
             delayMs <= 0L -> {
-                synchronized(lock) { notice = Notice("Choose a future delivery time.", Severity.ERROR) }
+                synchronized(lock) { notice = Notice(t("desktop.sched.need_future"), Severity.ERROR) }
                 publish()
                 return
             }
@@ -1157,8 +1213,8 @@ class ChatShellModel(
             synchronized(lock) {
                 busy = false
                 notice = when {
-                    queued.isFailure -> Notice("Could not schedule the message: ${queued.exceptionOrNull()?.message ?: "storage error"}", Severity.ERROR)
-                    else -> Notice("Scheduled for ${stamp(queued.getOrThrow().scheduledAtMs)} on this machine.", Severity.OK)
+                    queued.isFailure -> Notice(t("desktop.sched.schedule_failed", queued.exceptionOrNull()?.message ?: t("desktop.sched.storage_error")), Severity.ERROR)
+                    else -> Notice(t("desktop.sched.scheduled", stamp(queued.getOrThrow().scheduledAtMs)), Severity.OK)
                 }
             }
             publish()
@@ -1169,7 +1225,7 @@ class ChatShellModel(
     fun editScheduled(id: String, content: String) {
         val body = content.trim()
         if (body.isEmpty()) {
-            synchronized(lock) { notice = Notice("A scheduled message needs text.", Severity.ERROR) }
+            synchronized(lock) { notice = Notice(t("desktop.sched.need_text"), Severity.ERROR) }
             publish()
             return
         }
@@ -1180,9 +1236,9 @@ class ChatShellModel(
             synchronized(lock) {
                 busy = false
                 notice = when {
-                    edited.isFailure -> Notice("Could not edit the scheduled message: ${edited.exceptionOrNull()?.message ?: "storage error"}", Severity.ERROR)
-                    edited.getOrNull() == true -> Notice("Scheduled message updated.", Severity.OK)
-                    else -> Notice("That scheduled message is no longer pending and cannot be edited.", Severity.ERROR)
+                    edited.isFailure -> Notice(t("desktop.sched.edit_failed", edited.exceptionOrNull()?.message ?: t("desktop.sched.storage_error")), Severity.ERROR)
+                    edited.getOrNull() == true -> Notice(t("desktop.sched.updated"), Severity.OK)
+                    else -> Notice(t("desktop.sched.edit_not_pending"), Severity.ERROR)
                 }
             }
             publish()
@@ -1194,7 +1250,7 @@ class ChatShellModel(
         groupSelected()?.let { gid -> return runGroupMessageAction { client.sendGroupReaction(gid, messageId, emoji) } }
         val target = synchronized(lock) { selectedId?.takeIf { kindOf(it) == ConversationKind.DIRECT } }
         if (target == null) {
-            synchronized(lock) { notice = Notice("Reactions are available only in direct conversations.", Severity.ERROR) }
+            synchronized(lock) { notice = Notice(t("conv.n.reactions_unavailable"), Severity.ERROR) }
             publish()
             return
         }
@@ -1205,11 +1261,11 @@ class ChatShellModel(
             synchronized(lock) {
                 busy = false
                 notice = when {
-                    outcome.isFailure -> Notice("Could not send the reaction: ${outcome.exceptionOrNull()?.message ?: "network error"}", Severity.ERROR)
-                    outcome.getOrNull() == OshiClient.SendOutcome.BLOCKED -> Notice("That contact is blocked; the reaction was not applied.", Severity.ERROR)
+                    outcome.isFailure -> Notice(t("conv.n.failed", outcome.exceptionOrNull()?.message ?: t("conv.error.network")), Severity.ERROR)
+                    outcome.getOrNull() == OshiClient.SendOutcome.BLOCKED -> Notice(t("chat.contact_blocked_message"), Severity.ERROR)
                     else -> Notice(
-                        if (outcome.getOrThrow() == OshiClient.SendOutcome.SENT) "Reaction added locally and sent."
-                        else "Reaction added locally; it was not delivered yet.",
+                        if (outcome.getOrThrow() == OshiClient.SendOutcome.SENT) t("conv.n.reaction_sent")
+                        else t("conv.n.reaction_pending"),
                         Severity.OK,
                     )
                 }
@@ -1222,7 +1278,7 @@ class ChatShellModel(
     fun editMessage(messageId: String, content: String) {
         val body = content.trim()
         if (body.isEmpty()) {
-            synchronized(lock) { notice = Notice("A message cannot be empty.", Severity.ERROR) }
+            synchronized(lock) { notice = Notice(t("conv.n.empty_message"), Severity.ERROR) }
             publish()
             return
         }
@@ -1244,6 +1300,114 @@ class ChatShellModel(
     fun removeGroupPicture(groupId: String) = runGroupInfoChange("picture") { client.setGroupPicture(groupId, null) }
 
     fun setGroupMuted(groupId: String, muted: Boolean) = runGroupInfoChange("mute") { client.setGroupMuted(groupId, muted) }
+
+    /**
+     * __CONVERSATION_PIN_MUTE_2027__ Mute any conversation: a group through its definition
+     * (the existing local flag, so the two can never disagree), anything else here.
+     */
+    fun setConversationMuted(id: String, muted: Boolean) {
+        if (kindOf(id) == ConversationKind.GROUP) return setGroupMuted(id, muted)
+        client.conversationPrefs.setMuted(id, muted)
+        publish()
+    }
+
+    /** __CONVERSATION_PIN_MUTE_2027__ Pin a conversation to the top of the list, or unpin it. */
+    fun setConversationPinned(id: String, pinned: Boolean) {
+        client.conversationPrefs.setPinned(id, pinned)
+        publish()
+    }
+
+    /** __CONVERSATION_UNREAD_2027__ "Mark as read" from the list without opening the thread. */
+    /**
+     * __DELETE_CONVERSATION_2027__ The phones' "Delete conversation" (iOS swipe / header menu
+     * `alert.delete_conversation`, Android's long-press): this device's copy of the history is
+     * removed — the log file, not just the view. The contact stays, nothing is sent, and the
+     * other side keeps their copy. Groups keep their own leave/delete path.
+     */
+    fun deleteConversation(id: String) {
+        synchronized(lock) {
+            if (selectedId == id) selectedId = null
+            unread.remove(id); mentionedYou.remove(id)
+        }
+        runCatching { client.messages.deleteConversation(id) }
+        publish()
+    }
+
+    /**
+     * __SEARCH_MESSAGE_TEXT_2027__ Conversations whose MESSAGES contain [query] — the phones'
+     * "Search messages and contacts". The list filter alone only saw names and the last
+     * preview, so a word said three days ago could not be found from the list. Read off the
+     * local store only; called off the UI thread.
+     */
+    fun conversationsContaining(query: String): Set<String> {
+        val q = query.trim()
+        if (q.length < 2) return emptySet()
+        val ids = synchronized(lock) { state.conversations.map { it.id } }
+        return ids.filterTo(LinkedHashSet()) { id ->
+            runCatching { client.history(id).any { m -> m.content?.contains(q, ignoreCase = true) == true } }.getOrDefault(false)
+        }
+    }
+
+    fun markConversationRead(id: String) {
+        synchronized(lock) { unread.remove(id); mentionedYou.remove(id) }
+        publish()
+    }
+
+    /**
+     * __CONVERSATION_VERIFY_2027__ "Mark as Verified" after comparing the numbers out loud —
+     * the phones' `safety.mark_verified` ("Marks this contact as verified after you compare
+     * numbers"). Recorded as a manual verification; un-marking returns to unverified. The
+     * QR route ([verifySafetyNumber]) stays the stronger one and is offered beside it.
+     */
+    fun setContactVerified(address: String, verified: Boolean) {
+        client.contacts.setVerification(
+            address,
+            if (verified) ContactStore.VerificationState.VERIFIED else ContactStore.VerificationState.UNVERIFIED,
+        )
+        synchronized(lock) {
+            notice = Notice(if (verified) t("conv.verify.done") else t("conv.verify.undone"), Severity.OK)
+        }
+        publish()
+    }
+
+    /**
+     * __CONVERSATION_EXPORT_2027__ Write ONE conversation to [target] as readable text
+     * (Android's "Export as Text"). Unlike the account backup this file is NOT encrypted,
+     * and the window says so before it asks for a place to save it.
+     */
+    fun exportConversation(id: String, target: File) {
+        synchronized(lock) { busy = true; notice = null }
+        publish()
+        worker.execute {
+            val result = runCatching {
+                val kind = kindOf(id)
+                val lines = ConversationTextExport.render(
+                    title = labelFor(id, kind),
+                    rows = client.history(id).filterNot { it.hiddenLocally }.map { m ->
+                        ConversationTextExport.Line(
+                            atMs = m.sentAtMs,
+                            who = if (m.fromMe) t("conv.export.me") else senderLabel(m.senderAddress),
+                            text = when {
+                                m.isDeletedForEveryone -> t("message.deleted_for_everyone")
+                                m.mediaRef != null -> "[" + (m.content?.takeIf { it.isNotBlank() } ?: (m.mediaType?.wire ?: "file")) + "]"
+                                else -> previewOfFull(m)
+                            },
+                        )
+                    },
+                )
+                target.writeText(lines, Charsets.UTF_8)
+                client.history(id).size
+            }
+            synchronized(lock) {
+                busy = false
+                notice = result.fold(
+                    onSuccess = { Notice(t("conv.export.done", target.name), Severity.OK) },
+                    onFailure = { Notice(t("export.failed") + ": " + (it.message ?: it.javaClass.simpleName), Severity.ERROR) },
+                )
+            }
+            publish()
+        }
+    }
 
     fun setGroupDescription(groupId: String, text: String) = runGroupInfoChange("description") { client.setGroupDescription(groupId, text) }
 
@@ -1283,17 +1447,17 @@ class ChatShellModel(
                 busy = false
                 notice = when {
                     outcome.isFailure ->
-                        Notice("Could not pin the message: ${outcome.exceptionOrNull()?.message ?: "network error"}", Severity.ERROR)
+                        Notice(t("conv.n.failed", outcome.exceptionOrNull()?.message ?: t("conv.error.network")), Severity.ERROR)
                     outcome.getOrNull() == OshiClient.SendOutcome.BLOCKED ->
-                        Notice("That contact is blocked; nothing was pinned.", Severity.ERROR)
+                        Notice(t("chat.contact_blocked_message"), Severity.ERROR)
                     outcome.getOrNull() == OshiClient.SendOutcome.NO_V2_PATH ->
-                        Notice("That message is not in this conversation's history.", Severity.ERROR)
+                        Notice(t("conv.n.message_missing"), Severity.ERROR)
                     outcome.getOrNull() == OshiClient.SendOutcome.SENT ->
-                        Notice("Message $verb.", Severity.OK)
+                        Notice(if (messageId == null) t("conv.n.unpinned") else t("conv.n.pinned"), Severity.OK)
                     // Pinned here, not yet delivered. Said plainly: both phones show their
                     // own banner immediately too, so the two ends can disagree until the
                     // next successful send, and a user who is told nothing cannot know that.
-                    else -> Notice("Message $verb here; your contact has not been told yet.", Severity.OK)
+                    else -> Notice(if (messageId == null) t("conv.n.unpinned_pending") else t("conv.n.pinned_pending"), Severity.OK)
                 }
             }
             publish()
@@ -1308,7 +1472,7 @@ class ChatShellModel(
             val ok = runCatching { client.deleteGroupLocally(groupId) }.getOrDefault(false)
             synchronized(lock) {
                 if (ok && selectedId == groupId) selectedId = null
-                notice = if (ok) Notice(t("conversation.deleted"), Severity.OK) else Notice("The group could not be deleted.", Severity.ERROR)
+                notice = if (ok) Notice(t("conversation.deleted"), Severity.OK) else Notice(t("conv.n.group_delete_failed"), Severity.ERROR)
             }
             publish()
         }
@@ -1331,10 +1495,117 @@ class ChatShellModel(
             synchronized(lock) {
                 notice = when (outcome) {
                     OshiClient.SendOutcome.SENT -> Notice(t("forward.success"), Severity.OK)
-                    OshiClient.SendOutcome.BLOCKED -> Notice("That contact is blocked.", Severity.ERROR)
-                    null -> Notice("That message cannot be forwarded.", Severity.ERROR)
+                    OshiClient.SendOutcome.BLOCKED -> Notice(t("chat.contact_blocked_message"), Severity.ERROR)
+                    null -> Notice(t("conv.n.cannot_forward"), Severity.ERROR)
                     else -> Notice(t("forward.failed"), Severity.ERROR)
                 }
+            }
+            publish()
+        }
+    }
+
+    /**
+     * __FORWARD_MANY_DESKTOP_2027__ Forward one message to several contacts at once. Each is
+     * its own 1:1 `➡️FORWARDED➡️` send — the wire the phones read — so a recipient sees exactly
+     * what a single forward from an iPhone looks like. The notice counts what really left.
+     */
+    fun forwardMessageToMany(messageId: String, peers: List<String>) {
+        val from = synchronized(lock) { selectedId } ?: return
+        val targets = peers.distinct().take(ForwardSelection.MAX_RECIPIENTS)
+        if (targets.isEmpty()) return
+        if (targets.size == 1) return forwardMessage(messageId, targets.single())
+        worker.execute {
+            val outcomes = targets.map { runCatching { client.forwardMessage(from, messageId, it) }.getOrNull() }
+            val sent = outcomes.count { it == OshiClient.SendOutcome.SENT }
+            synchronized(lock) {
+                notice = when {
+                    outcomes.all { it == null } -> Notice(t("conv.n.cannot_forward"), Severity.ERROR)
+                    sent == targets.size -> Notice(t("conv.fa.forward.sent_many", sent), Severity.OK)
+                    sent == 0 -> Notice(t("forward.failed"), Severity.ERROR)
+                    else -> Notice(t("conv.fa.forward.sent_partial", sent, targets.size), Severity.ERROR)
+                }
+            }
+            publish()
+        }
+    }
+
+    /**
+     * __REPLY_PRIVATELY_DESKTOP_2027__ "Reply privately": open the 1:1 with the member who sent
+     * [messageId] in the open group, with the composer already quoting it.
+     *
+     * No phone has this action, so nothing new goes on the wire: the reply is an ordinary 1:1
+     * `💬REPLY💬` whose `replyTo` carries the group message's id, sender and text (≤ 180) —
+     * exactly what iOS's `MessageWithReply` and Android read, and they draw the quote from
+     * `originalText` when the id is not in that chat, which is the case here.
+     */
+    fun beginPrivateReply(messageId: String) {
+        val (member, quote) = synchronized(lock) {
+            val gid = selectedId ?: return
+            if (kindOf(gid) != ConversationKind.GROUP) return
+            val m = client.messages.messages(gid).firstOrNull { com.oshi.desktop.group.GroupMessageWire.sameMessageId(it.id, messageId) } ?: return
+            if (m.fromMe || m.isDeletedForEveryone || com.oshi.desktop.group.GroupIdentity.sameIdentity(m.senderAddress, client.address)) return
+            m.senderAddress to com.oshi.desktop.msg.ReplyEnvelope.Quote(
+                originalMessageId = m.id,
+                originalSenderKey = m.senderAddress,
+                originalText = com.oshi.desktop.msg.ReplyEnvelope.quotableText(m.content, m.mediaType?.wire),
+                originalTimestampMs = m.sentAtMs,
+                originalMediaType = m.mediaType?.wire,
+            )
+        }
+        if (client.contacts.get(member)?.blocked == true) {
+            synchronized(lock) { notice = Notice(t("chat.contact_blocked_message"), Severity.ERROR) }
+            publish(); return
+        }
+        client.contacts.seen(member, System.currentTimeMillis())
+        select(member)
+        synchronized(lock) { replyTarget = member to quote; destination = Destination.MESSAGES }
+        publish()
+    }
+
+    /**
+     * __MERGE_AB_MEMBER_MENU__ The member menu's "Reply privately": [beginPrivateReply] without a
+     * quote — open (or start) the 1:1 with [member]. Same guards: not ourselves, not blocked.
+     */
+    fun replyPrivatelyToMember(member: String) {
+        if (member.isBlank() || com.oshi.desktop.group.GroupIdentity.sameIdentity(member, client.address)) return
+        if (client.contacts.get(member)?.blocked == true) {
+            synchronized(lock) { notice = Notice(t("chat.contact_blocked_message"), Severity.ERROR) }
+            publish(); return
+        }
+        client.contacts.seen(member, System.currentTimeMillis())
+        select(member)
+        synchronized(lock) { destination = Destination.MESSAGES }
+        publish()
+    }
+
+    /** __VIEW_ONCE_DESKTOP_2027__ the recipient opened a view-once attachment of the open conversation. */
+    fun openViewOnce(messageId: String) {
+        val id = synchronized(lock) { selectedId } ?: return
+        worker.execute { if (runCatching { client.markViewOnceOpened(id, messageId) }.getOrDefault(false)) publish() }
+    }
+
+    /**
+     * __PROFILE_PHOTOS_DESKTOP_2027__ Set (a file) or remove (null) this account's picture and
+     * tell the contacts — the phones' `setProfileImage` + broadcast.
+     */
+    fun setOwnPhoto(file: File?) {
+        synchronized(lock) { busy = true; profileNotice = null }
+        publish()
+        worker.execute {
+            val result = runCatching { client.setOwnPhoto(file?.readBytes()) }
+            synchronized(lock) {
+                busy = false
+                profileNotice = result.fold(
+                    onSuccess = { u ->
+                        when {
+                            !u.ok -> Notice(t("conv.fa.photo.unreadable"), Severity.ERROR)
+                            u.withheld -> Notice(t("desktop.nickname.withheld"), Severity.INFO)
+                            file == null -> Notice(t("conv.fa.photo.removed", u.sent, u.eligible), Severity.OK)
+                            else -> Notice(t("conv.fa.photo.saved", u.sent, u.eligible), Severity.OK)
+                        }
+                    },
+                    onFailure = { Notice(t("conv.fa.photo.unreadable"), Severity.ERROR) },
+                )
             }
             publish()
         }
@@ -1368,7 +1639,7 @@ class ChatShellModel(
                     com.oshi.desktop.net.V2ReportClient.State.SENT ->
                         Notice(t("report.sent_title") + " — " + t("report.sent_message"), Severity.OK)
                     com.oshi.desktop.net.V2ReportClient.State.REJECTED ->
-                        Notice("The server refused this report (${outcome.getOrNull()?.lastError ?: "4xx"}).", Severity.ERROR)
+                        Notice(t("conv.n.report_refused", outcome.getOrNull()?.lastError ?: "4xx"), Severity.ERROR)
                     else -> Notice(t("report.queued_title") + " — " + t("report.queued_message"), Severity.OK)
                 }
                 if (alsoBlock && !isGroup && selectedId == conversationId) selectedId = null
@@ -1385,9 +1656,9 @@ class ChatShellModel(
             synchronized(lock) {
                 busy = false
                 notice = when {
-                    outcome.isFailure -> Notice("Could not change the group $what: ${outcome.exceptionOrNull()?.message ?: "error"}", Severity.ERROR)
+                    outcome.isFailure -> Notice(t("conv.n.group_change_failed", outcome.exceptionOrNull()?.message ?: t("conv.error.network")), Severity.ERROR)
                     outcome.getOrNull() == null -> Notice(
-                        if (what == "picture") "Not changed: only an admin can edit this group, or the file is not a picture." else "Not changed.",
+                        if (what == "picture") t("conv.n.group_picture_refused") else t("conv.n.not_changed"),
                         Severity.ERROR,
                     )
                     else -> null
@@ -1412,8 +1683,8 @@ class ChatShellModel(
             synchronized(lock) {
                 busy = false
                 notice = when {
-                    outcome.isFailure -> Notice(dt("desktop.group.action.failed", outcome.exceptionOrNull()?.message ?: "network error"), Severity.ERROR)
-                    outcome.getOrNull() == null -> Notice(dt("desktop.group.action.refused"), Severity.ERROR)
+                    outcome.isFailure -> Notice(t("desktop.group.action.failed", outcome.exceptionOrNull()?.message ?: "network error"), Severity.ERROR)
+                    outcome.getOrNull() == null -> Notice(t("desktop.group.action.refused"), Severity.ERROR)
                     else -> groupSendResult(outcome.getOrThrow()!!).let { Notice(it.text, it.severity) }
                 }
             }
@@ -1430,8 +1701,8 @@ class ChatShellModel(
             synchronized(lock) {
                 busy = false
                 if (left.getOrNull() == true && selectedId == groupId) selectedId = null
-                notice = if (left.getOrNull() == true) Notice(dt("desktop.group.left"), Severity.OK)
-                else Notice(dt("desktop.group.action.failed", left.exceptionOrNull()?.message ?: "not a member"), Severity.ERROR)
+                notice = if (left.getOrNull() == true) Notice(t("desktop.group.left"), Severity.OK)
+                else Notice(t("desktop.group.action.failed", left.exceptionOrNull()?.message ?: "not a member"), Severity.ERROR)
             }
             publish()
         }
@@ -1440,7 +1711,7 @@ class ChatShellModel(
     private fun runDirectMessageAction(action: String, send: (String) -> OshiClient.SendOutcome) {
         val target = synchronized(lock) { selectedId?.takeIf { kindOf(it) == ConversationKind.DIRECT } }
         if (target == null) {
-            synchronized(lock) { notice = Notice("Message actions are available only in direct conversations.", Severity.ERROR) }
+            synchronized(lock) { notice = Notice(t("conv.n.actions_unavailable"), Severity.ERROR) }
             publish()
             return
         }
@@ -1451,12 +1722,17 @@ class ChatShellModel(
             synchronized(lock) {
                 busy = false
                 notice = when {
-                    outcome.isFailure -> Notice("Could not $action the message: ${outcome.exceptionOrNull()?.message ?: "network error"}", Severity.ERROR)
-                    outcome.getOrNull() == OshiClient.SendOutcome.BLOCKED -> Notice("That contact is blocked; the message was not changed.", Severity.ERROR)
-                    outcome.getOrNull() == OshiClient.SendOutcome.REFUSED_CONTROL_PAYLOAD -> Notice("Only messages you sent can be $action${if (action == "delete") "d" else "ed"}.", Severity.ERROR)
+                    outcome.isFailure -> Notice(
+                        (outcome.exceptionOrNull()?.message ?: t("conv.error.network")).let {
+                            if (action == "delete") t("conv.n.delete_failed", it) else t("conv.n.edit_failed", it)
+                        },
+                        Severity.ERROR,
+                    )
+                    outcome.getOrNull() == OshiClient.SendOutcome.BLOCKED -> Notice(t("chat.contact_blocked_message"), Severity.ERROR)
+                    outcome.getOrNull() == OshiClient.SendOutcome.REFUSED_CONTROL_PAYLOAD -> Notice(if (action == "delete") t("conv.n.delete_own_only") else t("conv.n.edit_own_only"), Severity.ERROR)
                     else -> Notice(
-                        if (outcome.getOrThrow() == OshiClient.SendOutcome.SENT) "Message $action${if (action == "delete") "d" else "ed"} and sent."
-                        else "Message $action${if (action == "delete") "d" else "ed"} locally; it was not delivered yet.",
+                        if (outcome.getOrThrow() == OshiClient.SendOutcome.SENT) (if (action == "delete") t("conv.n.deleted_sent") else t("conv.n.edited_sent"))
+                        else (if (action == "delete") t("conv.n.deleted_pending") else t("conv.n.edited_pending")),
                         Severity.OK,
                     )
                 }
@@ -1504,7 +1780,9 @@ class ChatShellModel(
             if (unseen && mentionsMe) mentionedYou.add(m.conversationId)
             // __GROUP_PARITY_2026_09_23__ a muted group still counts unread, it just stays quiet.
             shouldNotify = unseen && (mentionsMe || !client.isGroupMuted(m.conversationId)) &&
-                !client.isGroupBlocked(m.conversationId)
+                !client.isGroupBlocked(m.conversationId) &&
+                // __CONVERSATION_PIN_MUTE_2027__ a muted 1:1 still counts unread, quietly.
+                !client.conversationPrefs.isMuted(m.conversationId)
         }
         publish()
         // Deliberately after durable storage (which OshiClient completed before this
@@ -1630,6 +1908,7 @@ class ChatShellModel(
             .map { com.oshi.desktop.store.MessageStore.ConversationSummary(it.groupId, 0, null, it.lastActivityUnixMillis) }
         val rows = summaries.sortedByDescending { it.lastActivityMs }.map { summary ->
             val kind = kindOf(summary.conversationId)
+            val groupDef = if (kind == ConversationKind.GROUP) client.groups.get(summary.conversationId) else null
             ConversationRow(
                 id = summary.conversationId,
                 label = labelFor(summary.conversationId, kind),
@@ -1640,9 +1919,13 @@ class ChatShellModel(
                 preview = previewOf(summary.lastMessage),
                 unread = unread[summary.conversationId] ?: 0,
                 mentionedYou = summary.conversationId in mentionedYou,
-                pictureBase64 = if (kind == ConversationKind.GROUP) client.groups.get(summary.conversationId)?.groupPictureBase64 else null,
+                pictureBase64 = groupDef?.groupPictureBase64
+                    ?: if (kind == ConversationKind.DIRECT) client.photos.get(summary.conversationId) else null,
+                groupType = groupDef?.type,
+                pinned = client.conversationPrefs.isPinned(summary.conversationId),
+                muted = groupDef?.isMuted == true || client.conversationPrefs.isMuted(summary.conversationId),
             )
-        }
+        }.let { list -> com.oshi.desktop.store.ConversationPreferences.pinnedFirst(list, client.conversationPrefs.pinnedIds()) { it.id } }
         val id = selectedId
         val thread = if (id == null) null else {
             val kind = kindOf(id)
@@ -1653,7 +1936,9 @@ class ChatShellModel(
                 address = id,
                 kind = kind,
                 groupAdmin = group?.isAdmin(client.address) == true,
-                groupPictureBase64 = group?.groupPictureBase64,
+                // __PROFILE_PHOTOS_DESKTOP_2027__ a 1:1 shows the contact's own picture in the same slot.
+                groupPictureBase64 = group?.groupPictureBase64
+                    ?: if (kind == ConversationKind.DIRECT) client.photos.get(id) else null,
                 groupInviteLink = group?.let { client.groupInviteLink(id) },
                 groupDescription = group?.description,
                 groupBlocked = group != null && client.isGroupBlocked(id),
@@ -1715,9 +2000,17 @@ class ChatShellModel(
                         fromMe = m.fromMe,
                     )
                 },
+                links = client.history(id).asReversed().flatMap { m ->
+                    if (m.isDeletedForEveryone || m.hiddenLocally || m.mediaRef != null) return@flatMap emptyList()
+                    val text = com.oshi.desktop.msg.ReplyEnvelope.unwrap(m.content)?.content ?: m.content
+                    if (text == null || com.oshi.desktop.msg.ControlPrefix.isControl(text)) return@flatMap emptyList()
+                    GalleryCategories.links(text).map { url ->
+                        LinkItemRow("${m.id}#$url", url, GalleryCategories.host(url), stamp(m.sentAtMs), m.fromMe)
+                    }
+                },
                 forwardTargets = if (kind == ConversationKind.DIRECT || kind == ConversationKind.GROUP) {
                     client.contacts.all().filterNot { it.blocked || it.address == id }
-                        .map { GroupCandidateRow(it.address, it.label(short(it.address))) }
+                        .map { GroupCandidateRow(it.address, it.label(short(it.address)), client.photos.get(it.address)) }
                 } else emptyList(),
                 typingNames = if (group == null) emptyList() else synchronized(lock) {
                     val now = System.currentTimeMillis()
@@ -1725,7 +2018,9 @@ class ChatShellModel(
                         .keys.map(::senderLabel).sorted()
                 },
                 groupCanEditInfo = group != null && client.canEditGroupInfo(id),
-                groupMuted = group?.isMuted == true,
+                groupMuted = group?.isMuted == true || (group == null && client.conversationPrefs.isMuted(id)),
+                conversationPinned = client.conversationPrefs.isPinned(id),
+                contactBlocked = kind == ConversationKind.DIRECT && client.contacts.get(id)?.blocked == true,
                 groupMembers = group?.members?.map { member ->
                     GroupMemberRow(
                         address = member.publicKey,
@@ -1736,6 +2031,7 @@ class ChatShellModel(
                         isAdmin = member.isAdmin,
                         isCreator = GroupIdentity.sameIdentity(member.publicKey, group.adminPublicKey),
                         self = member.publicKey == client.address,
+                        blocked = client.contacts.isBlocked(member.publicKey),
                     )
                 }.orEmpty(),
                 groupCandidates = group?.let { definition ->
@@ -1747,6 +2043,7 @@ class ChatShellModel(
                 // for a group (many), a bot (none) or a LoRa node (unauthenticated). Drawing
                 // one anyway would offer a verification ritual that verifies nothing.
                 safetyNumber = if (kind == ConversationKind.DIRECT) client.safetyNumber(id) else "",
+                safetyQr = if (kind == ConversationKind.DIRECT) com.oshi.desktop.crypto.SafetyNumber.qrPayload(client.address, id) else "",
                 verified = kind == ConversationKind.DIRECT &&
                     client.contacts.get(id)?.verification == ContactStore.VerificationState.VERIFIED,
                 reach = if (kind == ConversationKind.DIRECT) reach else Reach.NOT_APPLICABLE,
@@ -1761,6 +2058,7 @@ class ChatShellModel(
                         com.oshi.desktop.bot.BotEnvelope.Sealing.fromTransport(it.transport)
                             ?: com.oshi.desktop.bot.BotEnvelope.Sealing.NONE
                     },
+                unreadAtOpen = unreadAtOpen,
             )
         }
         return ShellState(
@@ -1772,12 +2070,14 @@ class ChatShellModel(
             gateAnswered = client.config.everAnswered,
             deliveryReceiptsEnabled = client.deliveryReceiptsEnabled,
             readReceiptsEnabled = client.readReceiptsEnabled,
+            typingIndicatorsEnabled = client.typingIndicatorsEnabled,
             syncNotice = syncNotice,
             backupNotice = backupNotice,
             ownNickname = client.ownNickname,
             nicknameBroadcasts = client.mayBroadcastProfile,
             profileNotice = profileNotice,
             replyingTo = replyTarget?.takeIf { it.first == id }?.second?.let(::quoteRow),
+            selfPictureBase64 = client.ownPhotoBase64,
             destination = destination,
             // `all()`, not `visible()`: this list is where blocking is UNDONE, and a blocked
             // peer filtered out of the only screen carrying an unblock control would be a
@@ -1792,6 +2092,7 @@ class ChatShellModel(
                     verified = c.verification == ContactStore.VerificationState.VERIFIED,
                     blocked = c.blocked,
                     safetyNumber = client.safetyNumber(c.address),
+                    pictureBase64 = client.photos.get(c.address),
                 )
             },
             scheduled = client.scheduled.all().map { scheduled ->
@@ -1810,6 +2111,7 @@ class ChatShellModel(
             selectedId = id,
             thread = thread,
             draft = draftText,
+            sendSerial = sendSerial,
             busy = busy,
             notice = notice,
         )
@@ -1859,6 +2161,11 @@ class ChatShellModel(
         // as a claim about THEIR delivery, which this client knows nothing about.
         status = if (m.fromMe) m.deliveryStatus.wire else null,
         failed = m.fromMe && m.deliveryStatus == DeliveryStatus.FAILED,
+        coverWaiting = m.fromMe && m.deliveryStatus == DeliveryStatus.PENDING &&
+            m.transport == com.oshi.desktop.app.CoverOutbox.TRANSPORT_WAITING,
+        restrictedNetwork = !m.fromMe && m.restrictedNetwork,
+        // __LORA_AIRTIME_HINT_2026_11_18__ an OSHI Mesh radio has held it (QUEUED) for over a minute.
+        awaitingAirtime = m.fromMe && m.transport == "lora" && m.id in client.loraAwaitingAirtime(),
         edited = m.editedAtMs != null,
         deleted = m.isDeletedForEveryone,
         reactions = m.reactions.keys.sorted().joinToString(""),
@@ -1868,6 +2175,15 @@ class ChatShellModel(
         videoNote = !m.isDeletedForEveryone && m.videoNote && m.mediaType == com.oshi.desktop.store.MediaType.VIDEO,
         mediaDurationMs = m.mediaDurationMs,
         sentAtMs = m.sentAtMs,
+        senderAddress = if (m.fromMe) "" else m.senderAddress,
+        reactors = if (m.isDeletedForEveryone) emptyList() else Reactors.groups(
+            m.reactions,
+            isMe = { com.oshi.desktop.group.GroupIdentity.sameIdentity(it, client.address) },
+            label = ::senderLabel,
+            you = t("common.you"),
+        ),
+        viewOnce = m.isViewOnce,
+        viewOnceOpened = m.viewOnceOpened,
     )
     }
 
@@ -1885,7 +2201,7 @@ class ChatShellModel(
     fun setOfflineOnly(on: Boolean) {
         val conv = synchronized(lock) { selectedId } ?: return
         if (kindOf(conv) != ConversationKind.DIRECT) {
-            synchronized(lock) { notice = Notice("This is available in direct conversations.", Severity.ERROR) }
+            synchronized(lock) { notice = Notice(t("conv.n.direct_only"), Severity.ERROR) }
             publish()
             return
         }
@@ -1897,18 +2213,16 @@ class ChatShellModel(
                 busy = false
                 notice = when {
                     outcome.isFailure ->
-                        Notice("Could not change this: ${outcome.exceptionOrNull()?.message ?: "network error"}", Severity.ERROR)
+                        Notice(t("conv.n.change_failed", outcome.exceptionOrNull()?.message ?: t("conv.error.network")), Severity.ERROR)
                     outcome.getOrNull() == OshiClient.SendOutcome.SENT ->
                         Notice(if (on) t("offline_only.summary.on") else t("offline_only.summary.off"), Severity.OK)
                     on ->
                         // Not a failure. See the note above.
                         Notice(
-                            t("offline_only.summary.on") +
-                                " Your contact could not be told over the internet — that is what you just " +
-                                "switched off. They will hear when a radio or a nearby device can carry it.",
+                            t("offline_only.summary.on") + " " + t("conv.n.offline_on_untold"),
                             Severity.OK,
                         )
-                    else -> Notice(t("offline_only.summary.off") + " Your contact has not been told yet.", Severity.OK)
+                    else -> Notice(t("offline_only.summary.off") + " " + t("conv.n.offline_off_untold"), Severity.OK)
                 }
             }
             publish()
@@ -1923,31 +2237,33 @@ class ChatShellModel(
      * network error — the two send a user to completely different places, and collapsing them
      * is what makes a composer feel broken.
      */
-    fun createPoll(question: String, options: List<String>, multi: Boolean, anon: Boolean) {
+    fun createPoll(question: String, options: List<String>, multi: Boolean, anon: Boolean, closesInSeconds: Long? = null) {
         val conv = synchronized(lock) { selectedId } ?: return
-        if (kindOf(conv) != ConversationKind.DIRECT) {
-            synchronized(lock) { notice = Notice("Polls can be sent in direct conversations.", Severity.ERROR) }
-            publish()
-            return
-        }
+        val kind = kindOf(conv)
+        if (kind != ConversationKind.DIRECT && kind != ConversationKind.GROUP) return
+        val closesAt = closesInSeconds?.let { System.currentTimeMillis() / 1000.0 + it }
         synchronized(lock) { busy = true; notice = null }
         publish()
         worker.execute {
+            // __GROUP_POLLS_2027__ a group poll is a group message; a 1:1 poll a direct one.
             val outcome = runCatching {
-                client.sendPoll(conv, question, options, allowsMultipleAnswers = multi, isAnonymous = anon)
+                if (kind == ConversationKind.GROUP) {
+                    client.sendGroupPoll(conv, question, options, allowsMultipleAnswers = multi, isAnonymous = anon, closesAtUnix = closesAt)
+                        ?.let { if (it.delivered) OshiClient.SendOutcome.SENT else OshiClient.SendOutcome.NO_V2_PATH }
+                } else {
+                    client.sendPoll(conv, question, options, allowsMultipleAnswers = multi, isAnonymous = anon, closesAtUnix = closesAt)
+                }
             }
             synchronized(lock) {
                 busy = false
                 notice = when {
                     outcome.isFailure ->
-                        Notice("Could not send the poll: ${outcome.exceptionOrNull()?.message ?: "network error"}", Severity.ERROR)
+                        Notice(t("conv.poll.failed", outcome.exceptionOrNull()?.message ?: t("conv.error.network")), Severity.ERROR)
                     // null is sanitize refusing, NOT a transport failure.
-                    outcome.getOrNull() == null ->
-                        Notice("A poll needs a question and between 2 and 12 options.", Severity.ERROR)
-                    outcome.getOrNull() == OshiClient.SendOutcome.BLOCKED ->
-                        Notice("That contact is blocked; the poll was not sent.", Severity.ERROR)
-                    outcome.getOrNull() == OshiClient.SendOutcome.SENT -> Notice("Poll sent.", Severity.OK)
-                    else -> Notice("Poll created here; it has not been delivered yet.", Severity.OK)
+                    outcome.getOrNull() == null -> Notice(t("conv.poll.invalid"), Severity.ERROR)
+                    outcome.getOrNull() == OshiClient.SendOutcome.BLOCKED -> Notice(t("conv.poll.blocked"), Severity.ERROR)
+                    outcome.getOrNull() == OshiClient.SendOutcome.SENT -> Notice(t("conv.poll.sent"), Severity.OK)
+                    else -> Notice(t("conv.poll.pending"), Severity.OK)
                 }
             }
             publish()
@@ -1993,15 +2309,12 @@ class ChatShellModel(
      */
     fun votePoll(messageId: String, optionIndex: Int) {
         val conv = synchronized(lock) { selectedId } ?: return
-        if (kindOf(conv) != ConversationKind.DIRECT) {
-            synchronized(lock) { notice = Notice("Voting is available in direct conversations.", Severity.ERROR) }
-            publish()
-            return
-        }
+        val kind = kindOf(conv)
+        if (kind != ConversationKind.DIRECT && kind != ConversationKind.GROUP) return
         val row = client.history(conv).firstOrNull { it.id == messageId } ?: return
         val poll = com.oshi.desktop.msg.PollPayload.decodePoll(row.content) ?: return
         if (poll.isClosed(System.currentTimeMillis() / 1000.0)) {
-            synchronized(lock) { notice = Notice("That poll is closed.", Severity.ERROR) }
+            synchronized(lock) { notice = Notice(t("conv.poll.closed_notice"), Severity.ERROR) }
             publish()
             return
         }
@@ -2013,20 +2326,37 @@ class ChatShellModel(
             else -> current + optionIndex
         }
         worker.execute {
-            val outcome = runCatching { client.votePoll(conv, poll.id, next.toList().sorted()) }
+            val outcome = runCatching {
+                if (kind == ConversationKind.GROUP) {
+                    // __GROUP_POLLS_2027__ fanned out as an ephemeral ballot; recorded first.
+                    client.voteGroupPoll(conv, poll.id, next.toList().sorted())
+                        ?.let { if (it.delivered) OshiClient.SendOutcome.SENT else OshiClient.SendOutcome.NO_V2_PATH }
+                        ?: OshiClient.SendOutcome.NO_V2_PATH
+                } else client.votePoll(conv, poll.id, next.toList().sorted())
+            }
             synchronized(lock) {
                 notice = when {
                     outcome.isFailure ->
-                        Notice("Could not send your vote: ${outcome.exceptionOrNull()?.message ?: "network error"}", Severity.ERROR)
-                    outcome.getOrNull() == OshiClient.SendOutcome.BLOCKED ->
-                        Notice("That contact is blocked; your vote was not sent.", Severity.ERROR)
+                        Notice(t("conv.vote.failed", outcome.exceptionOrNull()?.message ?: t("conv.error.network")), Severity.ERROR)
+                    outcome.getOrNull() == OshiClient.SendOutcome.BLOCKED -> Notice(t("conv.vote.blocked"), Severity.ERROR)
                     outcome.getOrNull() == OshiClient.SendOutcome.SENT -> null
                     // Counted here, not yet delivered — said plainly, as the pin does.
-                    else -> Notice("Your vote is recorded here; your contact has not been told yet.", Severity.OK)
+                    else -> Notice(t("conv.vote.pending"), Severity.OK)
                 }
             }
             publish()
         }
+    }
+
+    /** The export's text for one row: the same decoding as the list preview, untruncated. */
+    private fun previewOfFull(m: Message): String = when {
+        com.oshi.desktop.msg.ReplyEnvelope.isWrapped(m.content) ->
+            com.oshi.desktop.msg.ReplyEnvelope.unwrap(m.content)?.content ?: m.content.orEmpty()
+        com.oshi.desktop.msg.CallSummary.isCallSummary(m.content) -> com.oshi.desktop.msg.CallSummary.render(m.content!!) { t(it) }
+        com.oshi.desktop.msg.PollPayload.isPoll(m.content) -> com.oshi.desktop.msg.PollPayload.decodePoll(m.content)?.let { p ->
+            "\uD83D\uDCCA " + p.question + p.options.joinToString("") { "\n  - $it" }
+        } ?: ""
+        else -> com.oshi.desktop.msg.InlineMarkup.stripped(m.content.orEmpty())
     }
 
     private fun previewOf(m: Message?): String = when {
@@ -2038,6 +2368,9 @@ class ChatShellModel(
         com.oshi.desktop.msg.CallSummary.isCallSummary(m.content) -> com.oshi.desktop.msg.CallSummary.render(m.content!!) { t(it) }
         // __VIDEO_NOTE_2026_09_24__ spec §4: the list says "Video message", not a filename.
         m.videoNote && m.mediaType == com.oshi.desktop.store.MediaType.VIDEO -> t("videonote.title")
+        // __GROUP_GIF_2026_11_16__ a GIF / sticker / mascot says "GIF", as the phones' lists do,
+        // not "[image] 64f7cfd7-oshi-love.gif".
+        m.mediaRef != null && m.mediaRef.endsWith(".gif", ignoreCase = true) && m.content.orEmpty().endsWith(".gif", ignoreCase = true) -> "GIF"
         m.mediaRef != null -> "[${m.mediaType?.wire ?: "file"}] " + m.content.orEmpty()
         // __DESKTOP_POLLS_2026_10_29__ The conversation list shows the QUESTION, never the
         // payload — the same rule the video note follows two lines up.
@@ -2052,8 +2385,8 @@ class ChatShellModel(
 
     private fun labelFor(id: String, kind: ConversationKind): String = when (kind) {
         ConversationKind.GROUP -> client.groups.get(id)?.name ?: short(id)
-        ConversationKind.BOT -> "bot: " + id.removePrefix(BOT_PREFIX)
-        ConversationKind.LORA -> "radio: " + id.removePrefix(LoRaNodeBindings.FALLBACK_PREFIX)
+        ConversationKind.BOT -> t("conv.label.bot", id.removePrefix(BOT_PREFIX))
+        ConversationKind.LORA -> t("conv.label.radio", id.removePrefix(LoRaNodeBindings.FALLBACK_PREFIX))
         ConversationKind.DIRECT -> client.contacts.get(id)?.label(short(id)) ?: short(id)
     }
 
@@ -2074,10 +2407,13 @@ class ChatShellModel(
      * ends up with a paperclip that uploads a blob no member can fetch.
      */
     private fun composerFor(id: String?): ComposerState = when {
-        id == null -> ComposerState(false, "No conversation is open.", false, null)
-        busy -> ComposerState(false, "Working…", false, null)
+        id == null -> ComposerState(false, t("conv.composer.no_conversation"), false, null)
+        busy -> ComposerState(false, t("conv.composer.working"), false, null)
         else -> when (kindOf(id)) {
-            ConversationKind.DIRECT -> ComposerState(true, null, true, null)
+            // __CONVERSATION_BLOCK_2027__ a blocked peer: nothing is sent, the banner says why.
+            ConversationKind.DIRECT -> if (client.contacts.get(id)?.blocked == true)
+                ComposerState(false, t("chat.contact_blocked_message"), false, t("chat.contact_blocked_message"))
+            else ComposerState(true, null, true, null)
             // PARITY.md row 0.17 is partial and the partial part is RECEIVE (three sub-rows
             // blocked: an Android peer's group envelope, membership changes, and the legacy
             // lane). The SEND half is the fan-out this calls, and it is the same code path
@@ -2090,17 +2426,15 @@ class ChatShellModel(
             } else ComposerState(true, null, true, null)
             ConversationKind.BOT -> ComposerState(
                 false,
-                OshiClient.BOT_CHANNEL_IS_PLAINTEXT + " — so this window will not put it behind the " +
-                    "same text box as an end-to-end encrypted conversation. `/bot send` in the REPL " +
-                    "prints that warning on every send.",
+                // OshiClient.BOT_CHANNEL_IS_PLAINTEXT is the console's sentence; this is the same
+                // warning in the reader's language (ChatShellModelTest pins that it says so).
+                t("conv.composer.bot"),
                 false,
                 null,
             )
             ConversationKind.LORA -> ComposerState(
                 false,
-                "Stock Meshtastic text, quarantined and flagged unverified (PARITY.md row 0.27). " +
-                    "Nothing ratcheted it and no peer authenticated it, so there is no verified " +
-                    "identity here to reply to.",
+                t("conv.composer.lora"),
                 false,
                 null,
             )
@@ -2129,30 +2463,27 @@ class ChatShellModel(
      */
     private fun groupSendResult(r: OshiClient.GroupSendReport): SendResult = when {
         r.refusedControlPayload -> SendResult(
-            "REFUSED — that text is itself an OSHI control payload. Nothing was sent and nothing " +
-                "was stored; your text is still in the box.",
+            t("conv.send.refused_short"),
             Severity.ERROR,
             keepDraft = true,
         )
         r.recipients == 0 -> SendResult(
-            "NOT SENT — this group has nobody in it but you.",
+            t("conv.send.group_empty"),
             Severity.ERROR,
             keepDraft = false,
         )
         r.sent == 0 -> SendResult(
-            "NOT DELIVERED — 0 of ${r.recipients} members took it. None of them has a V2 path." +
-                blockedTail(r),
+            t("conv.send.group_none", r.recipients) + blockedTail(r),
             Severity.ERROR,
             keepDraft = false,
         )
         r.sent < r.recipients -> SendResult(
-            "PARTIAL — ${r.sent} of ${r.recipients} members took it. The rest have published no " +
-                "prekey bundle, so V2 cannot reach them." + blockedTail(r),
+            t("conv.send.group_partial", r.sent, r.recipients) + blockedTail(r),
             Severity.ERROR,
             keepDraft = false,
         )
         else -> SendResult(
-            "Sent to all ${r.recipients} members." + blockedTail(r),
+            t("conv.send.group_all", r.recipients) + blockedTail(r),
             Severity.OK,
             keepDraft = false,
         )
@@ -2167,7 +2498,7 @@ class ChatShellModel(
      */
     private fun blockedTail(r: OshiClient.GroupSendReport): String =
         (if (r.skippedBlocked.isEmpty()) ""
-        else " ${r.skippedBlocked.size} blocked member(s) were skipped, which is not a failure.") +
+        else " " + t("conv.send.blocked_skipped", r.skippedBlocked.size)) +
             mustUpdateTail(r)
 
     /**
@@ -2184,7 +2515,7 @@ class ChatShellModel(
         // so the two surfaces cannot end up disagreeing about what "sent" is called.
         OshiClient.SendOutcome.SENT -> t("messages.sent_successfully")
         OshiClient.SendOutcome.BLOCKED ->
-            "NOT SENT — that contact is blocked. The message was not written to the log either."
+            t("conv.send.blocked")
         // __DESKTOP_SAY_WHICH_FAILURE_2026_10_29__ BLAME THE RIGHT PARTY.
         //
         // Both of these outcomes are ALSO what a client returns when the relay simply did not
@@ -2195,38 +2526,34 @@ class ChatShellModel(
         // apart, and it is checked FIRST.
         OshiClient.SendOutcome.NO_V2_PATH ->
             if (client.config.serverUnreachable)
-                "NOT DELIVERED — the OSHI server is not answering right now, so your contact's " +
-                    "keys could not be fetched. This is not about them. The message is in your " +
-                    "log, marked failed; try again when the connection recovers."
+                t("conv.send.server_down_keys")
             else
-                "NOT DELIVERED — that peer has published no prekey bundle, so V2 cannot reach them. " +
-                    "The message is in your log, marked failed."
+                t("conv.send.no_keys")
         OshiClient.SendOutcome.GATE_CLOSED ->
             if (client.config.serverUnreachable)
-                "NOT SENT — the OSHI server is not answering right now. This is a connection " +
-                    "problem, not a setting on your account. The message is in your log, marked failed."
+                t("conv.send.server_down")
             else if (!client.config.everAnswered)
-                "NOT SENT — this client has not had an answer from the server yet, so V2 is still " +
-                    "closed by default. That is not a decision about your account; try again in a " +
-                    "moment. The message is in your log, marked failed."
+                t("conv.send.no_answer_yet")
             else
-                "NOT SENT — the V2 rollout gate is closed for this account. " +
-                    "The message is in your log, marked failed."
+                t("conv.send.gate_closed")
         OshiClient.SendOutcome.REFUSED_CONTROL_PAYLOAD ->
-            "REFUSED — that text is itself an OSHI control payload (a receipt, typing, reaction " +
-                "or edit sentinel). Sending it would hand a peer a message-editing primitive. " +
-                "Nothing was sent and nothing was stored; your text is still in the box."
+            t("conv.send.refused_control")
+        // __PRIVACY_DISGUISE_2026_11_18__ the phones' bubble wording; the notice adds the why.
+        OshiClient.SendOutcome.WAITING_FOR_COVER -> t("desktop.cover.waiting.notice")
     }
 
-    private fun severityOf(o: OshiClient.SendOutcome): Severity =
-        if (o == OshiClient.SendOutcome.SENT) Severity.OK else Severity.ERROR
+    private fun severityOf(o: OshiClient.SendOutcome): Severity = when (o) {
+        OshiClient.SendOutcome.SENT -> Severity.OK
+        OshiClient.SendOutcome.WAITING_FOR_COVER -> Severity.INFO
+        else -> Severity.ERROR
+    }
 
     private fun reachLabel(r: Reach): String = when (r) {
-        Reach.UNKNOWN -> "reachability not checked"
-        Reach.CHECKING -> "checking reachability…"
-        Reach.REACHABLE -> "V2 path available"
-        Reach.NO_BUNDLE -> "no published prekey bundle — V2 cannot reach them"
-        Reach.ERROR -> "reachability check failed"
+        Reach.UNKNOWN -> t("conv.reach.unknown")
+        Reach.CHECKING -> t("conv.reach.checking")
+        Reach.REACHABLE -> t("conv.reach.reachable")
+        Reach.NO_BUNDLE -> t("conv.reach.no_keys")
+        Reach.ERROR -> t("conv.reach.error")
         Reach.NOT_APPLICABLE -> ""
     }
 
@@ -2258,7 +2585,7 @@ class ChatShellModel(
 enum class Destination { MESSAGES, AI, NEW, PLACES, MORE }
 
 /** DEVICES: __DEVSYNC_DIRECT_2026_09_22__ More → Linked devices (direct own-device sync). */
-enum class Pane { CONVERSATION, ACCOUNT, LIMITS, COVERT, MAIL, SCHEDULED, DEVICES, LORA, PEERS, DELETE_ACCOUNT }
+enum class Pane { CONVERSATION, ACCOUNT, LIMITS, COVERT, MAIL, SCHEDULED, DEVICES, LORA, PEERS, DELETE_ACCOUNT, DISGUISE, DISCOVER_GROUPS }
 
 enum class ConversationKind { DIRECT, GROUP, BOT, LORA }
 
@@ -2288,6 +2615,12 @@ data class ConversationRow(
     val mentionedYou: Boolean = false,
     /** __GROUP_PARITY_2026_09_23__ a group's picture, drawn instead of the monogram. */
     val pictureBase64: String? = null,
+    /** __MERGED_CHATS_2026_11_18__ a group's type, for the Admin / Collaborative / Public sub-filter. */
+    val groupType: com.oshi.desktop.group.GroupType? = null,
+    /** __CONVERSATION_PIN_MUTE_2027__ pinned to the top of the list (this machine only). */
+    val pinned: Boolean = false,
+    /** Notifications off: a muted group, or a muted 1:1 (this machine only). */
+    val muted: Boolean = false,
 )
 
 /**
@@ -2375,6 +2708,19 @@ data class MessageRow(
      * exact key `⭕😊` may be drawn as the OSHI mark.
      */
     val reactionKeys: List<String> = emptyList(),
+    /** __PRIVACY_DISGUISE_2026_11_18__ PENDING because it waits for the disguised connection. */
+    val coverWaiting: Boolean = false,
+    /** __RESTRICTED_NETWORK_HINT_2026_11_18__ inbound, sent through a restricted network (RN-HINT v1). */
+    val restrictedNetwork: Boolean = false,
+    /** __LORA_AIRTIME_HINT_2026_11_18__ "Waiting for radio airtime (legal duty-cycle limit)". */
+    val awaitingAirtime: Boolean = false,
+    /** __REPLY_PRIVATELY_DESKTOP_2027__ who sent it (identity key); blank for our own rows. */
+    val senderAddress: String = "",
+    /** __WHO_REACTED_DESKTOP_2027__ each reaction with the people who chose it. */
+    val reactors: List<ReactorGroup> = emptyList(),
+    /** __VIEW_ONCE_DESKTOP_2027__ a view-once attachment, and whether we (the recipient) opened it. */
+    val viewOnce: Boolean = false,
+    val viewOnceOpened: Boolean = false,
 )
 
 /** A reply's quote block, and the composer's "replying to" banner. */
@@ -2391,8 +2737,15 @@ data class ThreadView(
     val groupPictureBase64: String? = null,
     /** iOS `canChangeGroupPicture`: admins, or any member of a non-admin-only group. */
     val groupCanEditInfo: Boolean = false,
-    /** Notifications off for this group on this device (local only). */
+    /**
+     * Notifications off for this conversation on this device (local only). Named for the
+     * group switch it started as; __CONVERSATION_PIN_MUTE_2027__ a 1:1 mute sets it too.
+     */
     val groupMuted: Boolean = false,
+    /** __CONVERSATION_PIN_MUTE_2027__ this conversation is pinned to the top of the list. */
+    val conversationPinned: Boolean = false,
+    /** A 1:1 whose peer this account blocked: composer closed behind a banner. */
+    val contactBlocked: Boolean = false,
     /** iOS-format invite link, shown with its QR code. */
     val groupInviteLink: String? = null,
     val groupDescription: String? = null,
@@ -2431,12 +2784,16 @@ data class ThreadView(
      * first — iOS's `MediaGalleryView`, Android's "Media Gallery" menu item.
      */
     val media: List<MediaItemRow> = emptyList(),
+    /** __GALLERY_BY_TYPE_DESKTOP_2027__ links found in the conversation's messages, newest first. */
+    val links: List<LinkItemRow> = emptyList(),
     /** Empty for direct, bot and radio threads; roster data comes only from a stored definition. */
     val groupMembers: List<GroupMemberRow>,
     /** Known unblocked contacts not in this group; candidates are never inferred from messages. */
     val groupCandidates: List<GroupCandidateRow>,
     /** PARITY.md row 0.20. Blank for anything the ratchet did not vouch for. */
     val safetyNumber: String,
+    /** __CONVERSATION_VERIFY_2027__ the QR a phone scans to verify this pair (`SafetyNumber.qrPayload`). */
+    val safetyQr: String = "",
     val verified: Boolean,
     val reach: Reach,
     val reachLabel: String,
@@ -2446,6 +2803,12 @@ data class ThreadView(
     val composer: ComposerState,
     /** __BOT_E2E_2026_09_23__ Bot threads only: how the latest post was protected; null elsewhere. */
     val botSealing: com.oshi.desktop.bot.BotEnvelope.Sealing? = null,
+    /**
+     * __UNREAD_DIVIDER_2027__ How many messages were unread when this conversation was
+     * opened — the phones' "Unread messages" divider (`chat_unread_divider`) sits above them.
+     * Fixed for the visit: reading does not move it, reopening the conversation clears it.
+     */
+    val unreadAtOpen: Int = 0,
 )
 
 private const val TYPING_VISIBLE_MS = 5_000L
@@ -2458,9 +2821,16 @@ data class GroupMemberRow(
     /** Creator role is permanent, as it anchors the roster's administrator set. */
     val isCreator: Boolean,
     val self: Boolean,
+    /** __GROUP_MEMBER_MODERATION_2027__ this member is blocked (their group messages are dropped). */
+    val blocked: Boolean = false,
 )
 
-data class GroupCandidateRow(val address: String, val label: String)
+data class GroupCandidateRow(
+    val address: String,
+    val label: String,
+    /** __PROFILE_PHOTOS_DESKTOP_2027__ the contact's own picture, when they shared one. */
+    val pictureBase64: String? = null,
+)
 
 /** One person this account knows about, as the contacts and blocked lists draw them. */
 data class ContactRow(
@@ -2474,6 +2844,8 @@ data class ContactRow(
     val alias: String? = null,
     /** What they call themselves (their profile update). Shown under the name when an alias hides it. */
     val sharedNickname: String? = null,
+    /** __PROFILE_PHOTOS_DESKTOP_2027__ the picture from their profile update. */
+    val pictureBase64: String? = null,
 )
 
 /** Persisted local delivery intent; due time is the local clock, never a relay promise. */
@@ -2532,6 +2904,13 @@ data class ShellState(
     val selectedId: String?,
     val thread: ThreadView?,
     val draft: String,
+    /**
+     * __DRAFT_CLEAR_RACE_2026_11_18__ Increments each time a text send settles. The window
+     * used to clear the box on the busy true → false EDGE alone; against a fast relay (a local
+     * one under test: send + publish in a few ms) both states can land between two frames, the
+     * edge is never observed, and the sent text stays in the composer. Seen on the Xvfb run.
+     */
+    val sendSerial: Int = 0,
     val busy: Boolean,
     val notice: Notice?,
     /** Outcome of the last `.oshiexport` export/import, shown in the More pane. */
@@ -2544,6 +2923,10 @@ data class ShellState(
     val nicknameBroadcasts: Boolean = true,
     /** __GROUP_PARITY_2026_09_23__ the message the draft replies to (open conversation only). */
     val replyingTo: QuoteRow? = null,
+    /** __TYPING_PRIVACY_2027__ */
+    val typingIndicatorsEnabled: Boolean = true,
+    /** __PROFILE_PHOTOS_DESKTOP_2027__ this account's own picture (base64 JPEG), null = monogram. */
+    val selfPictureBase64: String? = null,
 ) {
     companion object {
         fun empty(address: String, name: String) = ShellState(

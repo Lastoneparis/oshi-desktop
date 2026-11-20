@@ -617,6 +617,31 @@ class MeshNode(
         )
 
     /**
+     * __DESKTOP_GROUP_DISCOVERY_2027__ One frame to every DIRECTLY connected peer, recipient
+     * empty — Android `CrossPlatformMesh.broadcastToAllPeers` (maxHops 5, originator in
+     * seenBy). Only for content that is public by nature (a public group's announcement);
+     * a message for one person never goes through here — see [sendOrRelay].
+     * @return how many sockets took it.
+     */
+    fun broadcast(payload: String, type: String): Int {
+        val msg = MeshMessage(
+            id = UUID.randomUUID().toString(),
+            type = type,
+            senderPublicKey = myPublicKey,
+            senderName = myDisplayName,
+            recipientPublicKey = "",
+            payload = payload,
+            timestamp = System.currentTimeMillis().toDouble(),
+            hopCount = 0,
+            maxHops = BROADCAST_MAX_HOPS,
+            seenBy = listOf(myPublicKey),
+            platform = MeshProtocol.PLATFORM,
+        )
+        markSeen(msg.id)
+        return connections.values.distinct().count { send(it, msg) }
+    }
+
+    /**
      * Direct link, else a learned route, else FAIL. There is no broadcast fallback, and
      * that is a privacy property rather than an optimisation: `senderPublicKey` and
      * `recipientPublicKey` ride in PLAINTEXT on this envelope (only `payload` is
@@ -788,6 +813,8 @@ class MeshNode(
     }
 
     companion object {
+        /** Android's `broadcastToAllPeers` hop limit. */
+        const val BROADCAST_MAX_HOPS = 5
         const val CONNECT_TIMEOUT_MS = 10_000
 
         /** Route staleness cutoff and sweep period — both shipped clients use 5 min / 60 s. */

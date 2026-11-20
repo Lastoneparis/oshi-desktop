@@ -54,6 +54,9 @@ object LocalDataKeys {
      */
     const val RATCHET_SESSIONS = "ratchet-sessions-v1"
 
+    /** __PROFILE_PHOTOS_DESKTOP_2027__ contacts' and our own profile pictures ([ContactPhotoStore]). */
+    const val CONTACT_PHOTOS = "contact-photos-v1"
+
     private val SALT = "oshi-desktop-local-data-at-rest-v1".toByteArray(Charsets.UTF_8)
 
     /** Read-or-create the root in one vault operation, so two callers cannot mint two roots. */

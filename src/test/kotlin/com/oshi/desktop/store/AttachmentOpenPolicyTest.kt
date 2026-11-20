@@ -12,6 +12,20 @@ import org.junit.Test
  */
 class AttachmentOpenPolicyTest {
 
+    // __ATTACHMENT_REFUSAL_I18N_2026_11_20__ the sentences come from the catalogs now; pin English.
+    private var savedTag = ""
+    @org.junit.Before fun pinEnglish() { savedTag = com.oshi.desktop.i18n.Strings.activeTag; com.oshi.desktop.i18n.Strings.activeTag = "en" }
+    @org.junit.After fun restoreTag() { com.oshi.desktop.i18n.Strings.activeTag = savedTag }
+
+    @Test
+    fun `the refusal is in the user's language`() {
+        com.oshi.desktop.i18n.Strings.activeTag = "fr"
+        val d = AttachmentOpenPolicy.decide("facture.pdf.exe", "document")
+        assertTrue(d.reason!!, d.reason.contains("facture.pdf.exe") && d.reason.contains("Enregistrez une copie"))
+        val m = AttachmentOpenPolicy.decide("statement.pdf", "image")
+        assertTrue(m.reason!!, m.reason.contains("une image") && m.reason.contains("un document"))
+    }
+
     @Test
     fun `a photo that is really an executable is refused`() {
         // THE ATTACK: `kind` says image, so the bubble draws a photo row; the
@@ -57,7 +71,7 @@ class AttachmentOpenPolicyTest {
     fun `a kind that contradicts the extension is refused as unknowable`() {
         val d = AttachmentOpenPolicy.decide("statement.pdf", "image")
         assertEquals(AttachmentOpenPolicy.Verdict.REFUSE_MISMATCH, d.verdict)
-        assertTrue(d.reason!!.contains("shown as image"))
+        assertTrue(d.reason!!.contains("shown as an image"))
         assertTrue(d.reason.contains("document"))
     }
 
@@ -88,5 +102,23 @@ class AttachmentOpenPolicyTest {
     fun `a file with no extension is left to the system to ask about`() {
         val d = AttachmentOpenPolicy.decide("document", "document")
         assertTrue(d.allowed)
+    }
+
+    // __WINDOWS_OPEN_POLICY_GAPS_2026_11_19__
+    @org.junit.Test
+    fun `a trailing dot or space cannot hide an executable from the Windows shell`() {
+        for (n in listOf("invoice.exe.", "invoice.exe ", "invoice.exe. .", "x.bat...")) {
+            org.junit.Assert.assertEquals(n, AttachmentOpenPolicy.Verdict.REFUSE_EXECUTABLE,
+                AttachmentOpenPolicy.decide(n, "document").verdict)
+        }
+    }
+
+    @org.junit.Test
+    fun `windows-only launchers and mountable images are refused`() {
+        for (n in listOf("a.settingcontent-ms", "a.iso", "a.vhdx", "a.appinstaller", "a.docm", "a.html", "a.svg", "a.wsc")) {
+            org.junit.Assert.assertEquals(n, AttachmentOpenPolicy.Verdict.REFUSE_EXECUTABLE,
+                AttachmentOpenPolicy.decide(n, null).verdict)
+        }
+        org.junit.Assert.assertTrue(AttachmentOpenPolicy.decide("facture.pdf", "document").allowed)
     }
 }

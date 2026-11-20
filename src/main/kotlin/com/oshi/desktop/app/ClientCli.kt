@@ -57,7 +57,7 @@ fun runClientCli(args: Array<String>) {
             println("warning: cannot lock ${home.absolutePath} (${lock.reason}); a second copy could corrupt it.")
     }
 
-    val store = SecretStore.detect()
+    val store = SecretStore.detectFor(File(home, com.oshi.desktop.store.KeyVault.FILE_NAME))
     val client = try {
         OshiClient(
             home = home,
@@ -733,9 +733,9 @@ object ClientCommands {
                 input.startsWith("/export ") -> {
                     val r = MessageBackup(client)
                         .export(java.io.File(input.removePrefix("/export ").trim()))
-                    out("   " + com.oshi.desktop.i18n.dt("desktop.export.done", r.messages, r.file.path))
+                    out("   " + t("desktop.export.done", r.messages, r.file.path))
                     if (r.unreadableConversations > 0) {
-                        out("   " + com.oshi.desktop.i18n.dt("desktop.export.done.partial", r.unreadableConversations))
+                        out("   " + t("desktop.export.done.partial", r.unreadableConversations))
                     }
                 }
                 input.startsWith("/import ") -> try {
@@ -1449,6 +1449,8 @@ private fun sync(client: OshiClient, rest: String, out: (String) -> Unit) {
         }
         OshiClient.SendOutcome.REFUSED_CONTROL_PAYLOAD ->
             "REFUSED — that is a control payload or a message this account did not send"
+        OshiClient.SendOutcome.WAITING_FOR_COVER ->
+            "WAITING — the disguised connection did not get through; retried disguised only, never sent undisguised"
     }
 
     /** `+15m`, `+2h`, `+1d`, or raw epoch millis. Null when it is none of those. */

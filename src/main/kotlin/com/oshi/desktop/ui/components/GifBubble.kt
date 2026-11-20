@@ -70,7 +70,8 @@ internal fun GifInlineImage(media: MediaPresentation, inkSoft: Color) {
                 Box(Modifier.width(Metrics.mediaBubble).height(Metrics.mediaBubble * 0.6f).clip(OshiTheme.radiusMd).background(OshiTheme.surface))
             },
         )
-        Text(media.fileName, fontSize = 10.sp, color = inkSoft, fontFamily = FontFamily.Monospace)
+        // A GIF is shown bare, as on the phones; its name stays in the accessibility label
+        // and in the viewer it opens.
         media.note?.let { Text(it, fontSize = 10.sp, color = inkSoft) }
     }
 }

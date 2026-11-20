@@ -35,6 +35,8 @@ class V2ConfigGate(
     private val log: (String) -> Unit = {},
     /** __OHTTP_DESKTOP_2026_11_10__ Same rule as [V2Http]: when non-null, `/v2/config` goes via the relay. */
     private val ohttp: () -> DesktopOhttpTransport? = DesktopOhttp::transport,
+    /** __PRIVACY_DISGUISE_2026_11_18__ see [V2Http]'s `cover`: after OHTTP, fail-closed. */
+    private val cover: () -> Boolean = DesktopCover::isEnabled,
 ) {
     @Volatile private var cachedEnabled = false
     @Volatile private var cachedAt = 0L
@@ -86,7 +88,7 @@ class V2ConfigGate(
         private set
     @Volatile private var localOverride = System.getenv("OSHI_V2_FORCE")?.equals("1") == true
 
-    private val http: HttpClient = HttpClient.newBuilder()
+    private val http: HttpClient = NetClients.builder()
         .connectTimeout(Duration.ofSeconds(8))
         // A rollout answer must come from the configured relay, not a redirect target.
         // Keep this explicit beside the signed clients' identical policy.
@@ -187,7 +189,14 @@ class V2ConfigGate(
                 val inner = DesktopOhttp.exchange(http, t, "GET", req.uri(), emptyMap(), null, Duration.ofSeconds(30))
                 inner.status to String(inner.body, Charsets.UTF_8)
             }
-            ?: http.send(req, HttpResponse.BodyHandlers.ofString()).let { it.statusCode() to (it.body() ?: "") }
+            // __PRIVACY_DISGUISE_2026_11_18__ the rollout question rides the cover too (Android:
+            // "every /v2/* call goes through the interceptor"); a failure throws into the catch.
+            ?: if (cover() && DesktopCover.isEligible(req.uri())) {
+                DesktopCover.exchange(http, "GET", req.uri(), emptyMap(), null, Duration.ofSeconds(30))
+                    .let { it.status to String(it.body, Charsets.UTF_8) }
+            } else {
+                http.send(req, HttpResponse.BodyHandlers.ofString()).let { it.statusCode() to (it.body() ?: "") }
+            }
         if (status !in 200..299) {
             Answer(decide(false, "HTTP $status from $url"), reachedServer = true)
         } else {

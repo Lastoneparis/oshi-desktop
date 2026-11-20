@@ -40,7 +40,6 @@ import androidx.compose.ui.unit.sp
 import com.oshi.desktop.gif.AnimatedGifImage
 import com.oshi.desktop.gif.GiphyClient
 import com.oshi.desktop.gif.LocalGifLibrary
-import com.oshi.desktop.i18n.dt
 import com.oshi.desktop.i18n.t
 import com.oshi.desktop.ui.OshiTheme
 import kotlinx.coroutines.Dispatchers
@@ -82,6 +81,13 @@ fun GifPicker(
 
     val showsGiphy = category == null && giphy.isConfigured
     val local = remember(kind, category, query) { library.search(query, kind, category) }
+    // __O_BUBBLE_MASCOT_2026_11_16__ The 20 O-bubble mascots, FIRST, on the GIFs tab with no
+    // category picked (or the pack's own "OSHI" category). Bundled, so they work offline;
+    // sent as their GIF through [onPick] — the same path as every pack GIF — so any
+    // recipient on any version gets a normal GIF.
+    val mascots = remember(kind, category, query) {
+        if (kind == LocalGifLibrary.Kind.GIF && (category == null || category == "OSHI")) mascotSearch(query) else emptyList()
+    }
     val cellPx = with(LocalDensity.current) { CELL.roundToPx() }
 
     fun loadRemote(reset: Boolean) {
@@ -122,7 +128,7 @@ fun GifPicker(
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm)) {
             Text(t("gif.picker.title"), fontWeight = FontWeight.SemiBold, color = Ink.strong, fontSize = 14.sp)
             Box(Modifier.weight(1f))
-            Segment(dt("desktop.gif.tab.gifs"), kind == LocalGifLibrary.Kind.GIF) { kind = LocalGifLibrary.Kind.GIF; category = null }
+            Segment(t("conv.gif.tab"), kind == LocalGifLibrary.Kind.GIF) { kind = LocalGifLibrary.Kind.GIF; category = null }
             Segment(t("gif.tab.stickers"), kind == LocalGifLibrary.Kind.STICKER) { kind = LocalGifLibrary.Kind.STICKER; category = null }
             Box(Modifier.weight(1f))
             Text(t("accessibility.close_button"), color = OshiTheme.brand, fontSize = 13.sp, modifier = Modifier.clickable(onClick = onClose))
@@ -152,6 +158,18 @@ fun GifPicker(
                 verticalArrangement = Arrangement.spacedBy(OshiTheme.sm),
                 modifier = Modifier.fillMaxSize(),
             ) {
+                if (mascots.isNotEmpty()) {
+                    item(span = { GridItemSpan(maxLineSpan) }, key = HEADER_OSHI) { SectionLabel(t("conv.gif.section.oshi")) }
+                    items(mascots, key = { "m:${it.name}" }) { m ->
+                        Cell(enabled = !sending, onClick = {
+                            val bytes = MascotImages.gifBytes(m)
+                            if (bytes != null) onPick(bytes, m.gifFileName)
+                        }) { MascotGifCellContent(m, CELL - 16.dp) }
+                    }
+                    if (local.isNotEmpty() || remote.isNotEmpty()) {
+                        item(span = { GridItemSpan(maxLineSpan) }, key = HEADER_MORE) { SectionLabel(t("conv.gif.section.more")) }
+                    }
+                }
                 if (showsGiphy) {
                     items(remote, key = { "g:${it.id}" }) { item ->
                         Cell(enabled = !sending, onClick = {
@@ -188,7 +206,7 @@ fun GifPicker(
                 if (local.isEmpty() && remote.isEmpty() && !remoteLoading) {
                     item(span = { GridItemSpan(maxLineSpan) }) {
                         Text(
-                            if (library.isAvailable) t("gif.picker.no_results") else dt("desktop.gif.pack_missing"),
+                            if (library.isAvailable) t("gif.picker.no_results") else t("conv.gif.pack_missing"),
                             color = Ink.soft, fontSize = 13.sp, modifier = Modifier.padding(OshiTheme.lg),
                         )
                     }
@@ -196,7 +214,7 @@ fun GifPicker(
                 if (showsGiphy && remote.isNotEmpty()) {
                     item(span = { GridItemSpan(maxLineSpan) }) {
                         // Required by GIPHY's licence while its results are on screen.
-                        Text("Powered by GIPHY", color = Ink.soft, fontSize = 11.sp, modifier = Modifier.padding(OshiTheme.sm))
+                        Text("Powered by GIPHY" /* brand attribution, never translated */, color = Ink.soft, fontSize = 11.sp, modifier = Modifier.padding(OshiTheme.sm))
                     }
                 }
             }
@@ -205,6 +223,32 @@ fun GifPicker(
 }
 
 private val CELL = 96.dp
+
+// Grid keys for the two section labels (constants: a literal `key = "…"` reads as a catalog key to SourceKeys).
+private const val HEADER_OSHI = "header-oshi"
+private const val HEADER_MORE = "header-more"
+
+/** Mascots whose name, label, emoji or alias matches [query]; all of them for a blank one. */
+internal fun mascotSearch(query: String): List<com.oshi.desktop.mascot.OshiMascot.Mascot> {
+    val all = com.oshi.desktop.mascot.OshiMascot.all
+    val q = LocalGifLibrary.fold(query.trim())
+    if (q.isEmpty()) return all
+    val asEmoji = com.oshi.desktop.mascot.OshiMascot.forEmoji(query.trim())
+    return all.filter { m ->
+        m === asEmoji || LocalGifLibrary.fold("${m.name} ${m.label} oshi").contains(q)
+    }
+}
+
+@Composable
+private fun SectionLabel(label: String) {
+    Text(
+        label,
+        fontSize = 12.sp,
+        fontWeight = FontWeight.SemiBold,
+        color = Ink.soft,
+        modifier = Modifier.padding(start = 2.dp, top = 2.dp),
+    )
+}
 
 @Composable
 private fun Cell(enabled: Boolean, onClick: () -> Unit, content: @Composable () -> Unit) {
@@ -222,7 +266,7 @@ private fun Chip(label: String, selected: Boolean, onClick: () -> Unit) {
         fontSize = 13.sp,
         fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
         color = if (selected) Color.White else Ink.strong,
-        modifier = Modifier.clip(RoundedCornerShape(50)).background(if (selected) OshiTheme.brand else OshiTheme.surface)
+        modifier = Modifier.clip(RoundedCornerShape(50)).background(if (selected) OshiTheme.brandFill else OshiTheme.surface)
             .clickable(onClick = onClick).padding(horizontal = 14.dp, vertical = 6.dp),
     )
 }

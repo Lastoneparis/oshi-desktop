@@ -66,9 +66,9 @@ class TickerQuoteSnapshots internal constructor(
         }
         runCatching {
             storeFile.parentFile?.mkdirs()
-            val tmp = File(storeFile.parentFile, storeFile.name + ".tmp")
-            tmp.writeText(json.toString())
-            if (!tmp.renameTo(storeFile)) { storeFile.writeText(json.toString()); tmp.delete() }
+            // __ATOMIC_ON_WINDOWS_2026_11_19__ File.renameTo refuses to replace an existing file on
+            // Windows, so every save here fell back to a plain rewrite (torn by a crash or power cut).
+            com.oshi.desktop.store.AtomicFile.write(storeFile, json.toString().toByteArray(Charsets.UTF_8))
         }
     }
 

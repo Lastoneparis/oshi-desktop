@@ -5,11 +5,11 @@ import org.json.JSONObject
 
 /** Small non-secret counterpart to the phones' receipt preferences. */
 class ReceiptPreferences(private val file: File) {
-    data class Values(val delivery: Boolean = true, val read: Boolean = true)
+    data class Values(val delivery: Boolean = true, val read: Boolean = true, val typing: Boolean = true)
 
     @Synchronized fun load(): Values = try {
         if (!file.isFile) Values() else JSONObject(file.readText(Charsets.UTF_8)).let {
-            Values(it.optBoolean("deliveryReceiptsEnabled", true), it.optBoolean("readReceiptsEnabled", true))
+            Values(it.optBoolean("deliveryReceiptsEnabled", true), it.optBoolean("readReceiptsEnabled", true), it.optBoolean("typingIndicatorsEnabled", true))
         }
     } catch (_: Exception) { Values() }
 
@@ -17,6 +17,7 @@ class ReceiptPreferences(private val file: File) {
         AtomicFile.write(file, JSONObject()
             .put("deliveryReceiptsEnabled", values.delivery)
             .put("readReceiptsEnabled", values.read)
+            .put("typingIndicatorsEnabled", values.typing)
             .toString().toByteArray(Charsets.UTF_8))
     }
 

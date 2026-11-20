@@ -135,7 +135,7 @@ fun MentionAwareText(
             fontStyle = fontStyle,
             color = color,
         )
-        DropdownMenu(expanded = shown != null, onDismissRequest = { shown = null }) {
+        OshiDropdownMenu(expanded = shown != null, onDismissRequest = { shown = null }) {
             shown?.let { s ->
                 Column(Modifier.padding(horizontal = OshiTheme.md, vertical = OshiTheme.sm)) {
                     Text("@" + s.name, style = OshiTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, color = Ink.strong)

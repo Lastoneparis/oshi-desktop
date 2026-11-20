@@ -10,6 +10,7 @@ import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.Density
 import com.oshi.desktop.store.MediaType
+import com.oshi.desktop.ui.OshiMaterialTheme
 import com.oshi.desktop.ui.OshiTheme
 import java.awt.image.BufferedImage
 import java.io.ByteArrayInputStream
@@ -198,7 +199,7 @@ class MediaViewerRenderTest {
         val out = File("build/screens").apply { mkdirs() }
         val scale = 2f
         val scene = ImageComposeScene(width = 600, height = 300, density = Density(scale)) {
-            MaterialTheme(colorScheme = OshiTheme.colors, typography = OshiTheme.typography) {
+            OshiMaterialTheme {
                 Surface(Modifier.fillMaxSize(), color = OshiTheme.background) {
                     WithMediaViewer { SnippetShape() }
                 }
@@ -229,7 +230,7 @@ class MediaViewerRenderTest {
             height = (H * scale).toInt(),
             density = Density(scale),
         ) {
-            MaterialTheme(colorScheme = OshiTheme.colors, typography = OshiTheme.typography) {
+            OshiMaterialTheme {
                 Surface(Modifier.fillMaxSize(), color = OshiTheme.background) {
                     Box(Modifier.fillMaxSize()) {
                         MediaViewerOverlay(target) {}

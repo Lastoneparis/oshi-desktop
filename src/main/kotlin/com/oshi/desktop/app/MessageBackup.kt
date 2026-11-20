@@ -68,7 +68,7 @@ class MessageBackup(
         mediaWriter = mediaDir?.let { dir ->
             { id, fileName, bytes ->
                 (mediaVault ?: MediaVault.current())?.let { vault ->
-                    val safe = fileName.replace(Regex("[^A-Za-z0-9._-]"), "_").take(120).ifEmpty { "file" }
+                    val safe = com.oshi.desktop.store.SafeFileName.sanitize(fileName)
                     DesktopPaths.ensurePrivateDir(dir)
                     val f = File(dir, "${id.take(8)}-import-$safe")
                     try {

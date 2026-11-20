@@ -20,11 +20,17 @@ import org.json.JSONObject
  * for anyone who never touches the switch.
  */
 class NotificationPreferences(private val file: File) {
-    data class Values(val preview: Boolean = false)
+    /**
+     * __NOTIFICATION_OPTIONS_2027__ [enabled] and [sound] are iOS's "Enable Notifications"
+     * and "Sound" (`settings.notifications.enable` / `.sound`), both ON by default as there.
+     */
+    data class Values(val preview: Boolean = false, val enabled: Boolean = true, val sound: Boolean = true)
 
     @Synchronized fun load(): Values = try {
         if (!file.isFile) Values()
-        else Values(JSONObject(file.readText(Charsets.UTF_8)).optBoolean("notificationPreview", false))
+        else JSONObject(file.readText(Charsets.UTF_8)).let {
+            Values(it.optBoolean("notificationPreview", false), it.optBoolean("notificationsEnabled", true), it.optBoolean("notificationSound", true))
+        }
     } catch (_: Exception) {
         // A corrupt file must fall back to the PRIVATE setting, never the talkative one.
         Values()
@@ -33,7 +39,11 @@ class NotificationPreferences(private val file: File) {
     @Synchronized fun save(values: Values) {
         AtomicFile.write(
             file,
-            JSONObject().put("notificationPreview", values.preview).toString().toByteArray(Charsets.UTF_8),
+            JSONObject()
+                .put("notificationPreview", values.preview)
+                .put("notificationsEnabled", values.enabled)
+                .put("notificationSound", values.sound)
+                .toString().toByteArray(Charsets.UTF_8),
         )
     }
 

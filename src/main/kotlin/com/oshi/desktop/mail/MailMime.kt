@@ -19,7 +19,17 @@ import java.util.Base64
  */
 object MailMime {
 
-    data class Attachment(val filename: String, val mimeType: String, val bytes: ByteArray)
+    data class Attachment(
+        val filename: String,
+        val mimeType: String,
+        val bytes: ByteArray,
+        /** __MAIL_READER_2026_11_16__ `Content-ID` without its angle brackets, for `cid:` images. */
+        val contentId: String? = null,
+        /** A part the HTML shows in place (`cid:`), not one the sender attached to download. */
+        val inline: Boolean = false,
+    ) {
+        val isImage: Boolean get() = mimeType.startsWith("image/", ignoreCase = true)
+    }
 
     data class Mail(
         val headers: Map<String, String>,
@@ -88,13 +98,27 @@ object MailMime {
             val disposition = headers["content-disposition"].orEmpty()
 
             val filename = param(disposition, "filename") ?: param(type, "name")
+            val contentId = headers["content-id"]?.trim()?.trim('<', '>')?.takeIf { it.isNotEmpty() }
             when {
+                // __MAIL_READER_2026_11_16__ an image the HTML shows in place (`cid:`). These
+                // were DROPPED before (no filename ⇒ not an attachment ⇒ not text): a newsletter
+                // lost every picture it carried. Kept, marked inline, never offered as a download.
+                type.startsWith("image/", true) && contentId != null && !disposition.contains("attachment", true) -> {
+                    acc.attachments += Attachment(
+                        filename = decodeEncodedWords(filename ?: "$contentId.${type.substringAfter('/').substringBefore(';').trim()}"),
+                        mimeType = type.substringBefore(';').trim(),
+                        bytes = decodeBytes(content, encoding),
+                        contentId = contentId,
+                        inline = true,
+                    )
+                }
                 disposition.contains("attachment", true) ||
                     (filename != null && !disposition.contains("inline", true)) -> {
                     acc.attachments += Attachment(
                         filename = decodeEncodedWords(filename ?: "attachment"),
                         mimeType = type.substringBefore(';').trim(),
                         bytes = decodeBytes(content, encoding),
+                        contentId = contentId,
                     )
                 }
                 type.contains("multipart/", true) ->

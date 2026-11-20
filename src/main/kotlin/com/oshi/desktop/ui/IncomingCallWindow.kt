@@ -1,6 +1,7 @@
 package com.oshi.desktop.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -32,6 +33,7 @@ import androidx.compose.ui.window.rememberWindowState
 import com.oshi.desktop.i18n.t
 import com.oshi.desktop.ui.components.CallGlyph
 import com.oshi.desktop.ui.components.CallGlyphIcon
+import com.oshi.desktop.ui.components.glass
 import com.oshi.desktop.ui.state.CallScreenModel.CallScreen
 
 /**
@@ -60,7 +62,25 @@ fun IncomingCallWindow(screen: CallScreen, onAnswer: () -> Unit, onDecline: () -
         focusable = true,
     ) {
         LaunchedEffect(Unit) { window.toFront(); window.requestFocus() }
-        Box(Modifier.fillMaxSize().background(Color(0xFF1C1B2E)).padding(horizontal = 16.dp), contentAlignment = Alignment.Center) {
+        RingCard(screen, onAnswer, onDecline)
+    }
+}
+
+/**
+ * The ringing card's content, outside the [Window] so the screen renderer can draw it.
+ *
+ * __OLED_GLASS_2026_11_16__ In OLED it is glass on black: the window's own black, a
+ * translucent fill lit from the top, and the lit rim — an undecorated card on a black
+ * desktop still needs an edge, and the rim is that edge.
+ */
+@Composable
+internal fun RingCard(screen: CallScreen, onAnswer: () -> Unit, onDecline: () -> Unit) = com.oshi.desktop.ui.components.ProvideLocaleDirection {
+        Box(
+            Modifier.fillMaxSize().background(OshiTheme.palette.ringCard)
+                .glass(androidx.compose.ui.graphics.RectangleShape, OshiTheme.palette.ringCard, OshiTheme.cardOutline)
+                .padding(horizontal = 16.dp),
+            contentAlignment = Alignment.Center,
+        ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(
                     Modifier.size(52.dp).clip(CircleShape).background(Color(0xFF5616EC)),
@@ -78,7 +98,6 @@ fun IncomingCallWindow(screen: CallScreen, onAnswer: () -> Unit, onDecline: () -
                 }
             }
         }
-    }
 }
 
 @Composable

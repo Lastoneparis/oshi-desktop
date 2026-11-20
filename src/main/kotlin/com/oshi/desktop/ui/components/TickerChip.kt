@@ -123,8 +123,11 @@ fun TickerChipsForText(
     }
 }
 
-private val UP = Color(0xFF1B9E4B)
-private val DOWN = Color(0xFFD13438)
+// __OLED_GLASS_2026_11_16__ The light values were hard-coded and stayed in dark, where
+// #D13438 measures 2.7:1 on an incoming bubble. In the dark palettes the chip uses the
+// palette's own green and red, which `AppearanceThemeTest` holds at AA on the dark grounds.
+private val UP: Color get() = if (OshiTheme.palette.isDark) OshiTheme.success else Color(0xFF1B9E4B)
+private val DOWN: Color get() = if (OshiTheme.palette.isDark) OshiTheme.danger else Color(0xFFD13438)
 
 @Composable
 private fun Sparkline(values: List<Double>, up: Boolean, modifier: Modifier) {

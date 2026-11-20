@@ -16,6 +16,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
+import com.oshi.desktop.i18n.t
 import androidx.compose.ui.window.rememberWindowState
 
 /**
@@ -46,16 +47,20 @@ fun startupFailureWindow(headline: String, detail: String, whatToDo: String) {
     application(exitProcessOnExit = false) {
         Window(
             onCloseRequest = { exitApplication() },
-            title = "OSHI — cannot open this account",
+            title = t("desktop.startup.title"),
             state = rememberWindowState(width = 620.dp, height = 430.dp),
         ) {
             // The app's own palette and type, not Material's defaults: this window
             // is often the FIRST thing a person sees of OSHI, and a screen that
             // looks like a developer's error box reads as a broken download.
-            MaterialTheme(colorScheme = OshiTheme.colors, typography = OshiTheme.typography) {
+            OshiMaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
+                    // __CLOSE_BUTTON_CLIPPED_2026_11_20__ the text scrolls, the button does not: with
+                    // everything in one scrolling column a long reason pushed Close half off the
+                    // bottom edge (seen on Linux, 1.5.0 smoke run).
+                    Column(modifier = Modifier.fillMaxSize().padding(32.dp)) {
                     Column(
-                        modifier = Modifier.fillMaxSize().padding(32.dp).verticalScroll(rememberScrollState()),
+                        modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
                         verticalArrangement = Arrangement.spacedBy(16.dp),
                     ) {
                         Text(
@@ -75,9 +80,10 @@ fun startupFailureWindow(headline: String, detail: String, whatToDo: String) {
                             )
                         }
                         Text(whatToDo, fontSize = 14.sp)
-                        Spacer(Modifier.weight(1f))
+                    }
+                        Spacer(Modifier.height(16.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            Button(onClick = { exitApplication() }) { Text("Close") }
+                            Button(onClick = { exitApplication() }) { Text(t("common.close")) }
                         }
                     }
                 }

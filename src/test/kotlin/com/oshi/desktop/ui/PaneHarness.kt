@@ -2,6 +2,8 @@ package com.oshi.desktop.ui
 
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
@@ -52,6 +54,11 @@ object PaneHarness {
     @JvmStatic
     fun main(args: Array<String>) {
         val which = args.firstOrNull() ?: "lora"
+        when (System.getenv("OSHI_RENDER_THEME")?.lowercase()) {
+            "dark" -> OshiTheme.appearance = com.oshi.desktop.ui.Appearance(com.oshi.desktop.ui.ThemeMode.DARK, oledBlack = false)
+            "oled" -> OshiTheme.appearance = com.oshi.desktop.ui.Appearance(com.oshi.desktop.ui.ThemeMode.DARK, oledBlack = true)
+            else -> Unit
+        }
         application {
             val state = rememberWindowState(
                 size = DpSize(1180.dp, 980.dp),
@@ -61,12 +68,55 @@ object PaneHarness {
                 position = WindowPosition(40.dp, 60.dp),
             )
             Window(onCloseRequest = ::exitApplication, state = state, title = "OSHI pane harness — $which") {
-                MaterialTheme(colorScheme = OshiTheme.colors, typography = OshiTheme.typography) {
+                OshiMaterialTheme {
                     when (which) {
                         "delete" -> DeletePane()
+                        "disguise" -> DisguisePane(window)
                         else -> RadioPane()
                     }
                 }
+            }
+        }
+    }
+
+    /**
+     * __PRIVACY_DISGUISE_2026_11_18__ The Privacy disguise pane + its sheets in a real window,
+     * with the REAL window-wide AWT drop target. The identity is the STEGO-v1 vector RECIPIENT
+     * and "Camille" is the vector SENDER, so dropping `docs/fixtures/stego/<platform>_prod_v1.png` on
+     * the window really reveals (Android-, iOS- and desktop-made). The cover switch writes to
+     * a scratch file. Env: OSHI_RENDER_THEME=light|dark|oled, HARNESS_REVEAL=<png> (reveal at
+     * start), HARNESS_SHEET=1 (open the disguise sheet at start).
+     */
+    @Composable
+    private fun DisguisePane(window: androidx.compose.ui.awt.ComposeWindow) {
+        val sha = { s: String -> java.security.MessageDigest.getInstance("SHA-256").digest(s.toByteArray()) }
+        val priv = sha("OSHI-STEGO-v1 vector recipient")
+        val pub = com.oshi.messenger.network.v2.OSHICryptoV2.x25519PubFromPriv(priv)
+        val sender = java.util.Base64.getEncoder().encodeToString(
+            com.oshi.messenger.network.v2.OSHICryptoV2.x25519PubFromPriv(sha("OSHI-STEGO-v1 vector sender")))
+        val contacts = listOf(
+            com.oshi.desktop.ui.state.ContactRow(sender, sender.take(8) + "…", "Camille", true, false, ""),
+            com.oshi.desktop.ui.state.ContactRow("b".repeat(43) + "=", "bbbbbbbb…", "Bob", false, false, ""),
+        )
+        val host = androidx.compose.runtime.remember {
+            com.oshi.desktop.ui.components.PhotoDisguiseHost(priv, pub) { contacts }.apply {
+                System.getenv("HARNESS_REVEAL")?.let { revealFile(File(it)) }
+                if (System.getenv("HARNESS_SHEET") == "1") {
+                    draftPrefill = "Meet at the north gate, 18:00. Bring the papers."
+                    open(contacts[0])
+                }
+            }
+        }
+        androidx.compose.runtime.DisposableEffect(window) {
+            com.oshi.desktop.net.DesktopCover.useFile(File.createTempFile("harness-disguise", ".json").also { it.delete() })
+            window.dropTarget = installDisguiseDropTarget(host)
+            onDispose { window.dropTarget = null }
+        }
+        var coverOn by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+        androidx.compose.material3.Surface(color = OshiTheme.background) {
+            androidx.compose.foundation.layout.Box {
+                com.oshi.desktop.ui.components.PrivacyDisguisePane(host, contacts, coverOn, onCoverChange = { coverOn = it })
+                com.oshi.desktop.ui.components.PhotoDisguiseOverlays(host)
             }
         }
     }

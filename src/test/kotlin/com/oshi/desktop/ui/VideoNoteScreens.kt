@@ -159,7 +159,7 @@ class VideoNoteScreens {
     private fun render(target: File, wDp: Int, hDp: Int, frames: Int, content: @Composable () -> Unit) {
         val scale = 2f
         val scene = ImageComposeScene((wDp * scale).toInt(), (hDp * scale).toInt(), Density(scale)) {
-            MaterialTheme(colorScheme = OshiTheme.colors, typography = OshiTheme.typography) {
+            OshiMaterialTheme {
                 Surface(Modifier.fillMaxSize(), color = OshiTheme.background) { Box(Modifier.fillMaxSize()) { content() } }
             }
         }

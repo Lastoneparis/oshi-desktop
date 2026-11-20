@@ -29,6 +29,9 @@ class LoRaNodeRoster {
     companion object {
         const val ONLINE_WINDOW_MS: Long = 2L * 60 * 60 * 1000
 
+        /** TELEMETRY_APP. */
+        const val PORT_TELEMETRY: Long = 67
+
         /** Below this a radio clock is not set (2020-09-13): the value is ignored. */
         private const val PLAUSIBLE_EPOCH_S: Long = 1_600_000_000
 
@@ -118,6 +121,7 @@ class LoRaNodeRoster {
                             ?.let { synchronized(lock) { rssiByNode[from] = it } }
                     }
                     observePacketForPosition(f.payload)
+                    observePacketForMetrics(f.payload, nowMs)
                 }
             }
         }
@@ -172,6 +176,9 @@ class LoRaNodeRoster {
         // applied once, in one place, and a NodeInfo cannot write something a packet could
         // not.
         LoRaProto.field(nodeInfo, 3, wire = 2)?.payload?.let { observePosition(num, it) }
+        // __DESKTOP_TOOLS_2027__ `NodeInfo.device_metrics`, field 6: battery, voltage,
+        // channel utilisation, our airtime and uptime — what the radio card shows.
+        LoRaProto.field(nodeInfo, 6, wire = 2)?.payload?.let { observeMetrics(num, it, nowMs) }
 
         synchronized(lock) {
             // Never move a node we already heard directly back in time.
@@ -239,6 +246,9 @@ class LoRaNodeRoster {
         lastHeardMs.clear()
         names.clear()
         positions.clear()
+        metricsByNode.clear()
+        snrByNode.clear()
+        lastRx = null
     }
 
     /**
@@ -289,6 +299,84 @@ class LoRaNodeRoster {
         if (la < -90 || la > 90 || lo < -180 || lo > 180) return
         synchronized(lock) { positions[from] = la to lo }
     }
+
+    // ------------------------------------------------------------------ __DESKTOP_TOOLS_2027__ metrics
+
+    /**
+     * `DeviceMetrics` as a radio reports it about itself or another node. Every field is
+     * optional: a node that has not said its battery level shows "—", never 0 %.
+     * [batteryLevel] above 100 is Meshtastic's "on external power".
+     */
+    data class Metrics(
+        val batteryLevel: Int? = null,
+        val voltage: Float? = null,
+        /** Percent of the channel busy with anyone's traffic (last minute). */
+        val channelUtilization: Float? = null,
+        /** Percent of the last hour this radio spent transmitting (the duty-cycle budget). */
+        val airUtilTx: Float? = null,
+        val uptimeSeconds: Long? = null,
+        val atMs: Long = 0,
+    ) {
+        fun merge(o: Metrics) = Metrics(
+            o.batteryLevel ?: batteryLevel, o.voltage ?: voltage, o.channelUtilization ?: channelUtilization,
+            o.airUtilTx ?: airUtilTx, o.uptimeSeconds ?: uptimeSeconds, maxOf(atMs, o.atMs),
+        )
+    }
+
+    /** The last packet heard by OUR radio: its signal and when. */
+    data class LastRx(val rssi: Int?, val snr: Float?, val atMs: Long)
+
+    private val metricsByNode = HashMap<UInt, Metrics>()
+    private var lastRx: LastRx? = null
+
+    /** `DeviceMetrics` fields 1–5. Field numbers from mesh.proto / telemetry.proto. */
+    internal fun observeMetrics(from: UInt, payload: ByteArray, nowMs: Long) {
+        val fields = runCatching { LoRaProto.parseFields(payload) }.getOrNull() ?: return
+        var m = Metrics(atMs = nowMs)
+        for (f in fields) when {
+            f.number == 1 && f.wire == 0 -> m = m.copy(batteryLevel = f.varintValue.toInt().takeIf { it in 0..101 })
+            f.number == 2 && f.wire == 5 -> m = m.copy(voltage = f.asFloat().takeIf { it.isFinite() && it > 0f && it < 30f })
+            f.number == 3 && f.wire == 5 -> m = m.copy(channelUtilization = f.asFloat().takeIf { it.isFinite() && it in 0f..100f })
+            f.number == 4 && f.wire == 5 -> m = m.copy(airUtilTx = f.asFloat().takeIf { it.isFinite() && it in 0f..100f })
+            f.number == 5 && f.wire == 0 -> m = m.copy(uptimeSeconds = f.varintValue.takeIf { it >= 0 })
+        }
+        synchronized(lock) { metricsByNode[from] = (metricsByNode[from] ?: Metrics()).merge(m) }
+    }
+
+    /**
+     * TELEMETRY_APP (portnum 67) carries `Telemetry { time = 1; device_metrics = 2 }`, and
+     * every packet carries `rx_snr` (field 8, float) and `rx_rssi` (field 12) as OUR radio
+     * measured it.
+     */
+    private fun observePacketForMetrics(packet: ByteArray, nowMs: Long) {
+        val from = LoRaProto.field(packet, 1, wire = 5)?.asUInt32() ?: return
+        if (from == 0u) return
+        if (from != synchronized(lock) { myNodeNum }) {
+            val rssi = LoRaProto.field(packet, 12, wire = 0)?.varintValue?.toInt()?.takeIf { it < 0 }
+            val snr = LoRaProto.field(packet, 8, wire = 5)?.asFloat()?.takeIf { it.isFinite() && it > -40f && it < 40f }
+            if (rssi != null || snr != null) synchronized(lock) {
+                lastRx = LastRx(rssi, snr, nowMs)
+                snr?.let { snrByNode[from] = it }
+            }
+        }
+        val decoded = LoRaProto.field(packet, 4, wire = 2)?.payload ?: return
+        val portnum = LoRaProto.field(decoded, 1, wire = 0)?.varintValue ?: return
+        if (portnum != PORT_TELEMETRY) return
+        val telemetry = LoRaProto.field(decoded, 2, wire = 2)?.payload ?: return
+        LoRaProto.field(telemetry, 2, wire = 2)?.payload?.let { observeMetrics(from, it, nowMs) }
+    }
+
+    private val snrByNode = HashMap<UInt, Float>()
+
+    /** What our own radio last said about itself, or null before it has. */
+    fun myMetrics(): Metrics? = synchronized(lock) { metricsByNode[myNodeNum] }
+
+    /** What [num] last said about itself. */
+    fun metricsOf(num: UInt): Metrics? = synchronized(lock) { metricsByNode[num] }
+
+    fun snrOf(num: UInt): Float? = synchronized(lock) { snrByNode[num] }
+
+    fun lastRx(): LastRx? = synchronized(lock) { lastRx }
 
     /** Our own radio's position, when it has a fix. */
     /**

@@ -20,6 +20,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
+import org.junit.Before
 import org.junit.Test
 import java.io.File
 import java.io.IOException
@@ -124,6 +125,11 @@ class DesktopOhttpTest {
     private val identity = DesktopIdentity.generate()
     private val signer = DesktopV2Signer(identity)
     private val transport = DesktopOhttpTransport(URI.create(gateway.relayUrl), Ohttp.parseKeyConfig(keyConfigBytes)!!)
+
+    // The short-connection window and the relay fallback are process-wide. A test elsewhere in
+    // the same JVM that leaves the window open turns downloadChunk into ranged reads with
+    // retries (5 gateway calls instead of 3): seen once in a full run, never alone.
+    @Before fun cleanGlobals() { DesktopCover.ShortConnections.reset(); RelayFallback.reset() }
 
     @After fun tearDown() = gateway.close()
 

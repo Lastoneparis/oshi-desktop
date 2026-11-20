@@ -1,5 +1,6 @@
 package com.oshi.desktop.ui.state
 
+import com.oshi.desktop.i18n.t
 import com.oshi.desktop.app.OshiClient
 import com.oshi.desktop.mail.MailClient
 import com.oshi.desktop.mail.WebSessionWatch
@@ -70,7 +71,12 @@ class MailModel(
         val body: String,
         val attachments: List<MailMime.Attachment>,
         val messageId: String?,
-    )
+        /** __MAIL_READER_2026_11_16__ the HTML part, rendered by `MailHtml` when present. */
+        val html: String? = null,
+    ) {
+        /** What the reader lists under the body: real attachments, never `cid:` parts. */
+        val downloadable: List<MailMime.Attachment> get() = attachments.filterNot { it.inline }
+    }
 
     data class DraftContent(
         val id: String?, val to: String, val cc: String, val subject: String, val body: String,
@@ -276,7 +282,7 @@ class MailModel(
     fun open(id: String) {
         val row = state.messages.find { it.id == id } ?: return
         if (row.folder == FOLDER_DRAFT) { openDraftForEdit(id); return }
-        mutate { copy(busy = "Decrypting…") }
+        mutate { copy(busy = t("pc.mail.busy.decrypting")) }
         worker.execute {
             mail.message(id).fold(
                 onSuccess = { raw ->
@@ -284,13 +290,14 @@ class MailModel(
                     val openMail = OpenMail(
                         id = id,
                         folder = row.folder,
-                        subject = parsed.subject.ifEmpty { "(no subject)" },
+                        subject = parsed.subject.ifEmpty { t("pc.mail.noSubject") },
                         from = parsed.from.ifEmpty { row.envelope?.from.orEmpty() },
                         to = parsed.to.ifEmpty { row.envelope?.to.orEmpty() },
                         date = parsed.date.ifEmpty { row.receivedAt },
-                        body = parsed.text.ifEmpty { "(empty message)" },
+                        body = parsed.text.ifEmpty { t("pc.mail.emptyBody") },
                         attachments = parsed.attachments,
                         messageId = parsed.headers["message-id"],
+                        html = parsed.html,
                     )
                     mutate {
                         copy(
@@ -316,7 +323,7 @@ class MailModel(
             val row = state.messages.find { it.id == id }
             mail.delete(id, permanent = row?.folder == FOLDER_TRASH).fold(
                 onSuccess = { mutate { copy(open = null) }; loadInboxNow() },
-                onFailure = { e -> mutate { copy(error = e.message ?: "Operation failed") } },
+                onFailure = { e -> mutate { copy(error = e.message ?: t("pc.mail.err.failed")) } },
             )
         }
     }
@@ -337,7 +344,7 @@ class MailModel(
         worker.execute {
             mail.markSeen(id, false).fold(
                 onSuccess = { mutate { copy(open = null) }; loadInboxNow() },
-                onFailure = { e -> mutate { copy(error = e.message ?: "Operation failed") } },
+                onFailure = { e -> mutate { copy(error = e.message ?: t("pc.mail.err.failed")) } },
             )
         }
     }
@@ -359,12 +366,12 @@ class MailModel(
         onDone: (String?) -> Unit,
     ) {
         val sendingDraft = state.editingDraft
-        mutate { copy(busy = "Sending…") }
+        mutate { copy(busy = t("pc.mail.busy.sending")) }
         worker.execute {
             mail.send(to, subject, text, cc, from = from, inReplyTo = inReplyTo, attachments = attachments).fold(
                 onSuccess = {
                     draftIdToRemove?.let { id -> mail.delete(id, permanent = true).onFailure { e ->
-                        mutate { copy(error = "Message sent, but its draft could not be removed: ${e.message}") }
+                        mutate { copy(error = t("pc.mail.err.draftNotRemoved", e.message ?: "")) }
                     } }
                     mutate { copy(busy = null, editingDraft = if (editingDraft === sendingDraft) null else editingDraft) }
                     loadInboxNow()
@@ -374,8 +381,8 @@ class MailModel(
                     mutate { copy(busy = null) }
                     onDone(
                         if (e is MailClient.MailException && e.code == "send-quota-exceeded")
-                            "You have used all of this month's 150 messages."
-                        else e.message ?: "Could not send message",
+                            t("pc.mail.err.quotaUsed")
+                        else e.message ?: t("pc.mail.err.send"),
                     )
                 },
             )
@@ -386,7 +393,7 @@ class MailModel(
 
     fun openDraftForEdit(id: String) {
         val row = state.messages.find { it.id == id }
-        mutate { copy(busy = "Decrypting…") }
+        mutate { copy(busy = t("pc.mail.busy.decrypting")) }
         worker.execute {
             mail.message(id).fold(
                 onSuccess = { raw ->
@@ -438,21 +445,21 @@ class MailModel(
         val draft = state.editingDraft ?: return
         worker.execute {
             runCatching {
-                require(file.length() <= MailClient.MAX_ATTACHMENT_TOTAL_BYTES) { "Attachment is too large" }
+                require(file.length() <= MailClient.MAX_ATTACHMENT_TOTAL_BYTES) { t("pc.mail.err.attachmentTooLarge") }
                 val bytes = file.inputStream().use { it.readNBytes(MailClient.MAX_ATTACHMENT_TOTAL_BYTES + 1) }
                 val attachment = MailClient.OutgoingAttachment(file.name, java.nio.file.Files.probeContentType(file.toPath()) ?: "application/octet-stream", bytes)
                 mutate {
                     val active = editingDraft ?: return@mutate this
                     if (active.composerId != draft.composerId) return@mutate this
-                    require(active.attachments.sumOf { it.bytes.size.toLong() } + bytes.size <= MailClient.MAX_ATTACHMENT_TOTAL_BYTES) { "Attachments exceed 18 MiB" }
+                    require(active.attachments.sumOf { it.bytes.size.toLong() } + bytes.size <= MailClient.MAX_ATTACHMENT_TOTAL_BYTES) { t("pc.mail.err.attachmentsTotal") }
                     copy(editingDraft = active.copy(attachments = active.attachments + attachment))
                 }
-            }.onFailure { e -> mutate { copy(error = e.message ?: "Could not attach file") } }
+            }.onFailure { e -> mutate { copy(error = e.message ?: t("pc.mail.err.attach")) } }
         }
     }
 
     fun saveAttachment(attachment: MailMime.Attachment, target: File, onDone: (String?) -> Unit) {
-        worker.execute { onDone(runCatching { target.writeBytes(attachment.bytes) }.exceptionOrNull()?.let { it.message ?: "Could not save attachment" }) }
+        worker.execute { onDone(runCatching { target.writeBytes(attachment.bytes) }.exceptionOrNull()?.let { it.message ?: t("pc.mail.err.saveAttachment") }) }
     }
 
     /**
@@ -463,16 +470,16 @@ class MailModel(
      * the name is sealed inside [MailClient.uploadToDrive].
      */
     fun saveAttachmentToDrive(attachment: MailMime.Attachment, onDone: (String?) -> Unit) {
-        mutate { copy(busy = "Saving to drive…") }
+        mutate { copy(busy = t("pc.mail.busy.savingToDrive")) }
         worker.execute {
             runCatching {
                 val sealedBody = MailCrypto.seal(attachment.bytes, mail.mailPublicKey())
                 mail.uploadToDrive(sealedBody, attachment.filename) { p ->
-                    mutate { copy(busy = "Saving to drive ${(p * 100).toInt()}%") }
+                    mutate { copy(busy = t("pc.mail.busy.savingToDrivePct", (p * 100).toInt())) }
                 }.getOrThrow()
             }.fold(
                 onSuccess = { mutate { copy(busy = null) }; refresh(); onDone(null) },
-                onFailure = { e -> mutate { copy(busy = null) }; onDone(e.message ?: "Could not save to drive") },
+                onFailure = { e -> mutate { copy(busy = null) }; onDone(e.message ?: t("pc.mail.err.saveToDrive")) },
             )
         }
     }
@@ -511,7 +518,7 @@ class MailModel(
                     loadInboxNow()
                     onSaved(persistedId)
                 },
-                onFailure = { e -> mutate { copy(error = e.message ?: "Could not save draft") }; onSaved(null) },
+                onFailure = { e -> mutate { copy(error = e.message ?: t("pc.mail.err.saveDraft")) }; onSaved(null) },
             )
         }
     }
@@ -520,7 +527,7 @@ class MailModel(
         worker.execute {
             mail.delete(id, permanent = true).fold(
                 onSuccess = { mutate { copy(editingDraft = null) }; loadInboxNow() },
-                onFailure = { e -> mutate { copy(error = e.message ?: "Operation failed") } },
+                onFailure = { e -> mutate { copy(error = e.message ?: t("pc.mail.err.failed")) } },
             )
         }
     }
@@ -537,7 +544,7 @@ class MailModel(
     }
 
     fun removeAlias(alias: String) {
-        worker.execute { mail.removeAlias(alias).fold(onSuccess = { refresh() }, onFailure = { e -> mutate { copy(error = e.message ?: "Operation failed") } }) }
+        worker.execute { mail.removeAlias(alias).fold(onSuccess = { refresh() }, onFailure = { e -> mutate { copy(error = e.message ?: t("pc.mail.err.failed")) } }) }
     }
 
     /** Public-key-derived alias suggestion; safe to render and identical across devices. */
@@ -550,7 +557,7 @@ class MailModel(
         worker.execute {
             mail.inspectPairing(code).fold(
                 onSuccess = { onDone(it, null) },
-                onFailure = { e -> onDone(null, e.message ?: "Could not find that browser") },
+                onFailure = { e -> onDone(null, e.message ?: t("pc.mail.err.browserNotFound")) },
             )
         }
     }
@@ -562,17 +569,17 @@ class MailModel(
     fun inspectBrowserPairingQr(image: File, onDone: (MailClient.PairingRequest?, String?) -> Unit) {
         worker.execute {
             val payload = QrImageDecoder.decode(image).getOrElse { error ->
-                onDone(null, error.message ?: "Could not scan this QR image")
+                onDone(null, error.message ?: t("pc.mail.err.qrUnreadable"))
                 return@execute
             }
             val prefix = "OSHIMAIL:PAIR:"
             if (!payload.startsWith(prefix)) {
-                onDone(null, "That QR code is not a browser mail pairing request")
+                onDone(null, t("pc.mail.err.qrNotPairing"))
                 return@execute
             }
             mail.inspectPairing(payload.removePrefix(prefix)).fold(
                 onSuccess = { onDone(it, null) },
-                onFailure = { e -> onDone(null, e.message ?: "Could not find that browser") },
+                onFailure = { e -> onDone(null, e.message ?: t("pc.mail.err.browserNotFound")) },
             )
         }
     }
@@ -582,7 +589,7 @@ class MailModel(
         worker.execute {
             mail.approvePairing(pairing, label).fold(
                 onSuccess = { address -> loadBrowserSessions(); onDone(address, null) },
-                onFailure = { e -> onDone(null, e.message ?: "Could not approve that browser") },
+                onFailure = { e -> onDone(null, e.message ?: t("pc.mail.err.approve")) },
             )
         }
     }
@@ -610,7 +617,7 @@ class MailModel(
                         )
                     }
                 },
-                onFailure = { e -> mutate { copy(error = e.message ?: "Could not load browser sessions") } },
+                onFailure = { e -> mutate { copy(error = e.message ?: t("pc.mail.err.sessions")) } },
             )
         }
     }
@@ -625,7 +632,7 @@ class MailModel(
         worker.execute {
             mail.revokeWebSession(id).fold(
                 onSuccess = { loadBrowserSessions(); onDone(null) },
-                onFailure = { e -> onDone(e.message ?: "Could not sign out that browser") },
+                onFailure = { e -> onDone(e.message ?: t("pc.mail.err.signout")) },
             )
         }
     }
@@ -633,7 +640,7 @@ class MailModel(
     // ------------------------------------------------------------------ drive
 
     fun loadDrive() {
-        mutate { copy(busy = "Decrypting names…") }
+        mutate { copy(busy = t("mail.drive.decrypting")) }
         worker.execute {
             mail.driveFiles().fold(
                 onSuccess = { files -> mutate { copy(busy = null, drive = files) } },
@@ -647,13 +654,13 @@ class MailModel(
      * sees the plaintext bytes OR the filename (that rides inside the sealed metadata too).
      */
     fun uploadFile(file: File, onDone: (String?) -> Unit) {
-        mutate { copy(busy = "Encrypting…") }
+        mutate { copy(busy = t("pc.mail.busy.encrypting")) }
         worker.execute {
             val plain = try { file.readBytes() } catch (e: Exception) {
                 mutate { copy(busy = null) }; onDone(e.message); return@execute
             }
             val sealed = MailCrypto.seal(plain, mail.mailPublicKey())
-            mail.uploadToDrive(sealed, file.name) { p -> mutate { copy(busy = "Uploading ${(p * 100).toInt()}%") } }
+            mail.uploadToDrive(sealed, file.name) { p -> mutate { copy(busy = t("pc.mail.busy.uploadingPct", (p * 100).toInt())) } }
                 .fold(
                     onSuccess = { mutate { copy(busy = null) }; loadDrive(); refresh(); onDone(null) },
                     onFailure = { e -> mutate { copy(busy = null) }; onDone(e.message) },
@@ -662,7 +669,7 @@ class MailModel(
     }
 
     fun downloadFile(id: String, target: File, onDone: (String?) -> Unit) {
-        mutate { copy(busy = "Decrypting…") }
+        mutate { copy(busy = t("pc.mail.busy.decrypting")) }
         worker.execute {
             mail.downloadFromDrive(id).fold(
                 onSuccess = { bytes ->
@@ -678,12 +685,12 @@ class MailModel(
     }
 
     fun deleteDriveFile(id: String) {
-        worker.execute { mail.deleteFromDrive(id).fold(onSuccess = { loadDrive(); refresh() }, onFailure = { e -> mutate { copy(error = e.message ?: "Operation failed") } }) }
+        worker.execute { mail.deleteFromDrive(id).fold(onSuccess = { loadDrive(); refresh() }, onFailure = { e -> mutate { copy(error = e.message ?: t("pc.mail.err.failed")) } }) }
     }
 
     fun renameDriveFile(id: String, newName: String, onDone: (String?) -> Unit) {
         val clean = newName.trim()
-        if (clean.isEmpty()) { onDone("A file needs a name."); return }
+        if (clean.isEmpty()) { onDone(t("pc.mail.err.fileNeedsName")); return }
         worker.execute {
             mail.renameDriveFile(id, clean).fold(
                 onSuccess = { loadDrive(); onDone(null) },
@@ -698,31 +705,31 @@ class MailModel(
      * [DraftContent.composerId] may receive its bytes.
      */
     fun attachDriveFile(file: MailClient.DriveFile, onDone: (String?) -> Unit) {
-        val requestedBy = state.editingDraft ?: return onDone("No draft is open")
-        mutate { copy(busy = "Decrypting…") }
+        val requestedBy = state.editingDraft ?: return onDone(t("pc.mail.err.noDraft"))
+        mutate { copy(busy = t("pc.mail.busy.decrypting")) }
         worker.execute {
             mail.downloadFromDrive(file.id).fold(
                 onSuccess = { bytes ->
                     runCatching {
-                        require(bytes.size <= MailClient.MAX_ATTACHMENT_TOTAL_BYTES) { "Attachment is too large" }
+                        require(bytes.size <= MailClient.MAX_ATTACHMENT_TOTAL_BYTES) { t("pc.mail.err.attachmentTooLarge") }
                         var attached = false
                         mutate {
                             val active = editingDraft ?: return@mutate this
                             if (active.composerId != requestedBy.composerId) return@mutate this
                             require(active.attachments.sumOf { it.bytes.size.toLong() } + bytes.size <= MailClient.MAX_ATTACHMENT_TOTAL_BYTES) {
-                                "Attachments exceed 18 MiB"
+                                t("pc.mail.err.attachmentsTotal")
                             }
                             attached = true
                             copy(editingDraft = active.copy(attachments = active.attachments +
                                 MailClient.OutgoingAttachment(file.name ?: "file", "application/octet-stream", bytes)))
                         }
-                        require(attached) { "The draft changed before the Drive file finished downloading" }
+                        require(attached) { t("pc.mail.err.draftChanged") }
                     }.fold(
                         onSuccess = { mutate { copy(busy = null) }; onDone(null) },
-                        onFailure = { e -> mutate { copy(busy = null) }; onDone(e.message ?: "Could not attach Drive file") },
+                        onFailure = { e -> mutate { copy(busy = null) }; onDone(e.message ?: t("pc.mail.err.attachDrive")) },
                     )
                 },
-                onFailure = { e -> mutate { copy(busy = null) }; onDone(e.message ?: "Could not download Drive file") },
+                onFailure = { e -> mutate { copy(busy = null) }; onDone(e.message ?: t("pc.mail.err.downloadDrive")) },
             )
         }
     }

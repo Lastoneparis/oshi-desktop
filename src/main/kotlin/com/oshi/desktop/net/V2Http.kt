@@ -1,6 +1,7 @@
 package com.oshi.desktop.net
 
 import com.oshi.desktop.DesktopV2Signer
+import java.io.IOException
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -45,6 +46,19 @@ class V2Http(
      * failed call (code -1), never a direct send.
      */
     private val ohttp: () -> DesktopOhttpTransport? = DesktopOhttp::transport,
+    /**
+     * __PRIVACY_DISGUISE_2026_11_18__ "Disguise OSHI traffic". Asked on EVERY request, AFTER
+     * the privacy relay: when OHTTP carries a call it is already unlinkable from the IP and
+     * the cover would add nothing the gateway could see. Otherwise, true means every `/v2/`
+     * call goes inside the cover carrier ([DesktopCover]) and a failure there is a failed
+     * call (code -1), NEVER a direct send.
+     */
+    private val cover: () -> Boolean = DesktopCover::isEnabled,
+    /**
+     * __RELAY_FALLBACK_2026_11_19__ OSHI's blocked-host fallback relay ([RelayFallback]), used
+     * only while the privacy relay is OFF. Null = feature off.
+     */
+    private val fallback: () -> DesktopOhttpTransport? = RelayFallback::transport,
 ) {
 
     data class Response(val code: Int, val body: String) {
@@ -79,7 +93,10 @@ class V2Http(
 
     @Volatile var deviceSigner: DeviceRequestSigner? = null
 
-    private val http: HttpClient = HttpClient.newBuilder()
+    /** Is the cover carrier switched on for this client (Android: `coverSettings.mode() != null`). */
+    fun coverOn(): Boolean = runCatching { cover() }.getOrDefault(false)
+
+    private val http: HttpClient = NetClients.builder()
         .connectTimeout(connectTimeout)
         .followRedirects(HttpClient.Redirect.NEVER)   // a signed request must not be replayed elsewhere
         // Cleartext (a self-hosted relay, a loopback test server): never attempt the h2c
@@ -139,29 +156,8 @@ class V2Http(
         val url = baseUrl + path + if (query.isNullOrEmpty()) "" else "?$query"
         // __OHTTP_DESKTOP_2026_11_10__ THE choke point. Headers above were signed over the
         // inner method/path/body exactly as for a direct send; they ride inside the BHTTP.
-        when (val o = viaOhttp(method, url, headers + listOfNotNull(contentType?.let { "Content-Type" to it }), body, readTimeout)) {
-            is OhttpOutcome.Answered -> return Response(o.inner.status, String(o.inner.body, Charsets.UTF_8))
-            is OhttpOutcome.Failed -> return Response(-1, o.why)
-            OhttpOutcome.Direct -> Unit
-        }
-        val publisher = if (body == null) HttpRequest.BodyPublishers.noBody()
-        else HttpRequest.BodyPublishers.ofByteArray(body)
-
-        val builder = HttpRequest.newBuilder(URI.create(url)).timeout(readTimeout)
-        for ((k, v) in headers) builder.header(k, v)
-        contentType?.let { builder.header("Content-Type", it) }
-        builder.method(method, publisher)
-
-        directSends.incrementAndGet()
-        return try {
-            val resp = http.send(builder.build(), HttpResponse.BodyHandlers.ofString())
-            Response(resp.statusCode(), resp.body() ?: "")
-        } catch (e: Exception) {
-            // A transport failure and an HTTP error must not look the same to a caller
-            // that decides whether to fall back to another path — but neither may throw
-            // out of a send loop. -1 is "never reached the server".
-            Response(-1, "${e.javaClass.simpleName}: ${e.message}")
-        }
+        val r = send(method, url, headers, contentType, body, readTimeout)
+        return Response(r.code, if (r.failure != null) r.why else String(r.body, Charsets.UTF_8))
     }
 
     /**
@@ -185,56 +181,147 @@ class V2Http(
         bodyToHash: ByteArray = EMPTY,
         timeout: Duration = readTimeout,
     ): Pair<Int, ByteArray> {
+        val r = getRaw(path, query, withUserHeader, bodyToHash, timeout)
+        return r.code to (if (r.failure != null) ByteArray(0) else r.body)
+    }
+
+    /**
+     * __BLOB_RANGE_2026_11_19__ One signed GET whose reply is bytes, with what a ranged
+     * chunk read needs besides the body: the inner `Content-Range` and, for code -1, the
+     * transport failure itself (a stall opens the capped-network window).
+     */
+    fun getRaw(
+        path: String,
+        query: String? = null,
+        withUserHeader: Boolean = true,
+        bodyToHash: ByteArray = EMPTY,
+        timeout: Duration = readTimeout,
+    ): Raw {
         val headers = signer.sign("GET", path, bodyToHash, withUserHeader)
         val url = baseUrl + path + if (query.isNullOrEmpty()) "" else "?$query"
-        // __OHTTP_DESKTOP_2026_11_10__ blob chunk GETs go through the relay too (spec §4).
-        when (val o = viaOhttp("GET", url, headers, null, timeout)) {
-            is OhttpOutcome.Answered -> return o.inner.status to o.inner.body
-            is OhttpOutcome.Failed -> return -1 to ByteArray(0)
-            OhttpOutcome.Direct -> Unit
+        return send("GET", url, headers, null, null, timeout)
+    }
+
+    /** One answered (or failed: code -1, [failure] set) exchange, whatever path carried it. */
+    class Raw(val code: Int, val body: ByteArray, val contentRange: String?, val failure: IOException? = null, val why: String = "") {
+        val isSuccess: Boolean get() = code in 200..299
+    }
+
+    /**
+     * The routing, in order:
+     *  1. the user's privacy relay (OHTTP) when ON: required, never falls back;
+     *  2. otherwise __RELAY_FALLBACK_2026_11_19__: while [RelayFallback] says the OSHI host is
+     *     blocked, through OSHI's own fallback relay; a direct/cover transport failure that puts
+     *     it in force is retried there once (same bytes, same signature: the relay's
+     *     idempotency cache answers a duplicate whose direct copy did arrive);
+     *  3. the cover carrier when ON (fail-closed);
+     *  4. direct.
+     */
+    private fun send(
+        method: String,
+        url: String,
+        headers: Map<String, String>,
+        contentType: String?,
+        body: ByteArray?,
+        timeout: Duration,
+    ): Raw {
+        val uri = URI.create(url)
+        val t = try { DesktopOhttp.resolve(ohttp) } catch (e: IOException) {
+            return Raw(-1, ByteArray(0), null, e, "${e.javaClass.simpleName}: ${e.message}")
         }
-        val builder = HttpRequest.newBuilder(URI.create(url)).timeout(timeout).GET()
-        for ((k, v) in headers) builder.header(k, v)
-        directSends.incrementAndGet()
-        return try {
-            val resp = http.send(builder.build(), HttpResponse.BodyHandlers.ofByteArray())
-            resp.statusCode() to (resp.body() ?: ByteArray(0))
-        } catch (e: Exception) {
-            -1 to ByteArray(0)
+        if (t != null) {
+            if (DesktopOhttp.isEligible(uri, t)) {
+                return try { viaOhttp(t, method, uri, headers, contentType, body, timeout, fresh = false) }
+                catch (e: IOException) { Raw(-1, ByteArray(0), null, e, "${e.javaClass.simpleName}: ${e.message}") }
+            }
+            return coverOrDirectRaw(method, uri, headers, contentType, body, timeout)
+        }
+        val fb = try { fallback() } catch (_: Exception) { null }
+        if (fb == null || !DesktopOhttp.isEligible(uri, fb)) return coverOrDirectRaw(method, uri, headers, contentType, body, timeout)
+        if (RelayFallback.active()) {
+            return try { viaOhttp(fb, method, uri, headers, contentType, body, timeout, fresh = true) }
+            catch (e: IOException) { RelayFallback.onRelayFailure(e); Raw(-1, ByteArray(0), null, e, "relay fallback: ${e.javaClass.simpleName}: ${e.message}") }
+        }
+        val direct = coverOrDirectRaw(method, uri, headers, contentType, body, timeout)
+        val failure = direct.failure ?: run { RelayFallback.onDirectSuccess(); return direct }
+        if (!RelayFallback.onDirectFailure(failure)) return direct
+        return try { viaOhttp(fb, method, uri, headers, contentType, body, timeout, fresh = true) }
+        catch (e: IOException) {
+            RelayFallback.onRelayFailure(e); e.addSuppressed(failure)
+            Raw(-1, ByteArray(0), null, e, "relay fallback: ${e.javaClass.simpleName}: ${e.message}")
         }
     }
 
-    /** __OHTTP_DESKTOP_2026_11_10__ What [viaOhttp] decided for one request. */
-    private sealed interface OhttpOutcome {
-        /** Setting off / unavailable, or not a `https://oshi-messenger.com/v2/` URL. */
-        data object Direct : OhttpOutcome
-        class Answered(val inner: DesktopOhttp.Inner) : OhttpOutcome
-        /** OHTTP was REQUIRED and failed. The caller must not go direct. */
-        class Failed(val why: String) : OhttpOutcome
+    private fun viaOhttp(
+        t: DesktopOhttpTransport, method: String, uri: URI, headers: Map<String, String>,
+        contentType: String?, body: ByteArray?, timeout: Duration, fresh: Boolean,
+    ): Raw {
+        val all = headers + listOfNotNull(contentType?.let { "Content-Type" to it })
+        // The fallback relay sits in the same kind of hosting as the main server: on a
+        // per-connection-capped network it gets the same one-connection-per-exchange policy.
+        val short = fresh && DesktopCover.ShortConnections.active()
+        val client = if (short) DesktopCover.ShortConnections.freshClient(http) else http
+        try {
+            val inner = DesktopOhttp.exchange(client, t, method, uri, all, body, timeout)
+            return Raw(inner.status, inner.body, inner.header("content-range"))
+        } catch (e: IOException) {
+            if (fresh) DesktopCover.ShortConnections.onFailure(e)
+            throw e
+        } finally { if (short) DesktopCover.ShortConnections.discard(client) }
+    }
+
+    /** The cover carrier when ON, else direct. Never throws: a failure is code -1 with [Raw.failure]. */
+    private fun coverOrDirectRaw(
+        method: String, uri: URI, headers: Map<String, String>,
+        contentType: String?, body: ByteArray?, timeout: Duration,
+    ): Raw {
+        if (cover() && DesktopCover.isEligible(uri)) {
+            return try {
+                val c = DesktopCover.exchange(http, method, uri, headers + listOfNotNull(contentType?.let { "content-type" to it }), body, timeout)
+                Raw(c.status, c.body, c.contentRange)
+            } catch (e: IOException) {
+                Raw(-1, ByteArray(0), null, e, "cover: ${e.javaClass.simpleName}: ${e.message}")
+            } catch (e: Exception) {
+                val io = IOException(e.message, e)
+                Raw(-1, ByteArray(0), null, io, "cover: ${e.javaClass.simpleName}: ${e.message}")
+            }
+        }
+        val publisher = if (body == null) HttpRequest.BodyPublishers.noBody() else HttpRequest.BodyPublishers.ofByteArray(body)
+        val builder = HttpRequest.newBuilder(uri).timeout(timeout)
+        for ((k, v) in headers) builder.header(k, v)
+        contentType?.let { builder.header("Content-Type", it) }
+        builder.method(method, publisher)
+        directSends.incrementAndGet()
+        // __COVER_SHORT_CONNECTIONS_2026_11_19__ the cover's rule applies to direct sends too:
+        // after a stall, one connection per exchange (a per-connection cap does not care
+        // whether the bytes are disguised).
+        val short = DesktopCover.ShortConnections.active()
+        val client = if (short) DesktopCover.ShortConnections.freshClient(http) else http
+        if (short) builder.version(HttpClient.Version.HTTP_1_1)
+        return try {
+            val resp = NetClients.sendBounded(client, builder.build(), MAX_DIRECT_RESPONSE, timeout, "Response too large")
+            Raw(resp.statusCode(), resp.body() ?: ByteArray(0), resp.headers().firstValue("Content-Range").orElse(null))
+        } catch (e: IOException) {
+            // A transport failure and an HTTP error must not look the same to a caller
+            // that decides whether to fall back to another path — but neither may throw
+            // out of a send loop. -1 is "never reached the server".
+            DesktopCover.ShortConnections.onFailure(e)
+            Raw(-1, ByteArray(0), null, e, "${e.javaClass.simpleName}: ${e.message}")
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            Raw(-1, ByteArray(0), null, IOException("interrupted", e), "InterruptedException: ${e.message}")
+        } catch (e: Exception) {
+            Raw(-1, ByteArray(0), null, IOException(e.message, e), "${e.javaClass.simpleName}: ${e.message}")
+        } finally { if (short) DesktopCover.ShortConnections.discard(client) }
     }
 
     /** __OHTTP_DESKTOP_2026_11_10__ Requests that left DIRECT (not via OHTTP). For tests: proves "no fallback". */
     internal val directSends = java.util.concurrent.atomic.AtomicInteger()
 
-    private fun viaOhttp(
-        method: String,
-        url: String,
-        headers: Map<String, String>,
-        body: ByteArray?,
-        timeout: Duration,
-    ): OhttpOutcome {
-        val uri = URI.create(url)
-        return try {
-            val t = DesktopOhttp.resolve(ohttp) ?: return OhttpOutcome.Direct
-            if (!DesktopOhttp.isEligible(uri, t)) return OhttpOutcome.Direct
-            OhttpOutcome.Answered(DesktopOhttp.exchange(http, t, method, uri, headers, body, timeout))
-        } catch (e: Exception) {
-            OhttpOutcome.Failed("${e.javaClass.simpleName}: ${e.message}")
-        }
-    }
-
     companion object {
         private val EMPTY = ByteArray(0)
+        /** A blob chunk is <= 2 MiB; a pull page <= 2 MiB. Generous, but bounded. */
+        private const val MAX_DIRECT_RESPONSE = 32 * 1024 * 1024
 
         /**
          * The relay. `OSHI_SERVER` overrides it, which is how the tests point this at a
