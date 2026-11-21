@@ -110,6 +110,8 @@ fun runUiCli(args: Array<String>) {
     // __SCREEN_CAPTURE_PROTECTION_2026_11_20__ before the first window (the splash included).
     com.oshi.desktop.store.ScreenCapturePreference.attach(home)
     WindowCaptureGuard.install()
+    // __LINUX_DARK_TITLE_BAR_2026_11_21__ after the theme is read, before the first window.
+    LinuxTitleBar.install()
 
     // __O_BUBBLE_MASCOT_2026_11_16__ Logo → waving O bubble while the vault opens and the
     // window builds. It closes itself when any window of ours opens; see LaunchSplash.

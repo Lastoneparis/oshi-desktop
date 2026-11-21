@@ -53,6 +53,58 @@ object LinuxTitleBar {
         fun XFlush(d: Pointer): Int
     }
 
+    /**
+     * The variant for the theme as it is NOW (Compose snapshot state, read on the EDT), or null.
+     */
+    fun currentVariant(): String? = runCatching {
+        variant(com.oshi.desktop.store.DesktopPaths.isLinux, System::getenv,
+            OshiTheme.appearance.mode == ThemeMode.SYSTEM, OshiTheme.palette.isDark)
+    }.getOrNull()
+
+    @Volatile private var installed = false
+
+    /**
+     * Sets the hint on every OSHI window the moment AWT creates its X window — BEFORE it is mapped.
+     * Mutter (GNOME 44+ draws frames in a separate client) reads `_GTK_THEME_VARIANT` when it
+     * frames a window; a hint set after the window is on screen was stored but not drawn (seen on
+     * GNOME 46 in linux-qa). Call once, before the first window.
+     */
+    fun install() {
+        if (installed || !com.oshi.desktop.store.DesktopPaths.isLinux) return
+        installed = true
+        runCatching {
+            java.awt.Toolkit.getDefaultToolkit().addAWTEventListener({ e ->
+                if (e is java.awt.event.HierarchyEvent &&
+                    (e.changeFlags and java.awt.event.HierarchyEvent.DISPLAYABILITY_CHANGED.toLong()) != 0L
+                ) {
+                    val w = e.component as? java.awt.Window
+                    if (w != null && w.isDisplayable) currentVariant()?.let { apply(w, it) }
+                }
+            }, java.awt.AWTEvent.HIERARCHY_EVENT_MASK)
+        }
+    }
+
+    /**
+     * After a theme change on a window that is already framed: set the hint, then have the window
+     * manager frame it again (unmap + map of the same window, contents and position kept), since
+     * the frame is drawn from the hint read at framing time.
+     */
+    fun applyLive(window: java.awt.Window, variant: String): Boolean {
+        if (!apply(window, variant)) return false
+        if (!window.isShowing || System.getenv("OSHI_TITLEBAR_NO_REFRAME") == "1") return true
+        java.awt.EventQueue.invokeLater {
+            runCatching {
+                val bounds = window.bounds
+                val focused = window.isFocused
+                window.isVisible = false
+                window.isVisible = true
+                window.bounds = bounds
+                if (focused) window.toFront()
+            }
+        }
+        return true
+    }
+
     private val x11: X11? by lazy { runCatching { Native.load("X11", X11::class.java) }.getOrNull() }
 
     /** Applies [variant] to [window]'s X11 window and every ancestor below the root (the WM reads the client top level). */
@@ -90,11 +142,18 @@ internal fun LinuxTitleBarAppearance(window: java.awt.Window) {
     if (!com.oshi.desktop.store.DesktopPaths.isLinux) return
     val mode = OshiTheme.appearance.mode
     val dark = OshiTheme.palette.isDark
+    // The first value is set before the window is mapped (LinuxTitleBar.install); this effect
+    // handles CHANGES, which need the window manager to frame the window again.
+    val framed = androidx.compose.runtime.remember(window) {
+        arrayOf(LinuxTitleBar.variant(true, System::getenv, mode == ThemeMode.SYSTEM, dark))
+    }
     LaunchedEffect(window, mode, dark) {
         val v = LinuxTitleBar.variant(true, System::getenv, mode == ThemeMode.SYSTEM, dark) ?: return@LaunchedEffect
+        val changed = v != framed[0]
         // The X window exists only once AWT has realised the frame; retry briefly until it has.
         repeat(20) {
-            if (LinuxTitleBar.apply(window, v)) return@LaunchedEffect
+            val ok = if (changed) LinuxTitleBar.applyLive(window, v) else LinuxTitleBar.apply(window, v)
+            if (ok) { framed[0] = v; return@LaunchedEffect }
             delay(250)
         }
     }

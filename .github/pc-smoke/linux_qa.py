@@ -198,10 +198,14 @@ def title_bar(name):
     try:
         m1 = re.search(r"Position:\s*(\d+),(\d+)", geo); m2 = re.search(r"Geometry:\s*(\d+)x(\d+)", geo)
         x, y, w = int(m1.group(1)), int(m1.group(2)), int(m2.group(1))
+        ext = subprocess.run(["xprop", "-id", wid, "_NET_FRAME_EXTENTS"], capture_output=True, text=True).stdout
+        m3 = re.search(r"=\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)", ext)
+        top = int(m3.group(3)) if m3 else 30
+        print(f"   geometry {x},{y} w={w} frame-top={top} ({ext.strip()})")
         from PIL import Image
         img = Image.open(p).convert("L")
-        # the frame's title bar is above the client area; sample a strip left of centre (avoid the title text)
-        ys = [yy for yy in range(max(0, y - 30), max(1, y - 6))]
+        # the WM's title bar is the `top` frame extent above the client; middle rows, left of the title text
+        ys = list(range(max(0, y - top + top // 4), max(1, y - top // 4)))
         xs = range(x + 20, x + w // 3)
         vals = [img.getpixel((xx, yy)) for yy in ys for xx in xs if 0 <= xx < img.width and 0 <= yy < img.height]
         lum = round(sum(vals) / len(vals), 1) if vals else None
@@ -256,6 +260,17 @@ def gnome(exe, work):
     dark_prop, dark_lum, shot_d = title_bar("gnome-dark-titlebar")
     S.record("GNOME Dark/OLED: _GTK_THEME_VARIANT is dark", "dark" in dark_prop, dark_prop)
     S.record("GNOME Dark/OLED: the title bar Mutter draws is dark", dark_lum is not None and dark_lum < 110, f"luminance={dark_lum} light-run={LIGHT_TITLE.get('lum')} {shot_d}")
+    # What OSHI does on a LIVE theme change (LinuxTitleBar.applyLive): new hint, then unmap + map.
+    wid = (window_ids() or [None])[0]
+    if wid:
+        subprocess.run(["xprop", "-id", wid, "-f", "_GTK_THEME_VARIANT", "8u", "-set", "_GTK_THEME_VARIANT", "light"])
+        time.sleep(2)
+        _, lum_set_only, _ = title_bar("gnome-live-hint-only")
+        subprocess.run(["xdotool", "windowunmap", "--sync", wid]); time.sleep(1)
+        subprocess.run(["xdotool", "windowmap", "--sync", wid]); time.sleep(3)
+        _, lum_reframed, _ = title_bar("gnome-live-reframed")
+        S.record("GNOME: a live hint change shows after the window is framed again", lum_reframed is not None and lum_reframed > 170,
+                 f"hint only={lum_set_only} after unmap/map={lum_reframed}", must=False)
     g.stop()
 
 
