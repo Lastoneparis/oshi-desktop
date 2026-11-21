@@ -753,6 +753,9 @@ def run_all(gui_exe, console_exe, homes, app):
     record("French window alive", g.alive(), g.log()[-800:])
     g.stop()
 
+    # 4b ----------------------------------------------------------------- in-app update prompt
+    update_prompt_check(gui_exe, homes / "update")
+
     # 5 ------------------------------------------------------------------ voice note through the installed jars
     if have_voice and app is not None:
         voice_note_check(app, voice)
@@ -764,6 +767,62 @@ def run_all(gui_exe, console_exe, homes, app):
         record(f"no uncaught exception in {f.name}", not fatal, "\n".join(fatal[:30]))
         other = [l for l in txt.splitlines() if re.search(r"Exception|Error:|at com\.oshi", l)]
         record(f"no exception text in {f.name}", not other, "\n".join(other[:40]), must=False)
+
+
+def update_prompt_check(gui_exe, home):
+    """__DESKTOP_AUTO_UPDATE_2026_11_21__ The window offers a newer release from a SIGNED manifest.
+
+    Serves the unit tests' fixture (version 9.8.7, signed by a throwaway TEST key, never the
+    release key) on loopback, and points the app at it with the only override the app honours:
+    OSHI_UPDATE_MANIFEST_URL *and* OSHI_UPDATE_PUBKEY together. Nothing is downloaded or installed.
+    """
+    import http.server
+    fx = Path(__file__).resolve().parents[2] / "src" / "test" / "resources" / "update"
+    if not (fx / "desktop-latest.json").is_file():
+        record("update fixture present", False, str(fx), must=False)
+        return
+    files = {"/desktop-latest.json": (fx / "desktop-latest.json").read_bytes(),
+             "/desktop-latest.json.sig": (fx / "desktop-latest.json.sig").read_bytes()}
+    hits = []
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            hits.append(self.path)
+            b = files.get(self.path)
+            self.send_response(200 if b else 404)
+            self.send_header("Content-Length", str(len(b or b"")))
+            self.end_headers()
+            if b:
+                self.wfile.write(b)
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    env = {"OSHI_UPDATE_MANIFEST_URL": f"http://127.0.0.1:{srv.server_address[1]}/desktop-latest.json",
+           "OSHI_UPDATE_PUBKEY": "/HmfjSMmAVT4Y1ufGFB2FRX494xps2fUhgdsxU0qX9A=",
+           "OSHI_UPDATE_FIRST_CHECK_SECONDS": "5"}
+    g = Gui(gui_exe, home, "update", env_extra=env)
+    try:
+        g.wait_window(90); time.sleep(10)
+        if not click_create("update-click-create"):
+            record("update profile created", False, must=False)
+            return
+        deadline = time.time() + 90
+        t = ""
+        while time.time() < deadline:
+            time.sleep(10)
+            t = screen_text("update-prompt")
+            if re.search(r"9\.8\.7", t) and re.search(r"available", t, re.I):
+                break
+        record("the app fetched the manifest AND its signature", "/desktop-latest.json" in hits and "/desktop-latest.json.sig" in hits,
+               ", ".join(hits), must=False)
+        record("the window offers OSHI 9.8.7 (signed test manifest)", re.search(r"9\.8\.7", t) is not None, t[:800], must=False)
+        record("update window alive", g.alive(), g.log()[-800:])
+    finally:
+        g.stop()
+        srv.shutdown()
 
 
 def voice_note_check(app, m4a):

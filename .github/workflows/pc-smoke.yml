@@ -17,7 +17,7 @@ name: pc-smoke
 
 on:
   push:
-    branches: ['ci/pc-smoke', 'ci/desktop-151', 'ci/desktop-160']
+    branches: ['ci/pc-smoke', 'ci/desktop-151', 'ci/desktop-160', 'ci/desktop-161-linux', 'ci/desktop-161']
   workflow_dispatch:
 
 concurrency:
@@ -25,10 +25,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PUBLISHED_PREVIOUS: '1.5.1'
+  PUBLISHED_PREVIOUS: '1.6.0'
   # A ci/desktop-* branch is a release CANDIDATE: its installers are built from the branch.
   # Anything else smokes the PUBLISHED files (oshi-messenger.com, checked against SHA256SUMS).
-  TEST_VERSION: ${{ startsWith(github.ref_name, 'ci/desktop-') && '1.6.0' || '1.6.0' }}
+  TEST_VERSION: '1.6.1'
   SMOKE_SOURCE: ${{ startsWith(github.ref_name, 'ci/desktop-') && 'build' || 'published' }}
   PYTHONIOENCODING: utf-8
   PYTHONUTF8: '1'
