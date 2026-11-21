@@ -21,7 +21,8 @@ class SleepInhibitorTest {
         assertTrue(linux.contains("--what=idle:sleep"))
 
         val win = SleepInhibitor(os = "Windows 11", pid = 777).command()!!
-        assertEquals("powershell.exe", win.first())
+        // By absolute path on a real Windows host (eeadaabd), bare name elsewhere.
+        assertTrue(win.first(), win.first().lowercase().endsWith("powershell.exe"))
         val script = win.last()
         assertTrue("ES_CONTINUOUS|ES_SYSTEM_REQUIRED|ES_DISPLAY_REQUIRED", script.contains("0x80000003"))
         assertTrue("exits with us", script.contains("Get-Process -Id 777"))

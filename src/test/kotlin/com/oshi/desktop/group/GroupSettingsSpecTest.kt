@@ -16,7 +16,9 @@ import java.io.File
  */
 class GroupSettingsSpecTest {
 
-    private val fixtures = File("../docs/fixtures/group_settings_v1")
+    // Walk up: ../docs in the monorepo, ./docs in the public repo (whose root IS the desktop project).
+    private val fixtures = generateSequence(File("").absoluteFile) { it.parentFile }
+        .map { File(it, "docs/fixtures/group_settings_v1") }.first { it.isDirectory }
     private fun fixture(name: String) = File(fixtures, name).readText(Charsets.UTF_8)
 
     private val admin = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="

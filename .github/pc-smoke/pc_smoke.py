@@ -151,7 +151,40 @@ def make_m4a(path):
 
 
 # --------------------------------------------------------------------------- screen
+def hide_runner_consoles():
+    """__RUNNER_CONSOLE_2026_11_21__ The windows-latest image of 2026-11-11 shows the runner's own
+    agent console ("C:\\ProgramData\\GitHub\\Host", a Windows Terminal window) ON TOP of
+    everything, so every screenshot was that console: OCR checks failed, or passed vacuously on its
+    text. Minimise terminal/console windows that are not OSHI's before each screenshot."""
+    if not IS_WIN:
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+        u = ctypes.windll.user32
+        cb_t = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        found = []
+        def cb(hwnd, _):
+            if u.IsWindowVisible(hwnd) and not u.IsIconic(hwnd):
+                cls = ctypes.create_unicode_buffer(256)
+                u.GetClassNameW(hwnd, cls, 256)
+                n = u.GetWindowTextLengthW(hwnd)
+                t = ctypes.create_unicode_buffer(n + 1)
+                u.GetWindowTextW(hwnd, t, n + 1)
+                if cls.value in ("CASCADIA_HOSTING_WINDOW_CLASS", "ConsoleWindowClass") and not t.value.startswith("OSHI"):
+                    found.append(hwnd)
+            return True
+        u.EnumWindows(cb_t(cb), 0)
+        for h in found:
+            u.ShowWindow(h, 6)  # SW_MINIMIZE
+        if found:
+            time.sleep(0.5)
+    except Exception as e:
+        print(f"   hide_runner_consoles failed: {e}")
+
+
 def shot(name):
+    hide_runner_consoles()
     try:
         from PIL import ImageGrab
         img = ImageGrab.grab(all_screens=True) if IS_WIN else ImageGrab.grab()
