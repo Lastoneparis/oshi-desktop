@@ -11,11 +11,15 @@ set -e
 APPDIR=/opt/oshi-desktop/oshi-desktop
 
 unregister_menu() {
-    command -v xdg-desktop-menu >/dev/null 2>&1 || return 0
     for d in "$APPDIR"/lib/*.desktop; do
         [ -e "$d" ] || continue
-        xdg-desktop-menu uninstall --novendor "$d" >/dev/null 2>&1 || return 0
+        if command -v xdg-desktop-menu >/dev/null 2>&1; then
+            xdg-desktop-menu uninstall --novendor "$d" >/dev/null 2>&1 || true
+        fi
+        # __MENU_ENTRY_WITHOUT_XDG_MENUS_2026_11_21__ the copy postinst may have made instead.
+        rm -f "/usr/share/applications/$(basename "$d")" 2>/dev/null || true
     done
+    command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q /usr/share/applications >/dev/null 2>&1 || true
     return 0
 }
 

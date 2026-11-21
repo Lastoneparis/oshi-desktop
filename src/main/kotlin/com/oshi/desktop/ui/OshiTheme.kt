@@ -215,7 +215,7 @@ object OshiTheme {
     // Theme.swift:86-91. Sizes and weights verbatim; family is the platform default —
     // see THE ONE DELIBERATE DEPARTURE above.
 
-    private val family = FontFamily.SansSerif
+    private val family: FontFamily = LinuxFonts.family() ?: FontFamily.SansSerif
 
     val typography = Typography(
         headlineLarge = TextStyle(fontFamily = family, fontSize = 28.sp, fontWeight = FontWeight.Bold),

@@ -26,6 +26,8 @@ fun main(args: Array<String>) {
     // __DESKTOP_CERT_PINNING_2026_11_20__ before any client exists: every TLS connection to
     // oshi-messenger.com must match the phones' pins.
     com.oshi.desktop.net.CertificatePins.installDefault()
+    // __LINUX_HIDPI_2026_11_21__ before ANY AWT class loads (linuxWindowClass starts the toolkit).
+    runCatching { com.oshi.desktop.ui.LinuxUiScale.applyIfNeeded() }
     linuxWindowClass()
     // BEFORE the --mesh branch, deliberately: `--ui --mesh` means "the window, with the
     // mesh node running underneath it", not "the mesh CLI". A flag that silently means a

@@ -1696,6 +1696,43 @@ val packageDeb = registerJpackage(
     ) + resourceDirArgs("linux"),
 )
 
+/**
+ * __DEB_T64_DEPENDENCY_2026_11_21__ jpackage maps each linked library to the package that owns it
+ * ON THE BUILD HOST. Built on Ubuntu 24.04 that is `libasound2t64` — a name that does not exist on
+ * Ubuntu 22.04, Linux Mint 21, Debian 12 or anything before the 64-bit time_t transition, so apt
+ * refused the .deb there outright ("libasound2t64 is not installable"). The t64 package Provides
+ * `libasound2`, so `libasound2t64 | libasound2` installs on both generations. Rewritten in the
+ * built package's control file; any other `*t64` dependency gets the same alternative.
+ */
+packageDeb.configure {
+    doLast {
+        val deb = jpackageOutputDir.get().asFile.listFiles { f -> f.name.endsWith(".deb") }?.maxByOrNull { it.lastModified() }
+            ?: throw GradleException("packageDeb produced no .deb")
+        val work = layout.buildDirectory.dir("jpackage/deb-rewrite").get().asFile.apply { deleteRecursively(); mkdirs() }
+        fun run(vararg cmd: String) {
+            val p = ProcessBuilder(*cmd).redirectErrorStream(true).start()
+            val out = p.inputStream.bufferedReader().readText()
+            if (p.waitFor() != 0) throw GradleException("${cmd.joinToString(" ")} failed:\n$out")
+        }
+        run("dpkg-deb", "-R", deb.absolutePath, work.absolutePath)
+        val control = File(work, "DEBIAN/control")
+        val before = control.readText()
+        val after = before.lines().joinToString("\n") { line ->
+            if (!line.startsWith("Depends:")) line
+            else "Depends: " + line.removePrefix("Depends:").split(',').map { it.trim() }.filter { it.isNotEmpty() }.joinToString(", ") { dep ->
+                val name = dep.substringBefore(' ')
+                if (name.endsWith("t64") && '|' !in dep) "$dep | ${name.removeSuffix("t64")}" else dep
+            }
+        }
+        if (after != before) {
+            control.writeText(after)
+            run("fakeroot", "dpkg-deb", "-Zxz", "--build", "--root-owner-group", work.absolutePath, deb.absolutePath)
+            logger.lifecycle("[packageDeb] " + after.lines().first { it.startsWith("Depends:") })
+        }
+        work.deleteRecursively()
+    }
+}
+
 val packageRpm = registerJpackage(
     "packageRpm", "rpm", "Linux",
     listOf(

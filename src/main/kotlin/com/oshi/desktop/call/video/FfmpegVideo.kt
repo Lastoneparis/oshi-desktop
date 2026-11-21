@@ -402,8 +402,13 @@ class CameraCapture(
         // dshow without `vcodec` picks the raw pin, which then refuses that size — so MJPEG
         // is tried first there. `rtbufsize` is raised from dshow's 3 MB default, which at
         // 720p fills in a few frames and makes FFmpeg drop with "real-time buffer too full".
+        //
+        // __V4L2_MJPEG_FIRST_2026_11_21__ video4linux2 (Linux) has the same split: a UVC webcam
+        // offers 1280×720 at 30 fps as MJPEG, while raw YUYV at that size is 5–10 fps over USB 2,
+        // so the default raw pin gave a slideshow. `input_format=mjpeg` first; a camera (or a
+        // v4l2loopback device) without MJPEG refuses it and the raw attempts follow.
         val attempts: List<Pair<String?, String?>> =
-            if (fmtName == "dshow") listOf("1280x720" to "mjpeg", "1280x720" to null, "640x480" to "mjpeg", "640x480" to null, null to null)
+            if (fmtName == "dshow" || fmtName == "video4linux2") listOf("1280x720" to "mjpeg", "1280x720" to null, "640x480" to "mjpeg", "640x480" to null, null to null)
             else listOf("1280x720" to null, "640x480" to null, null to null)
         for ((size, vcodec) in attempts) {
             val c = AVFormatContext(null)
@@ -415,6 +420,7 @@ class CameraCapture(
                 avutil.av_dict_set(opts, "rtbufsize", "64M", 0)
                 if (vcodec != null) avutil.av_dict_set(opts, "vcodec", vcodec, 0)
             }
+            if (fmtName == "video4linux2" && vcodec != null) avutil.av_dict_set(opts, "input_format", vcodec, 0)
             val rc = avformat.avformat_open_input(c, device, input, opts)
             avutil.av_dict_free(opts)
             if (rc >= 0) { ctx = c; break }

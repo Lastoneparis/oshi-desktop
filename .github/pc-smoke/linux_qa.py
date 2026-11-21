@@ -46,7 +46,27 @@ def wm_class(wid):
 
 
 def ocr(name):
-    t = S.screen_text(name)
+    """Screenshot + OCR of the non-black area only, read twice (block and sparse layout): small red
+    error lines next to a black Xvfb background were dropped by a whole-screen pass."""
+    p = S.shot(name)
+    if not p:
+        return ""
+    t = ""
+    try:
+        import pytesseract
+        from PIL import Image, ImageOps
+        img = Image.open(p).convert("RGB")
+        box = ImageOps.grayscale(img).point(lambda v: 255 if v > 24 else 0).getbbox()
+        if box:
+            img = img.crop(box)
+        img = img.resize((img.width * 2, img.height * 2))
+        langs = os.environ.get("OCR_LANGS", "eng")
+        t = " ".join(pytesseract.image_to_string(img, lang=langs, config=f"--psm {m}") for m in (3, 11))
+        t = re.sub(r"\s+", " ", t)
+        Path(str(p) + ".ocr.txt").write_text(t, encoding="utf-8")
+    except Exception as e:
+        print(f"   OCR failed: {e}")
+        t = S.screen_text(name + "-fallback")
     print(f"   [{name}] {t[:300]}")
     return t
 
@@ -95,9 +115,9 @@ def nokeyring(exe, work):
     t = wait_text(r"Create|Import", "nokeyring-first-run", 60)
     S.record("the passphrase leads to the first-run screen", t is not None, t or g.log()[-1500:])
     S.click_create("nokeyring-create-identity")
-    t = wait_text(r"Messages|Chats|OSHI Team|Welcome", "nokeyring-main", 90)
+    t = wait_text(r"Select a chat|Chats|Filter chats", "nokeyring-main", 90)
     S.record("main window after creating the identity on a passphrase vault", t is not None, g.log()[-2000:])
-    vault = home / "vault.json"
+    vault = home / "keyvault.json"
     prot = ""
     try:
         prot = json.loads(vault.read_text()).get("protection", "")
@@ -123,7 +143,7 @@ def nokeyring(exe, work):
     t = wait_text(r"does not open", "nokeyring-wrong", 30)
     S.record("a wrong passphrase is refused and asked again", t is not None, t or g.log()[-1500:])
     select_all_and_type(PASS); S.key("enter")
-    t = wait_text(r"Messages|Chats|OSHI Team|Welcome", "nokeyring-main-2", 90)
+    t = wait_text(r"Select a chat|Chats|Filter chats", "nokeyring-main-2", 90)
     S.record("the right passphrase opens the same account", t is not None and "Create" not in (t or ""), g.log()[-2000:])
     g.stop()
     bad = [l for l in (S.OUT / "gui-nokeyring-1.log").read_text(errors="replace").splitlines() + g.log().splitlines()
@@ -131,17 +151,57 @@ def nokeyring(exe, work):
     S.record("no exception in the logs", not bad, "\n".join(bad[:20]), must=False)
 
 
+def window_width():
+    for wid in window_ids():
+        g = subprocess.run(["xdotool", "getwindowgeometry", wid], capture_output=True, text=True).stdout
+        m = re.search(r"Geometry:\s*(\d+)x(\d+)", g)
+        if m:
+            return int(m.group(1)), g
+    return None, ""
+
+
+def hidpi(exe, work):
+    """Xft.dpi 192 on a 3840x2160 X11 screen: the window must open at 2x (1180dp -> ~2360px)."""
+    subprocess.run(["xrdb", "-merge"], input="Xft.dpi: 192\n", text=True)
+    g = gui(exe, work / "hidpi", "hidpi", env_extra={"OSHI_PASSPHRASE": PASS})
+    g.wait_window(90); time.sleep(8)
+    w, geo = window_width()
+    ocr("hidpi-first-run")
+    S.record("HiDPI (Xft.dpi 192, X11): the window opens at scale 2", w is not None and w >= 1700, f"width={w} {geo} log={g.log()[-600:]}")
+    g.stop()
+    subprocess.run(["xrdb", "-merge"], input="Xft.dpi: 96\n", text=True)
+    g = gui(exe, work / "hidpi", "lodpi", env_extra={"OSHI_PASSPHRASE": PASS})
+    g.wait_window(90); time.sleep(8)
+    w1, geo1 = window_width()
+    S.record("Xft.dpi 96: the window opens at scale 1", w1 is not None and w1 < 1700, f"width={w1} {geo1}")
+    g.stop()
+
+
+def shell_eval(js):
+    r = subprocess.run(["gdbus", "call", "--session", "--dest", "org.gnome.Shell", "--object-path", "/org/gnome/Shell",
+                        "--method", "org.gnome.Shell.Eval", js], capture_output=True, text=True, timeout=20)
+    return (r.stdout + r.stderr).strip()
+
+
 def gnome(exe, work):
     home = work / "gnome"
+    print("   overview hide:", shell_eval("Main.overview.hide(); 'ok'"))
+    time.sleep(2)
     g = gui(exe, home, "gnome-1", env_extra={"OSHI_PASSPHRASE": PASS})
     w = g.wait_window(120)
     S.record("GNOME: a window opens on Xwayland", bool(w), g.log()[-1500:])
     time.sleep(5)
     t = wait_text(r"Create|Import", "gnome-first-run", 60)
     S.record("GNOME: first-run screen is drawn", t is not None, t or "")
+    print("   overview hide:", shell_eval("Main.overview.hide(); 'ok'"))
+    time.sleep(2)
     S.click_create("gnome-create")
-    t = wait_text(r"Messages|Chats|OSHI Team|Welcome", "gnome-main", 90)
+    t = wait_text(r"Select a chat|Chats|Filter chats", "gnome-main", 90)
     S.record("GNOME: main window", t is not None, g.log()[-1500:])
+    apps = shell_eval("global.get_window_actors().map(a => { const w = a.meta_window; "
+                      "const app = Shell.WindowTracker.get_default().get_window_app(w); "
+                      "return w.get_wm_class() + ' -> ' + (app ? app.get_id() : 'none'); }).join('; ')")
+    S.record("GNOME: the OSHI window belongs to the OSHI app (dock icon, pinning)", "OSHI.desktop" in apps or "oshi" in apps.lower().split("->")[-1], apps, must=False)
     subprocess.run(["notify-send", "--app-name=OSHI", "OSHI", "notification test"])
     time.sleep(2)
     ocr("gnome-notification")
@@ -159,13 +219,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--app", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--scenario", choices=["nokeyring", "gnome"], required=True)
+    ap.add_argument("--scenario", choices=["nokeyring", "gnome", "hidpi"], required=True)
     a = ap.parse_args()
     S.OUT = Path(a.out).resolve(); (S.OUT / "shots").mkdir(parents=True, exist_ok=True)
     exe = Path(a.app) / "bin" / "OSHI"
     work = S.OUT / "work"; work.mkdir(parents=True, exist_ok=True)
     try:
-        {"nokeyring": nokeyring, "gnome": gnome}[a.scenario](exe, work)
+        {"nokeyring": nokeyring, "gnome": gnome, "hidpi": hidpi}[a.scenario](exe, work)
     except Exception:
         S.record("driver crashed", False, traceback.format_exc())
     finally:
