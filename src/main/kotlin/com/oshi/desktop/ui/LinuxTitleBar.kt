@@ -21,6 +21,11 @@ import kotlinx.coroutines.delay
  * re-read it when it changes. So: "dark" in Dark/OLED, "light" in Light, and the property REMOVED
  * when the theme follows the system (the WM's own theme then decides, as before).
  *
+ * MEASURED LIMIT (linux-qa, GNOME Shell 46 on Wayland, app on Xwayland): the hint is on the
+ * window (xprop: "dark") but the frame mutter-x11-frames draws stays LIGHT, whether the hint is set
+ * before mapping or after, and after an unmap/map. GNOME's frame follows the desktop-wide style,
+ * not this hint, there. Not measured: Metacity/Marco/Muffin/xfwm4, which document honouring it.
+ *
  * KDE's KWin ignores it (it reads `_KDE_NET_WM_COLOR_SCHEME`, a colour-scheme FILE path), so KDE is
  * left alone. Everything is guarded: no Xlib, no DISPLAY, an unknown window, any native error — it
  * does nothing, and a title bar is never a reason for the window to fail.
@@ -84,27 +89,6 @@ object LinuxTitleBar {
         }
     }
 
-    /**
-     * After a theme change on a window that is already framed: set the hint, then have the window
-     * manager frame it again (unmap + map of the same window, contents and position kept), since
-     * the frame is drawn from the hint read at framing time.
-     */
-    fun applyLive(window: java.awt.Window, variant: String): Boolean {
-        if (!apply(window, variant)) return false
-        if (!window.isShowing || System.getenv("OSHI_TITLEBAR_NO_REFRAME") == "1") return true
-        java.awt.EventQueue.invokeLater {
-            runCatching {
-                val bounds = window.bounds
-                val focused = window.isFocused
-                window.isVisible = false
-                window.isVisible = true
-                window.bounds = bounds
-                if (focused) window.toFront()
-            }
-        }
-        return true
-    }
-
     private val x11: X11? by lazy { runCatching { Native.load("X11", X11::class.java) }.getOrNull() }
 
     /** Applies [variant] to [window]'s X11 window and every ancestor below the root (the WM reads the client top level). */
@@ -143,17 +127,15 @@ internal fun LinuxTitleBarAppearance(window: java.awt.Window) {
     val mode = OshiTheme.appearance.mode
     val dark = OshiTheme.palette.isDark
     // The first value is set before the window is mapped (LinuxTitleBar.install); this effect
-    // handles CHANGES, which need the window manager to frame the window again.
+    // keeps the hint in step with later theme changes (WMs that re-read it pick it up).
     val framed = androidx.compose.runtime.remember(window) {
         arrayOf(LinuxTitleBar.variant(true, System::getenv, mode == ThemeMode.SYSTEM, dark))
     }
     LaunchedEffect(window, mode, dark) {
         val v = LinuxTitleBar.variant(true, System::getenv, mode == ThemeMode.SYSTEM, dark) ?: return@LaunchedEffect
-        val changed = v != framed[0]
         // The X window exists only once AWT has realised the frame; retry briefly until it has.
         repeat(20) {
-            val ok = if (changed) LinuxTitleBar.applyLive(window, v) else LinuxTitleBar.apply(window, v)
-            if (ok) { framed[0] = v; return@LaunchedEffect }
+            if (LinuxTitleBar.apply(window, v)) { framed[0] = v; return@LaunchedEffect }
             delay(250)
         }
     }

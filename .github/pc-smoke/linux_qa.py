@@ -187,31 +187,27 @@ LIGHT_TITLE = {}
 
 
 def title_bar(name):
-    """(_GTK_THEME_VARIANT of the OSHI window, mean luminance of a strip of its WM title bar, shot)."""
+    """(_GTK_THEME_VARIANT of the OSHI window, mean luminance of its WM title bar, shot).
+    The frame rectangle comes from the Shell (stage coordinates = the screenshot's): Xwayland's own
+    coordinates are offset, which made an earlier sampler read the client area and pass falsely."""
     wid = (window_ids() or [None])[0]
     if wid is None:
         return "no window", None, None
     prop = subprocess.run(["xprop", "-id", wid, "_GTK_THEME_VARIANT"], capture_output=True, text=True).stdout.strip()
-    geo = subprocess.run(["xdotool", "getwindowgeometry", wid], capture_output=True, text=True).stdout
+    rect = shell_eval("global.get_window_actors().map(a => a.meta_window).filter(w => w.get_wm_class() === 'OSHI')"
+                      ".map(w => { const f = w.get_frame_rect(), b = w.get_buffer_rect(); return [f.x, f.y, f.width, f.height].join(','); }).join(';')")
     p = S.shot(name)
     lum = None
     try:
-        m1 = re.search(r"Position:\s*(\d+),(\d+)", geo); m2 = re.search(r"Geometry:\s*(\d+)x(\d+)", geo)
-        x, y, w = int(m1.group(1)), int(m1.group(2)), int(m2.group(1))
-        ext = subprocess.run(["xprop", "-id", wid, "_NET_FRAME_EXTENTS"], capture_output=True, text=True).stdout
-        m3 = re.search(r"=\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)", ext)
-        top = int(m3.group(3)) if m3 else 30
-        print(f"   geometry {x},{y} w={w} frame-top={top} ({ext.strip()})")
+        x, y, w, h = [int(v) for v in re.search(r"(\d+),(\d+),(\d+),(\d+)", rect).groups()]
         from PIL import Image
         img = Image.open(p).convert("L")
-        # the WM's title bar is the `top` frame extent above the client; middle rows, left of the title text
-        ys = list(range(max(0, y - top + top // 4), max(1, y - top // 4)))
-        xs = range(x + 20, x + w // 3)
-        vals = [img.getpixel((xx, yy)) for yy in ys for xx in xs if 0 <= xx < img.width and 0 <= yy < img.height]
+        vals = [img.getpixel((xx, yy)) for yy in range(y + 6, y + 28) for xx in range(x + 20, x + w // 3)
+                if 0 <= xx < img.width and 0 <= yy < img.height]
         lum = round(sum(vals) / len(vals), 1) if vals else None
     except Exception as e:
-        print(f"   title bar sample failed: {e} {geo}")
-    print(f"   [{name}] {prop} luminance={lum}")
+        print(f"   title bar sample failed: {e} rect={rect}")
+    print(f"   [{name}] {prop} frame={rect} luminance={lum}")
     return prop, lum, str(p)
 
 
@@ -259,7 +255,8 @@ def gnome(exe, work):
     time.sleep(3)
     dark_prop, dark_lum, shot_d = title_bar("gnome-dark-titlebar")
     S.record("GNOME Dark/OLED: _GTK_THEME_VARIANT is dark", "dark" in dark_prop, dark_prop)
-    S.record("GNOME Dark/OLED: the title bar Mutter draws is dark", dark_lum is not None and dark_lum < 110, f"luminance={dark_lum} light-run={LIGHT_TITLE.get('lum')} {shot_d}")
+    # must=False: GNOME 46's frames (mutter-x11-frames) were measured NOT to follow the hint.
+    S.record("GNOME Dark/OLED: the title bar Mutter draws is dark", dark_lum is not None and dark_lum < 110, f"luminance={dark_lum} light-run={LIGHT_TITLE.get('lum')} {shot_d}", must=False)
     # What OSHI does on a LIVE theme change (LinuxTitleBar.applyLive): new hint, then unmap + map.
     wid = (window_ids() or [None])[0]
     if wid:
