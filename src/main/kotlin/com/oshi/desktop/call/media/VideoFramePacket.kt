@@ -184,7 +184,9 @@ object VideoFramePacket {
         while (o + 4 <= frameData.size) {
             var len = 0
             for (i in 0 until 4) len = (len shl 8) or (frameData[o + i].toInt() and 0xFF)
-            if (len <= 0 || o + 4 + len > frameData.size) return
+            // Do not add an attacker-controlled 32-bit length: `o + 4 + len` can wrap
+            // negative and turn an oversized NAL into an out-of-bounds visit.
+            if (len <= 0 || len > frameData.size - o - 4) return
             visit(frameData[o + 4].toInt() and 0x1F, o + 4, len)
             o += 4 + len
         }

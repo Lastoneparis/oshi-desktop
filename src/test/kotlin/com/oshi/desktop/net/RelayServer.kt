@@ -40,6 +40,8 @@ class RelayServer : AutoCloseable {
         val spkKey: String,
         val spkSig: String,
         val opks: ArrayDeque<Pair<String, String>>,
+        /** __V2_PADDING_2026_11_09__ stored and served like the real server (absent stays absent). */
+        val caps: Int? = null,
     )
 
     private class Stored(val seq: Long, val envelope: JSONObject)
@@ -76,6 +78,38 @@ class RelayServer : AutoCloseable {
     fun mailboxSize(userKey: String): Int = mailboxes[userKey]?.size ?: 0
     fun remainingOpks(userKey: String): Int = bundles[userKey]?.opks?.size ?: 0
     fun hasBundle(userKey: String): Boolean = bundles.containsKey(userKey)
+
+    /**
+     * __V2_PADDING_2026_11_09__ Serve THIS `caps` for a user's bundle whatever it published —
+     * how a test stands up an OLD client (caps 2, or [Int.MIN_VALUE] = no field at all) without
+     * shipping a second build.
+     */
+    val capsOverride = ConcurrentHashMap<String, Int>()
+
+    /** __MEDIA_PADDING_2026_11_10__ Serve THIS device list for `GET /v2/keys/:peer/devices`. */
+    val devicesOverride = ConcurrentHashMap<String, List<String>>()
+
+    /** __V2_PADDING_2026_11_09__ The envelopes queued for a user, as the relay stores them. */
+    fun queued(userKey: String): List<JSONObject> = mailboxes[userKey]?.map { it.envelope }.orEmpty()
+
+    /**
+     * __DESKTOP_RATCHET_HEAL_2026_10_29__ Rewrite the `from` on every queued envelope in one
+     * mailbox, so a test can present a real, correctly-sealed envelope under somebody else's
+     * name.
+     *
+     * A HOSTILE RELAY, which is exactly the threat model: the `from` field sits outside the
+     * AEAD (every `OSHIRatchetV2` call passes empty associated data), so the server can
+     * rewrite it and the ciphertext still verifies — to the wrong party. That is what the
+     * responder-side TOFU in `establishResponder` refuses, and testing it needs a relay that
+     * will actually lie.
+     *
+     * Only in the fake. A real relay doing this is the attack.
+     */
+    fun relabelSender(from: String, to: String, inMailboxOf: String) {
+        mailboxes[inMailboxOf]?.forEach { stored ->
+            if (stored.envelope.optString("from") == from) stored.envelope.put("from", to)
+        }
+    }
 
     /** Drop a message into a mailbox directly — for forging what a client would never send. */
     fun inject(toUserKey: String, envelope: JSONObject) {
@@ -178,6 +212,10 @@ class RelayServer : AutoCloseable {
 
     private val botSeq = AtomicLong(0)
 
+    /** __DESKTOP_REPORT_2026_09_23__ bodies POSTed to `/v2/report`, and the status to answer. */
+    val reports = java.util.concurrent.CopyOnWriteArrayList<org.json.JSONObject>()
+    @Volatile var reportStatus = 201
+
     private fun route(
         method: String,
         path: String,
@@ -235,6 +273,14 @@ class RelayServer : AutoCloseable {
 
             method == "GET" && segments.size == 3 && segments[1] == "keys" -> fetchBundle(segments[2])
 
+            // __MEDIA_PADDING_2026_11_10__ the per-device mailbox is off on this test relay — what
+            // production answers when it is disabled (an empty list, not a failure).
+            method == "GET" && segments.size == 4 && segments[1] == "keys" && segments[3] == "devices" ->
+                devicesOverride[segments[2]]?.let { list ->
+                    200 to JSONObject().put("enabled", true).put("devices",
+                        org.json.JSONArray().apply { list.forEach { put(JSONObject().put("deviceId", it)) } }).toString()
+                } ?: (200 to JSONObject().put("enabled", false).toString())
+
             method == "POST" && path == "/v2/messages" -> send(JSONObject(String(body)))
 
             method == "POST" && segments.size == 4 && segments[1] == "messages" && segments[3] == "ack" ->
@@ -257,6 +303,16 @@ class RelayServer : AutoCloseable {
                         .put("erased", JSONObject().put("prekeys", hadBundle)
                             .put("relay", JSONObject().put("envelopes", envelopes)))
                         .toString()
+                }
+            }
+
+            // __DESKTOP_REPORT_2026_09_23__ the report intake: same "signed account route"
+            // shape as the real server (x-oshi-user required), records what left the device.
+            method == "POST" && path == "/v2/report" -> {
+                if (userHeader.isNullOrEmpty()) 401 to """{"error":"unauthorized"}"""
+                else {
+                    if (reportStatus in 200..299) reports += org.json.JSONObject(String(body, Charsets.UTF_8))
+                    reportStatus to """{"ok":${reportStatus in 200..299}}"""
                 }
             }
 
@@ -284,6 +340,7 @@ class RelayServer : AutoCloseable {
             spkKey = spk.getString("key"),
             spkSig = spk.getString("signature"),
             opks = pool,
+            caps = if (body.has("caps")) body.optInt("caps") else null,
         )
         return 200 to JSONObject().put("remaining", pool.size).toString()
     }
@@ -296,6 +353,11 @@ class RelayServer : AutoCloseable {
             .put("signingKey", b.signingKey)
             .put("signedPreKey", JSONObject()
                 .put("keyId", b.spkId).put("key", b.spkKey).put("signature", b.spkSig))
+        when (val o = capsOverride[userKey]) {
+            null -> b.caps?.let { json.put("caps", it) }
+            Int.MIN_VALUE -> Unit
+            else -> json.put("caps", o)
+        }
         // POP one — oldest first, single use, gone for everyone else.
         b.opks.removeFirstOrNull()?.let { (id, key) ->
             json.put("oneTimePreKey", JSONObject().put("keyId", id).put("key", key))

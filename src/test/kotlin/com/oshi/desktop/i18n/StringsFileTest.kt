@@ -162,7 +162,168 @@ class StringsFileTest {
         // Bumping it without regenerating silences the alarm and ships stale catalogs.
         // 3824 → 3840 on 2026-09-11: sixteen keys added upstream, chat.load_earlier_messages
         // among them.
-        assertEquals("en Localizable key count", 3840, en.localizable.size)
+        // 3840 → 3960 on 2026-09-17, regenerated in this same change: 82 mail.*, 21
+        // premium.* (the new StoreKit paywall), 10 about.*, 8 bot.*, 5 settings.*, and a
+        // handful more. The about.* ones are a correction, not an addition — iOS stopped
+        // describing the encryption as "military-grade" and now names Double Ratchet, and
+        // the checked-in catalogs were still shipping the old claim in all 34 languages.
+        // 3960 → 3983 on 2026-09-20: GIF, short-video, LoRa-media and offline
+        // navigation copy was added in the iOS source and the checked-in desktop mirror
+        // was regenerated in the same change.
+        // 3983 → 3987 on 2026-09-22: nickname-edit copy was added in the iOS source and
+        // the checked-in desktop fallback catalog was regenerated in the same change.
+        // 3987 → 4003 on 2026-09-22: __CALL_RATING_2026_09_22__, the post-call quality
+        // rating, added 16 keys to the iOS source in all 34 languages — the sheet on the
+        // phones and the `/rate` prompt here — and the catalogs were regenerated with
+        // `./gradlew i18nExtract` in the same change.
+        // 4003 → 4011 on 2026-09-22: __ENCRYPTED_EXPORT_2026_09_22__, the encrypted
+        // message export/import, added 8 keys (settings.data.importMessages[.done] and six
+        // export.error.*) to the iOS source in all 34 languages, and the catalogs were
+        // regenerated with `./gradlew i18nExtract` in the same change.
+        // 4011 → 4012 on 2026-09-22: __SHARED_NICKNAME_2026_09_22__, `contact.shared_nickname`
+        // ("Nickname: %@", the peer's own name shown under a local alias) was added to the
+        // iOS source in all 34 languages and the catalogs were regenerated in the same change.
+        // 4012 → 4046 on 2026-09-23: __GROUP_E2E_V2_2026_09_23__ re-extraction for
+        // `group.member_must_update` (GROUP_E2E_V2_SPEC §6), which also brought in the other keys
+        // the iOS source gained since the last extraction.
+        // 4046 → 4053 on 2026-09-24: re-extraction after the iOS map-app preference
+        // (`map_open_with_title`, rewritten `map_open_preference`) and the call-diagnostics /
+        // report strings landed in all 34 languages.
+        // 4053 → 4054 on 2026-09-24: `call.error.unavailable` (__BLOCKED_BY_PEER_2026_09_24__).
+        // 4054 → 4074 on 2026-09-24: __VIDEO_NOTE_2026_09_24__ the 20 `videonote.*` keys of the
+        // round video messages (docs/VIDEO_NOTE_SPEC.md), added to the iOS source in all 34
+        // languages; catalogs regenerated with `./gradlew i18nExtract` in the same change.
+        // 4074 → 4228 on 2026-10-27, regenerated with `./gradlew i18nExtract` in this
+        // same change. Only TWO of those 154 are today's
+        // (__SUGGESTIONS_ARE_A_CHOICE_2026_10_27__: settings.messages.smartReplies and
+        // its .footer, added to the iOS source in all 34 languages). The other 152 had
+        // accumulated upstream WITHOUT a regeneration, so this tripwire — and
+        // CatalogFreshnessTest and ControlPayloadWireFormatTest beside it — were already
+        // red before today's work touched the tree. That is precisely the failure they
+        // exist to make loud: the checked-in desktop catalogs had been shipping 152 keys
+        // behind the phones, in all 34 languages.
+        // 4228 → 4232 on 2026-10-28: __MAP_STALLED_AT_24_PERCENT_2026_10_28__ added the four
+        // `map.component.*` names (road graph, street index, routing data, places database)
+        // to the iOS source in all 34 languages, so the region screen can say WHICH part of
+        // a download stopped instead of freezing its ring at a percentage. Catalogs
+        // regenerated with `./gradlew i18nExtract` in this same change, which is what keeps
+        // CatalogFreshnessTest beside this one green.
+        // 4232 → 4235 on 2026-10-28: __LORA_POSITION_BEACON_2026_10_28__ added the three
+        // `lora.position.*` strings (section, toggle, and the footer that says the beacon
+        // is a PUBLIC CLEARTEXT broadcast to every radio in range) to the iOS source in all
+        // 34 languages, for the switch that finally gives `broadcastPosition` a caller.
+        // The desktop cannot originate a beacon — it has no position of its own, only its
+        // radio's — so it ships the strings without a switch; they arrive here because the
+        // catalogs are extracted from iOS wholesale, not cherry-picked.
+        // 4235 → 4255 on 2026-11-02, twenty keys from three changes on the iOS
+        // side, and this assertion is how we found out the catalogs had been
+        // stale since that morning:
+        //   * `group.receipts.*` (5) — __GROUP_RECEIPTS_2026_11_02__ (N8), the
+        //     "who has seen this" sheet for a group message.
+        //   * `guide.add_contact.*` (5) and `guide.cashu.*` (10) —
+        //     __IN_APP_GUIDES_2026_11_02__ plus
+        //     __CASHU_GUIDE_SIX_STEPS_2026_11_02__: the bitcoin guide used to
+        //     open at "get a token from a Cashu wallet", which assumes the
+        //     wallet a first-timer does not have, so two steps went in front of
+        //     it — get a wallet, then fund it.
+        // Catalogs regenerated with
+        // `./gradlew i18nExtract -PoshiIosRoot=<repo>/OSHI` in this change.
+        // NOTE the root: pointing it at the repository instead of `OSHI/` wrote
+        // 29 files instead of 69 and emptied half the locales — the sibling
+        // CatalogFreshnessTest and CatalogAuditTest caught it immediately.
+        // 4255 → 4335 on 2026-11-04, eighty keys, and the tripwire did its job twice
+        // over: it was ALREADY red when today's work started, which is how we learned
+        // the catalogs had gone stale upstream again — 77 of these 80 are other
+        // people's keys that had accumulated in the iOS tree with no regeneration
+        // behind them (`delivery_lora_unverified` and its neighbours showed up first
+        // in CatalogFreshnessTest's diff).
+        //
+        // The three that belong to this change are `alive.summary.{started,confirmed,
+        // stopped}` — __ALIVE_CHECK_IN_2026_11_04__, the recurring "I'm alive"
+        // liveness confirmation. They were written into the iOS source in all 34
+        // languages first, because this file's sibling
+        // (`CatalogAuditTest."every locale serves every key the desktop uses"`)
+        // refuses a key that only exists in English: hand-adding it to `en.json`
+        // alone ships it missing in thirty-three languages and nothing says so.
+        // Catalogs regenerated with
+        // `./gradlew i18nExtract -PoshiIosRoot=<repo>/OSHI` in this change.
+        // 4335 → 4353 on 2026-11-07, SEVENTEEN keys — and once again the tripwire
+        // was already red before this change started, for the same reason as last
+        // time: keys accumulate in the iOS tree and nobody re-extracts.
+        //
+        // SIX belong to recent work here:
+        //   chat_unread_divider              __UNREAD_HAD_NO_LINE_2026_11_07__
+        //   lora.error.channel_unknown       __CHANNEL_ROOMS_ALL_SENT_ON_SLOT_ZERO__
+        //   lora.node.message                __MESSAGE_THE_NODE_FROM_THE_MAP__
+        //   peers.connect.{dialing,already,searching}
+        //                                    __THE_CONNECT_BUTTON_WAS_REMOVED…__
+        //
+        // ELEVEN are older keys that had been sitting in the iOS source with no
+        // regeneration behind them: forward.{no_match,search_prompt},
+        // group.{block,report,unblock}_member, map_background_* (six).
+        //
+        // While re-extracting, `CatalogAuditTest` surfaced a REAL bug rather than
+        // a bookkeeping one: `edit.original_label` (2026-11-06) had shipped in en
+        // and fr ONLY, so the other thirty-two languages rendered the raw key in
+        // the message-edit sheet. Added to all 34 in the same change — which is
+        // exactly the failure that sibling test exists to prevent, catching a key
+        // that reached iOS without reaching its translations.
+        //
+        // Catalogs regenerated with
+        // `./gradlew i18nExtract -PoshiIosRoot=<repo>/OSHI` in this change.
+        //
+        // 4353 → 4383 on 2026-11-09 (30 keys): the production merge (Cashu send
+        // sheet + truthful no-wallet wording, LoRa interop/channel strings) plus
+        // the OHTTP "privacy relay" settings strings — re-extracted, not hand-added.
+        // 4383 → 4387 on 2026-11-10 (4 keys): settings.privacy.ohttp.address{,.not_set,.hint,.invalid}.
+        // 4387 → 4389 on 2026-11-16 (2 keys): settings.appearance.oledBlack{,.description}
+        // — __OLED_BLACK_2026_11_16__, written into all 34 .lproj first, then re-extracted.
+        // 4389 → 4423 on 2026-11-18 (34 keys): disguise.* — __PRIVACY_DISGUISE_2026_11_18__,
+        // the phones' "Privacy disguise" strings (iOS branch feat/stego-obfuscation-ios) in
+        // all 34 .lproj, then re-extracted.
+        // 4423 → 4427 on 2026-11-18 (4 keys): rnhint.{chip,explain,setting.title,setting.caption}
+        // — __RESTRICTED_NETWORK_HINT_2026_11_18__ (RN-HINT v1), all 34 .lproj, re-extracted.
+        // 4427 → 4488 on 2026-11-18 (61 keys): chats.merged.* (27, iOS a69e89e1), attach.* (29,
+        // iOS c52f1a8f) and mail.images.* / mail.attachment.open (5, iOS cb5f9875) — the
+        // phones' own lines, appended byte-identical to all 34 .lproj (__DESKTOP_PARITY_2027__).
+        // 4488 → 4610 on 2026-11-19 (122 keys): conv.* — the desktop messaging screens
+        // (__MESSAGES_PARITY_2027__), written into all 34 .lproj with real translations, re-extracted.
+        // 4610 → 4755 on 2026-11-19 (145 keys, merge of feat/desktop-parity-settings): desktop.settings.* plus the desktop.nickname/
+        // background/notifications/reactions/export/account/disguise/devices.mailbox lines that
+        // left the English-only overlay — __DESKTOP_SETTINGS_2027__, translated into all 34
+        // .lproj first, then re-extracted.
+        // 4755 → 5031 on 2026-11-19 (276 keys, merge of feat/desktop-parity-tools): pc.* — __DESKTOP_TOOLS_2027__, the desktop tool
+        // screens (mail, map, AI, radio, calls, scheduled, peers, devices, covert, limits),
+        // written into all 34 .lproj as one delimited block, then re-extracted.
+        // 5031 → 5126 on 2026-11-19 (95 keys): __DESKTOP_MERGE_2027__ — the 22 former English-only
+        // overlay strings (i18n/Desktop/en.json) and 73 media-viewer / scheduled / bubble strings,
+        // all 34 .lproj from OSHI-Desktop/i18n-src/merge, re-extracted.
+        // 5126 → 5215 on 2026-11-19 (89 keys): __DESKTOP_NOTICES_TRANSLATED_2027__ — send outcomes,
+        // notices, reachability, the notification body and the limits ledger (conv.*, pc.*),
+        // from OSHI-Desktop/i18n-src/tools/en_notices.json, re-extracted.
+        // 5215 → 5226 on 2026-11-19 (11 keys): __DESKTOP_MAC_PARITY_A__ — forward to many, reply
+        // privately, profile photo, gallery by type (conv.fa.*), from OSHI-Desktop/i18n-src/feat-a.
+        // 5226 → 5296 on 2026-11-19 (70 keys): __DESKTOP_MAC_PARITY_B_2027__ — privacy, passcode
+        // lock, help, group discovery, camera, photo markup (pc.*), plus markup.undo and
+        // chat.send, which iOS PhotoMarkup used and no catalog defined. (Both blocks merged.)
+        // 5296 → 5302 on 2026-11-19 (6 keys): __PC_STARTUP_STRINGS_2026_11_19__ — desktop.startup.*
+        // (startup failure on Windows/Linux, second launch), all 34 .lproj, re-extracted.
+        // 5302 → 5308 on 2026-11-20 (6 keys): __ATTACHMENT_REFUSAL_I18N_2026_11_20__ desktop.attach.*,
+        // the attachment open-policy refusals, all 34 .lproj, re-extracted.
+        // 5308 → 5314 on 2026-11-20 (6 keys): __DESKTOP_1_6_PARITY__ pc.location.*, pc.alive.note.desktop,
+        // desktop.settings.notOnDesktop.liveLocation(.why) — from OSHI-Desktop/i18n-src/parity16; the
+        // same block fills the alive.* sheet sentences iOS had only in English from Android's catalogs.
+                // 5314 → 5319 on 2026-11-20 (5 keys): __DESKTOP_SECURITY_I18N_2026_11_20__ desktop.link.confirm.* and
+        // desktop.capture.*, all 34 .lproj, re-extracted.
+        // 5319 → 5393 on 2026-11-20 (74 keys): __GROUP_INFO_SETTINGS_2026_11_20__ group.settings.* (the 72
+        // GROUP_INFO_SETTINGS_SPEC §5.1 strings) + desktop.group.settings.{lookup_failed,delete_chat}, from
+        // OSHI-Desktop/i18n-src/group-settings, all 34 .lproj, re-extracted.
+        // 5393 → 5407 on 2026-11-21 (14 keys): __GROUP_COMMENTS_FROM_SPEC__ GROUP_INFO_SETTINGS_SPEC §2.12.8
+        // (gs_comments, gs_comments_footer, cm_*) + the desktop-only cm_comments_count_one (no plural
+        // catalog on the desktop), one marked block per .lproj, re-extracted.
+        // 5407 → 5409 on 2026-11-21 (2 keys): __GLASS_ALL_THEMES__ appearance_glass_effect{,_footer}
+        // (shared with iOS), one marked block per .lproj, re-extracted.
+        assertEquals("en Localizable key count", 5409, en.localizable.size)
         assertEquals("en InfoPlist key count", 16, en.infoPlist.size)
         assertEquals("Messages", en.localizable["tab.messages"])
         // Spot-check a value with an escape and one with a bare percent.

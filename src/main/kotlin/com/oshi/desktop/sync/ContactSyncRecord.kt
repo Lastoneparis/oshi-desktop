@@ -145,6 +145,52 @@ object ContactSyncRecord {
     }
 
     /**
+     * __ANDROID_EXACT_SYNC_2026_10_29__ Android's emission, reproduced deliberately.
+     *
+     * [exportAll] is this client's own, SAFER payload: every contact with its real
+     * `blocked` value, stamped from `firstSeenMs` so an untouched row loses a conflict,
+     * and [assertBlocksRepresented] refusing to emit at all if a blocked contact would be
+     * dropped. Three protections, each written against a defect measured in the shipped
+     * Android tree.
+     *
+     * This function is the opposite, and it exists because the owner of this project asked
+     * for exact parity with the phones on 2026-10-29, with the consequence stated first and
+     * then reaffirmed. It mirrors `MultiDeviceSyncManager`:
+     *
+     *  - the payload is built from `getAllContactsList()` = `SELECT * FROM contacts WHERE
+     *    isBlocked = 0` (`AppDatabase.kt:604`), so a BLOCKED CONTACT IS OMITTED ENTIRELY and
+     *    every emitted row's `isBlocked` is structurally `false` (`:563`);
+     *  - an unstamped contact defaults to `System.currentTimeMillis()` (`:556`), so a row
+     *    nobody has ever edited carries a brand-new stamp and beats almost any local one.
+     *
+     * **What that costs, said plainly rather than left to be discovered:** a contact blocked
+     * on device B and merely not-blocked on device A is UNBLOCKED ON B by a sync, because B
+     * receives `isBlocked=false` under a winning stamp and [applyTo]'s rule 3 honours it.
+     * `ContactSyncRecordTest` pins exactly that, so the behaviour is asserted, not implied.
+     *
+     * On Android this is dormant only because `linkDevice` builds the JSON, logs it and
+     * calls `callback(true, …)` under `// Simulate success for now` (`:336-360`) — nothing
+     * is ever transmitted. Here the lane works, so this one is live.
+     *
+     * @param nowMs Android's `System.currentTimeMillis()` default for an unedited row.
+     */
+    fun exportAllAndroidExact(contacts: ContactStore, nowMs: Long): List<Record> =
+        contacts.all()
+            // `WHERE isBlocked = 0`: a blocked contact never reaches the payload.
+            .filterNot { it.blocked }
+            .map { c ->
+                Record(
+                    publicKey = c.address,
+                    alias = c.displayName,
+                    // Structurally false — it came from the non-blocked query.
+                    blocked = false,
+                    verified = c.verification == ContactStore.VerificationState.VERIFIED,
+                    // Android stamps an unedited row with NOW, so it wins.
+                    syncTimestampMs = nowMs,
+                )
+            }
+
+    /**
      * Refuse to emit an archive that under-reports the blocked set.
      *
      * The guard the Android path is missing. It is stated as a comparison of two SETS
@@ -273,7 +319,7 @@ object ContactSyncRecord {
 
             if (existing == null) {
                 contacts.seen(r.publicKey, nowMs, displayNameHint = r.alias)
-                if (r.blocked == true) { contacts.block(r.publicKey); blockApplied++ }
+                if (r.blocked == true) { contacts.block(r.publicKey, r.syncTimestampMs); blockApplied++ }
                 if (r.verified == true) {
                     contacts.setVerification(r.publicKey, ContactStore.VerificationState.VERIFIED)
                 }
@@ -286,8 +332,9 @@ object ContactSyncRecord {
             r.alias?.let { contacts.setDisplayName(existing.address, it) }
             // Rule 3: only a record that CARRIES a block decision may change one.
             when (r.blocked) {
-                true -> { contacts.block(existing.address); blockApplied++ }
-                false -> { contacts.unblock(existing.address); blockApplied++ }
+                true -> { contacts.block(existing.address, r.syncTimestampMs); blockApplied++ }
+                // __BLOCK_SYNC_LWW_2026_09_24__ the record's own time, not "now" (devsync LWW).
+                false -> { BlockPolicy.unblockEverySpelling(contacts, existing.address, r.syncTimestampMs); blockApplied++ }
                 null -> Unit
             }
             if (r.verified != null) {

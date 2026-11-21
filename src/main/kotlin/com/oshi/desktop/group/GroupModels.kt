@@ -122,7 +122,33 @@ data class GroupDefinition(
     val avatar: String? = null,
     /** See the file doc: `Int?`, never `Int`, and never defaulted to 0. */
     val stateVersion: Int? = null,
+    /** __GROUP_E2E_V2_2026_09_23__ spec §5.1: optional `description` (iOS ignores unknown keys). */
+    val description: String? = null,
+    /**
+     * __GROUP_E2E_V2_2026_09_23__ spec §5.1: members removed by an admin. Receivers take the
+     * UNION and never shrink it; content from an evicted key is dropped (§3 step 6).
+     */
+    val evictedMemberKeys: List<String> = emptyList(),
+    /**
+     * __GROUP_INFO_SETTINGS_2026_11_20__ GROUP_INFO_SETTINGS_SPEC §2.1. Null = this device never
+     * held a `settings` object for the group (and so never emits one); see [GroupSettings].
+     */
+    val settings: GroupSettings? = null,
 ) {
+    /** The settings in force: ours, or the spec defaults when the group never had any. */
+    val effectiveSettings: GroupSettings get() = settings ?: GroupSettings()
+
+    /** §2.9: an admin deleted this group for everyone. Sticky. */
+    val isDissolved: Boolean get() = settings?.dissolved == true
+
+    /** §2.4: may [publicKey] post content here? (`postPolicy == admins` ⇒ admins only.) */
+    fun mayPost(publicKey: String): Boolean =
+        !isDissolved && (effectiveSettings.postPolicy == GroupSettings.PostPolicy.EVERYONE || isAdmin(publicKey))
+
+    /** True when [publicKey] was evicted by an admin (canonical comparison). */
+    fun isEvicted(publicKey: String): Boolean =
+        evictedMemberKeys.any { GroupIdentity.sameIdentity(it, publicKey) }
+
     /** Member keys in wire order. */
     val memberKeys: List<String> get() = members.map { it.publicKey }
 
@@ -186,7 +212,18 @@ sealed interface MinimalGroupUpdate {
     data class MemberSyncRequest(
         override val groupId: String,
         val requesterPublicKey: String,
+        /** __GROUP_INFO_SETTINGS_2026_11_20__ §3.2: the private link's `t=`, when the link had one. */
+        val inviteToken: String? = null,
     ) : MinimalGroupUpdate
+
+    /**
+     * __GROUP_INFO_SETTINGS_2026_11_20__ §3.1 step 4: `{"type":"join_request","handle",
+     * "requesterPublicKey"}` — a join through a PUBLIC link. No groupId (the joiner does not
+     * know it). Old builds ignore the kind.
+     */
+    data class JoinRequest(val handle: String, val requesterPublicKey: String) : MinimalGroupUpdate {
+        override val groupId: String? get() = null
+    }
 
     /**
      * `{"type":"sync_request","requesterKey":…}` — iOS `swift:1147`. No `groupId`: it asks

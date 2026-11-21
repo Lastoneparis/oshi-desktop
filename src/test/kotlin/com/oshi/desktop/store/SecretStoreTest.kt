@@ -3,6 +3,8 @@ package com.oshi.desktop.store
 import java.io.File
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -145,6 +147,100 @@ class SecretStoreTest {
         val known = if (DesktopPaths.isWindows) "cmd.exe" else "sh"
         assertNotNull("PATH lookup failed for $known", Proc.which(known))
         assertNull(Proc.which("definitely-not-a-real-binary-${System.nanoTime()}"))
+    }
+
+    @Test
+    fun `malformed secret-store output becomes a named store error`() {
+        try {
+            decodeStoredSecret("not base64!", "test store")
+            fail("malformed helper output escaped the secret-store error contract")
+        } catch (e: SecretStoreException) {
+            assertTrue(e.message!!.contains("test store"))
+            assertTrue(e.message!!.contains("malformed base64"))
+            assertTrue(e.cause is IllegalArgumentException)
+        }
+    }
+
+    @Test
+    fun `blank secret-store output remains a missing entry`() {
+        assertNull(decodeStoredSecret(" \n", "test store"))
+        assertArrayEquals(byteArrayOf(1, 2), decodeStoredSecret("AQI=\n", "test store"))
+    }
+
+    @Test
+    fun `Linux secret tool prefers the trusted system path over PATH`() {
+        val resolved = LinuxSecretToolStore.resolveSecretTool(
+            pathLookup = { "/attacker/bin/secret-tool" },
+            isExecutable = { it == "/usr/bin/secret-tool" },
+        )
+        assertEquals("/usr/bin/secret-tool", resolved)
+    }
+
+    @Test
+    fun `Linux secret tool falls back only when the trusted binary is unavailable`() {
+        val resolved = LinuxSecretToolStore.resolveSecretTool(
+            pathLookup = { "/opt/minimal/bin/secret-tool" },
+            isExecutable = { false },
+        )
+        assertEquals("/opt/minimal/bin/secret-tool", resolved)
+    }
+
+    // __SECRET_TOOL_PROBE_2026_11_02__ The Linux probe asked the keyring whether it
+    // was ALIVE, and a locked collection is very much alive. These are the four answers
+    // it has to tell apart, written from what Ubuntu 24.04 actually returns.
+    private fun res(exit: Int, out: String = "", err: String = "", timedOut: Boolean = false) =
+        Proc.Result(exit, out, err, timedOut)
+
+    @Test
+    fun `a locked keyring is not a usable key store`() {
+        // The measured failure: `store` exits non-zero with this on stderr, and the OLD
+        // probe never issued a store at all — it issued a lookup, which SUCCEEDS here.
+        val put = res(1, err = "secret-tool: Cannot create an item in a locked collection")
+        assertFalse(LinuxSecretToolStore.writeProbePassed(put, null, "AAEC"))
+    }
+
+    @Test
+    fun `a keyring that takes the write and gives it back is usable`() {
+        val put = res(0)
+        val got = res(0, out = "AAEC\n")
+        assertTrue(LinuxSecretToolStore.writeProbePassed(put, got, "AAEC"))
+    }
+
+    @Test
+    fun `a write that hangs is not usable`() {
+        assertFalse(LinuxSecretToolStore.writeProbePassed(res(0, timedOut = true), null, "AAEC"))
+        assertFalse(LinuxSecretToolStore.writeProbePassed(res(0), res(0, out = "AAEC", timedOut = true), "AAEC"))
+    }
+
+    @Test
+    fun `a keyring that returns something else is not usable`() {
+        // A daemon that accepts writes and serves a DIFFERENT value would hand the vault
+        // a master key that is not the one it stored. Never silently accept that.
+        assertFalse(LinuxSecretToolStore.writeProbePassed(res(0), res(0, out = "ZZZZ"), "AAEC"))
+        assertFalse(LinuxSecretToolStore.writeProbePassed(res(0), res(0, out = ""), "AAEC"))
+        assertFalse(LinuxSecretToolStore.writeProbePassed(res(0), res(1), "AAEC"))
+    }
+
+    @Test
+    fun `Windows DPAPI prefers SystemRoot PowerShell over PATH`() {
+        val root = "/windows"
+        val trusted = File(root, "System32/WindowsPowerShell/v1.0/powershell.exe").path
+        val resolved = WindowsDpapiStore.resolvePowerShell(
+            systemRoot = root,
+            pathLookup = { "/attacker/powershell.exe" },
+            isExecutable = { it == trusted },
+        )
+        assertEquals(trusted, resolved)
+    }
+
+    @Test
+    fun `Windows DPAPI falls back to PATH only without SystemRoot PowerShell`() {
+        val resolved = WindowsDpapiStore.resolvePowerShell(
+            systemRoot = "/windows",
+            pathLookup = { binary -> if (binary == "powershell.exe") "/minimal/powershell.exe" else null },
+            isExecutable = { false },
+        )
+        assertEquals("/minimal/powershell.exe", resolved)
     }
 
     @Test

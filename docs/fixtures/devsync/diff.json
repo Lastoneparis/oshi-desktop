@@ -1,0 +1,555 @@
+{
+  "description": "Design §6.2. rev = hex(SHA-256(utf8(canonicalJSON(revObject(m)))))[0..16]. revObject = {deleted, edited:{at?,text}|null, reactions:{emoji:[sorted unique keys]}, read, status (direction 'out' only, else null)}; when deleted, edited=null and reactions={}. Canonical JSON: object keys sorted by UTF-8 bytes, no whitespace, strings escape only '\"' '\\\\' and U+0000..U+001F (as \\u00xx, lowercase hex), everything else raw UTF-8. digest = hex(SHA-256(join('\\n', sort_utf8(asciiLower(id) ':' rev)))). Day = UTC 'YYYY-MM-DD' of the timestamp. Ids compare case-insensitively (ASCII).",
+  "conversations": [
+    {
+      "id": "direct:3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+      "kind": "direct",
+      "peerPublicKey": "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE="
+    },
+    {
+      "id": "direct:Ct5N3O9W1HIHoI5cGJ2S+Qm6q6YG6qu0JnL8R9cN4Qk=",
+      "kind": "direct",
+      "peerPublicKey": "Ct5N3O9W1HIHoI5cGJ2S+Qm6q6YG6qu0JnL8R9cN4Qk="
+    },
+    {
+      "id": "group:5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+      "kind": "group",
+      "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+      "groupName": "Team"
+    }
+  ],
+  "revs": [
+    {
+      "id": "0F2B7C4E-1A2B-4C3D-8E9F-000000000001",
+      "message": {
+        "id": "0F2B7C4E-1A2B-4C3D-8E9F-000000000001",
+        "conversation": "direct:3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "direction": "in",
+        "senderPublicKey": "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "timestamp": "2026-09-20T08:00:00.000Z",
+        "status": "delivered",
+        "read": true,
+        "text": "Hi"
+      },
+      "canonical": "{\"deleted\":false,\"edited\":null,\"reactions\":{},\"read\":true,\"status\":null}",
+      "rev": "8697166cb984e515"
+    },
+    {
+      "id": "0F2B7C4E-1A2B-4C3D-8E9F-000000000002",
+      "message": {
+        "id": "0F2B7C4E-1A2B-4C3D-8E9F-000000000002",
+        "conversation": "direct:3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "direction": "out",
+        "senderPublicKey": "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+        "timestamp": "2026-09-20T08:01:00.000Z",
+        "status": "read",
+        "read": true,
+        "text": "Hello Bob"
+      },
+      "canonical": "{\"deleted\":false,\"edited\":null,\"reactions\":{},\"read\":true,\"status\":\"read\"}",
+      "rev": "fc63b71cce895f61"
+    },
+    {
+      "id": "0f2b7c4e-1a2b-4c3d-8e9f-000000000003",
+      "message": {
+        "id": "0f2b7c4e-1a2b-4c3d-8e9f-000000000003",
+        "conversation": "direct:3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "direction": "in",
+        "senderPublicKey": "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "timestamp": "2026-09-21T23:59:59.999Z",
+        "status": "delivered",
+        "read": true,
+        "text": "Line1\nLine2 \"quoted\" \\ é 🙂"
+      },
+      "canonical": "{\"deleted\":false,\"edited\":null,\"reactions\":{},\"read\":true,\"status\":null}",
+      "rev": "8697166cb984e515"
+    },
+    {
+      "id": "msg-g-1",
+      "message": {
+        "id": "msg-g-1",
+        "conversation": "group:5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "direction": "in",
+        "senderPublicKey": "Ct5N3O9W1HIHoI5cGJ2S+Qm6q6YG6qu0JnL8R9cN4Qk=",
+        "timestamp": "2026-09-21T10:00:00.000Z",
+        "status": "delivered",
+        "read": true,
+        "text": "Group hello",
+        "senderName": "Carol",
+        "reactions": {
+          "👍": [
+            "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+            "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE="
+          ],
+          "❤️": [
+            "Ct5N3O9W1HIHoI5cGJ2S+Qm6q6YG6qu0JnL8R9cN4Qk="
+          ]
+        }
+      },
+      "canonical": "{\"deleted\":false,\"edited\":null,\"reactions\":{\"❤️\":[\"Ct5N3O9W1HIHoI5cGJ2S+Qm6q6YG6qu0JnL8R9cN4Qk=\"],\"👍\":[\"3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=\",\"BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=\"]},\"read\":true,\"status\":null}",
+      "rev": "abda75c1dad746d9"
+    },
+    {
+      "id": "a-only-1",
+      "message": {
+        "id": "a-only-1",
+        "conversation": "direct:3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "direction": "out",
+        "senderPublicKey": "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+        "timestamp": "2026-09-22T09:00:00.000Z",
+        "status": "sent",
+        "read": true,
+        "text": "Sent while the Mac was off"
+      },
+      "canonical": "{\"deleted\":false,\"edited\":null,\"reactions\":{},\"read\":true,\"status\":\"sent\"}",
+      "rev": "426a650f1e01c63d"
+    },
+    {
+      "id": "a-only-2",
+      "message": {
+        "id": "a-only-2",
+        "conversation": "direct:Ct5N3O9W1HIHoI5cGJ2S+Qm6q6YG6qu0JnL8R9cN4Qk=",
+        "direction": "in",
+        "senderPublicKey": "Ct5N3O9W1HIHoI5cGJ2S+Qm6q6YG6qu0JnL8R9cN4Qk=",
+        "timestamp": "2026-09-22T09:30:00.000Z",
+        "status": "delivered",
+        "read": true,
+        "media": {
+          "type": "image",
+          "fileName": "cat.jpg",
+          "mime": "image/jpeg",
+          "size": 3,
+          "sha256": "77af778b51abd4a3c51c5ddd97204a9c3ae614ebccb75a606c3b6865aed6744e"
+        }
+      },
+      "canonical": "{\"deleted\":false,\"edited\":null,\"reactions\":{},\"read\":true,\"status\":null}",
+      "rev": "8697166cb984e515"
+    },
+    {
+      "id": "edit-1",
+      "message": {
+        "id": "edit-1",
+        "conversation": "direct:3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "direction": "out",
+        "senderPublicKey": "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+        "timestamp": "2026-09-21T07:00:00.000Z",
+        "status": "delivered",
+        "read": true,
+        "text": "tpyo",
+        "edited": {
+          "text": "typo",
+          "at": "2026-09-21T07:05:00.000Z"
+        }
+      },
+      "canonical": "{\"deleted\":false,\"edited\":{\"at\":\"2026-09-21T07:05:00.000Z\",\"text\":\"typo\"},\"reactions\":{},\"read\":true,\"status\":\"delivered\"}",
+      "rev": "694673eecfc822a2"
+    },
+    {
+      "id": "B-ONLY-1",
+      "message": {
+        "id": "B-ONLY-1",
+        "conversation": "direct:3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "direction": "in",
+        "senderPublicKey": "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "timestamp": "2026-09-22T12:00:00.000Z",
+        "status": "delivered",
+        "read": true,
+        "text": "Arrived on the Mac while the phone was off"
+      },
+      "canonical": "{\"deleted\":false,\"edited\":null,\"reactions\":{},\"read\":true,\"status\":null}",
+      "rev": "8697166cb984e515"
+    },
+    {
+      "id": "EDIT-1",
+      "message": {
+        "id": "EDIT-1",
+        "conversation": "direct:3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "direction": "out",
+        "senderPublicKey": "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+        "timestamp": "2026-09-21T07:00:00.000Z",
+        "status": "read",
+        "read": true,
+        "text": "tpyo"
+      },
+      "canonical": "{\"deleted\":false,\"edited\":null,\"reactions\":{},\"read\":true,\"status\":\"read\"}",
+      "rev": "fc63b71cce895f61"
+    }
+  ],
+  "deviceA": {
+    "messages": [
+      {
+        "id": "0F2B7C4E-1A2B-4C3D-8E9F-000000000001",
+        "conversation": "direct:3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "direction": "in",
+        "senderPublicKey": "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "timestamp": "2026-09-20T08:00:00.000Z",
+        "status": "delivered",
+        "read": true,
+        "text": "Hi"
+      },
+      {
+        "id": "0F2B7C4E-1A2B-4C3D-8E9F-000000000002",
+        "conversation": "direct:3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "direction": "out",
+        "senderPublicKey": "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+        "timestamp": "2026-09-20T08:01:00.000Z",
+        "status": "read",
+        "read": true,
+        "text": "Hello Bob"
+      },
+      {
+        "id": "0f2b7c4e-1a2b-4c3d-8e9f-000000000003",
+        "conversation": "direct:3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "direction": "in",
+        "senderPublicKey": "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "timestamp": "2026-09-21T23:59:59.999Z",
+        "status": "delivered",
+        "read": true,
+        "text": "Line1\nLine2 \"quoted\" \\ é 🙂"
+      },
+      {
+        "id": "msg-g-1",
+        "conversation": "group:5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "direction": "in",
+        "senderPublicKey": "Ct5N3O9W1HIHoI5cGJ2S+Qm6q6YG6qu0JnL8R9cN4Qk=",
+        "timestamp": "2026-09-21T10:00:00.000Z",
+        "status": "delivered",
+        "read": true,
+        "text": "Group hello",
+        "senderName": "Carol",
+        "reactions": {
+          "👍": [
+            "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+            "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE="
+          ],
+          "❤️": [
+            "Ct5N3O9W1HIHoI5cGJ2S+Qm6q6YG6qu0JnL8R9cN4Qk="
+          ]
+        }
+      },
+      {
+        "id": "a-only-1",
+        "conversation": "direct:3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "direction": "out",
+        "senderPublicKey": "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+        "timestamp": "2026-09-22T09:00:00.000Z",
+        "status": "sent",
+        "read": true,
+        "text": "Sent while the Mac was off"
+      },
+      {
+        "id": "a-only-2",
+        "conversation": "direct:Ct5N3O9W1HIHoI5cGJ2S+Qm6q6YG6qu0JnL8R9cN4Qk=",
+        "direction": "in",
+        "senderPublicKey": "Ct5N3O9W1HIHoI5cGJ2S+Qm6q6YG6qu0JnL8R9cN4Qk=",
+        "timestamp": "2026-09-22T09:30:00.000Z",
+        "status": "delivered",
+        "read": true,
+        "media": {
+          "type": "image",
+          "fileName": "cat.jpg",
+          "mime": "image/jpeg",
+          "size": 3,
+          "sha256": "77af778b51abd4a3c51c5ddd97204a9c3ae614ebccb75a606c3b6865aed6744e"
+        }
+      },
+      {
+        "id": "edit-1",
+        "conversation": "direct:3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "direction": "out",
+        "senderPublicKey": "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+        "timestamp": "2026-09-21T07:00:00.000Z",
+        "status": "delivered",
+        "read": true,
+        "text": "tpyo",
+        "edited": {
+          "text": "typo",
+          "at": "2026-09-21T07:05:00.000Z"
+        }
+      }
+    ],
+    "summary": [
+      {
+        "id": "direct:Ct5N3O9W1HIHoI5cGJ2S+Qm6q6YG6qu0JnL8R9cN4Qk=",
+        "kind": "direct",
+        "count": 1,
+        "newest": "2026-09-22T09:30:00.000Z",
+        "digest": "dd3f299260fb3131f27342fe2cb5b0f2dd4cc10cf3cb7e61b0c857ef11fb2fb4"
+      },
+      {
+        "id": "direct:3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "kind": "direct",
+        "count": 5,
+        "newest": "2026-09-22T09:00:00.000Z",
+        "digest": "c7654e23e81d796c8606b8e99ae0cdb0aace6487a2d79efbaefa7bb6b7f90b0d"
+      },
+      {
+        "id": "group:5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "kind": "group",
+        "count": 1,
+        "newest": "2026-09-21T10:00:00.000Z",
+        "digest": "33a2a7b54f8dc9e8716dc927391dd04c69b88e439b6ad0a2a02146eda66e116b"
+      }
+    ],
+    "buckets": {
+      "direct:3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=": [
+        {
+          "day": "2026-09-22",
+          "count": 1,
+          "digest": "9b28554719f075ac6106f214a12b35e05cea36fd0ed114fc4f954463016695f0"
+        },
+        {
+          "day": "2026-09-21",
+          "count": 2,
+          "digest": "086fde093e533939d9dba06a6d804bb7b1ce5cf396fe4c36e6b1aa89698845bb"
+        },
+        {
+          "day": "2026-09-20",
+          "count": 2,
+          "digest": "5fef7fb054d4b52eab2ac62576330e36085df7b1c7caaaa64be19f4a4a86c0b4"
+        }
+      ],
+      "direct:Ct5N3O9W1HIHoI5cGJ2S+Qm6q6YG6qu0JnL8R9cN4Qk=": [
+        {
+          "day": "2026-09-22",
+          "count": 1,
+          "digest": "dd3f299260fb3131f27342fe2cb5b0f2dd4cc10cf3cb7e61b0c857ef11fb2fb4"
+        }
+      ],
+      "group:5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D": [
+        {
+          "day": "2026-09-21",
+          "count": 1,
+          "digest": "33a2a7b54f8dc9e8716dc927391dd04c69b88e439b6ad0a2a02146eda66e116b"
+        }
+      ]
+    },
+    "ids": {
+      "direct:3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=": {
+        "2026-09-22": [
+          [
+            "a-only-1",
+            "426a650f1e01c63d"
+          ]
+        ],
+        "2026-09-21": [
+          [
+            "0f2b7c4e-1a2b-4c3d-8e9f-000000000003",
+            "8697166cb984e515"
+          ],
+          [
+            "edit-1",
+            "694673eecfc822a2"
+          ]
+        ],
+        "2026-09-20": [
+          [
+            "0F2B7C4E-1A2B-4C3D-8E9F-000000000001",
+            "8697166cb984e515"
+          ],
+          [
+            "0F2B7C4E-1A2B-4C3D-8E9F-000000000002",
+            "fc63b71cce895f61"
+          ]
+        ]
+      },
+      "direct:Ct5N3O9W1HIHoI5cGJ2S+Qm6q6YG6qu0JnL8R9cN4Qk=": {
+        "2026-09-22": [
+          [
+            "a-only-2",
+            "8697166cb984e515"
+          ]
+        ]
+      },
+      "group:5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D": {
+        "2026-09-21": [
+          [
+            "msg-g-1",
+            "abda75c1dad746d9"
+          ]
+        ]
+      }
+    }
+  },
+  "deviceB": {
+    "messages": [
+      {
+        "id": "0F2B7C4E-1A2B-4C3D-8E9F-000000000001",
+        "conversation": "direct:3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "direction": "in",
+        "senderPublicKey": "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "timestamp": "2026-09-20T08:00:00.000Z",
+        "status": "delivered",
+        "read": true,
+        "text": "Hi"
+      },
+      {
+        "id": "0F2B7C4E-1A2B-4C3D-8E9F-000000000002",
+        "conversation": "direct:3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "direction": "out",
+        "senderPublicKey": "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+        "timestamp": "2026-09-20T08:01:00.000Z",
+        "status": "read",
+        "read": true,
+        "text": "Hello Bob"
+      },
+      {
+        "id": "0f2b7c4e-1a2b-4c3d-8e9f-000000000003",
+        "conversation": "direct:3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "direction": "in",
+        "senderPublicKey": "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "timestamp": "2026-09-21T23:59:59.999Z",
+        "status": "delivered",
+        "read": true,
+        "text": "Line1\nLine2 \"quoted\" \\ é 🙂"
+      },
+      {
+        "id": "msg-g-1",
+        "conversation": "group:5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "direction": "in",
+        "senderPublicKey": "Ct5N3O9W1HIHoI5cGJ2S+Qm6q6YG6qu0JnL8R9cN4Qk=",
+        "timestamp": "2026-09-21T10:00:00.000Z",
+        "status": "delivered",
+        "read": true,
+        "text": "Group hello",
+        "senderName": "Carol",
+        "reactions": {
+          "👍": [
+            "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+            "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE="
+          ],
+          "❤️": [
+            "Ct5N3O9W1HIHoI5cGJ2S+Qm6q6YG6qu0JnL8R9cN4Qk="
+          ]
+        }
+      },
+      {
+        "id": "B-ONLY-1",
+        "conversation": "direct:3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "direction": "in",
+        "senderPublicKey": "3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "timestamp": "2026-09-22T12:00:00.000Z",
+        "status": "delivered",
+        "read": true,
+        "text": "Arrived on the Mac while the phone was off"
+      },
+      {
+        "id": "EDIT-1",
+        "conversation": "direct:3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "direction": "out",
+        "senderPublicKey": "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+        "timestamp": "2026-09-21T07:00:00.000Z",
+        "status": "read",
+        "read": true,
+        "text": "tpyo"
+      }
+    ],
+    "summary": [
+      {
+        "id": "direct:3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+        "kind": "direct",
+        "count": 5,
+        "newest": "2026-09-22T12:00:00.000Z",
+        "digest": "8c01b0d5dd1f69abcd47f3cf1582205c39063fde21cd61b7a2e1b9302e717f35"
+      },
+      {
+        "id": "group:5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "kind": "group",
+        "count": 1,
+        "newest": "2026-09-21T10:00:00.000Z",
+        "digest": "33a2a7b54f8dc9e8716dc927391dd04c69b88e439b6ad0a2a02146eda66e116b"
+      }
+    ],
+    "buckets": {
+      "direct:3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=": [
+        {
+          "day": "2026-09-22",
+          "count": 1,
+          "digest": "10e31dc5f086aaf3f5b92b406b61cf4b19d71892772d15d640d115c5e3425be4"
+        },
+        {
+          "day": "2026-09-21",
+          "count": 2,
+          "digest": "6e3489e5e8d997378f99b1472378bb38e7e7d4657c73e9f4dcf1cc2989d0fdf2"
+        },
+        {
+          "day": "2026-09-20",
+          "count": 2,
+          "digest": "5fef7fb054d4b52eab2ac62576330e36085df7b1c7caaaa64be19f4a4a86c0b4"
+        }
+      ],
+      "group:5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D": [
+        {
+          "day": "2026-09-21",
+          "count": 1,
+          "digest": "33a2a7b54f8dc9e8716dc927391dd04c69b88e439b6ad0a2a02146eda66e116b"
+        }
+      ]
+    },
+    "ids": {
+      "direct:3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=": {
+        "2026-09-22": [
+          [
+            "B-ONLY-1",
+            "8697166cb984e515"
+          ]
+        ],
+        "2026-09-21": [
+          [
+            "0f2b7c4e-1a2b-4c3d-8e9f-000000000003",
+            "8697166cb984e515"
+          ],
+          [
+            "EDIT-1",
+            "fc63b71cce895f61"
+          ]
+        ],
+        "2026-09-20": [
+          [
+            "0F2B7C4E-1A2B-4C3D-8E9F-000000000001",
+            "8697166cb984e515"
+          ],
+          [
+            "0F2B7C4E-1A2B-4C3D-8E9F-000000000002",
+            "fc63b71cce895f61"
+          ]
+        ]
+      },
+      "group:5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D": {
+        "2026-09-21": [
+          [
+            "msg-g-1",
+            "abda75c1dad746d9"
+          ]
+        ]
+      }
+    }
+  },
+  "expected": {
+    "aWantsFromB": [
+      "B-ONLY-1",
+      "EDIT-1"
+    ],
+    "bWantsFromA": [
+      "a-only-1",
+      "a-only-2",
+      "edit-1"
+    ],
+    "mergedEdit1": {
+      "id": "edit-1",
+      "conversation": "direct:3b6TE6T6dfqOHzhG5WVPCdhuzDHQXrKCFxVoTqnlPUE=",
+      "direction": "out",
+      "senderPublicKey": "BYYEjmVAaT4GhJvFyH3pqIojV6Z4NiKTxiq4Dp8V5Ug=",
+      "timestamp": "2026-09-21T07:00:00.000Z",
+      "status": "read",
+      "read": true,
+      "text": "tpyo",
+      "edited": {
+        "text": "typo",
+        "at": "2026-09-21T07:05:00.000Z"
+      }
+    },
+    "mergedEdit1Rev": "30b95f25ba4e77f7",
+    "mergedEdit1RevCommutes": true
+  }
+}

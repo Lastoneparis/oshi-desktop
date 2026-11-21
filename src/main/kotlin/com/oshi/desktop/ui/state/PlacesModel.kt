@@ -1,5 +1,6 @@
 package com.oshi.desktop.ui.state
 
+import com.oshi.desktop.i18n.t
 import com.oshi.desktop.place.OfflineMapData
 import java.io.File
 import java.util.concurrent.Executor
@@ -42,7 +43,13 @@ class PlacesModel(
 
     enum class Kind { POI, STREET }
 
-    data class Hit(val title: String, val detail: String, val region: String, val coords: String)
+    data class Hit(
+        val title: String, val detail: String, val region: String, val coords: String,
+        /** __DESKTOP_TOOLS_2027__ where to put the marker; null for a row with no position. */
+        val lat: Double? = null, val lon: Double? = null,
+        /** Metres from the map's centre when the search was made near it. */
+        val distanceM: Double? = null,
+    )
 
     data class PlacesState(
         val mapsPath: String,
@@ -89,11 +96,46 @@ class PlacesModel(
         publish()
     }
 
+    /**
+     * __DESKTOP_TOOLS_2027__ One of the phones' category chips (`map.poi.chip.*`): every
+     * place of [category] within 10 km of [near] — the map's centre — nearest first.
+     */
+    fun searchCategory(category: String, near: Pair<Double, Double>?) {
+        synchronized(lock) {
+            if (busy) return
+            busy = true; notice = null; kind = Kind.POI
+        }
+        publish()
+        worker.execute {
+            val found = runCatching {
+                val data = dataFactory(mapsDir)
+                data.searchPoisByCategory(category, near?.let { com.oshi.desktop.place.LatLon(it.first, it.second) }, radiusKm = 10.0, limit = 60).map { h -> poiHit(h) }
+            }
+            synchronized(lock) {
+                busy = false; searched = true
+                hits = found.getOrDefault(emptyList())
+                found.exceptionOrNull()?.let { e -> notice = Notice(t("pc.map.err.region", "${e.javaClass.simpleName}: ${e.message}"), Severity.ERROR) }
+            }
+            publish()
+        }
+    }
+
+    private fun poiHit(h: com.oshi.desktop.place.PoiHit) = Hit(
+        title = h.poi.name,
+        detail = listOfNotNull(h.poi.subcategory ?: h.poi.category, h.poi.address, h.poi.openingHours).joinToString(" · "),
+        region = h.regionId,
+        coords = coords(h.poi.lat, h.poi.lon),
+        lat = h.poi.lat, lon = h.poi.lon, distanceM = h.distanceMeters,
+    )
+
+    /** The map's centre when the search runs; text results are ranked by distance from it. */
+    @Volatile var near: Pair<Double, Double>? = null
+
     fun search() {
         val (q, k) = synchronized(lock) {
             when {
                 busy -> return
-                query.isBlank() -> { notice = Notice("Type something to look for.", Severity.INFO); return publish() }
+                query.isBlank() -> { notice = Notice(t("pc.map.typeSomething"), Severity.INFO); return publish() }
                 else -> { busy = true; notice = null; query.trim() to kind }
             }
         }
@@ -103,24 +145,14 @@ class PlacesModel(
             val found = try {
                 val data = dataFactory(mapsDir)
                 when (k) {
-                    Kind.POI -> data.searchPois(q, limit = 40).map { h ->
-                        Hit(
-                            title = h.poi.name,
-                            detail = listOfNotNull(
-                                h.poi.subcategory ?: h.poi.category,
-                                h.poi.address,
-                                h.poi.openingHours,
-                            ).joinToString(" · "),
-                            region = h.regionId,
-                            coords = coords(h.poi.lat, h.poi.lon),
-                        )
-                    }
+                    Kind.POI -> data.searchPois(q, near = near?.let { com.oshi.desktop.place.LatLon(it.first, it.second) }, radiusKm = 50.0, limit = 40).map { h -> poiHit(h) }
                     Kind.STREET -> data.searchStreets(q, limit = 40).map { s ->
                         Hit(
                             title = s.name,
                             detail = listOfNotNull(s.city, s.countryCode, s.highwayType).joinToString(" · "),
                             region = s.regionId,
                             coords = coords(s.lat, s.lon),
+                            lat = s.lat, lon = s.lon,
                         )
                     }
                 }
@@ -129,7 +161,7 @@ class PlacesModel(
                     busy = false
                     searched = true
                     hits = emptyList()
-                    notice = Notice("That region file could not be read: ${e.javaClass.simpleName}: ${e.message}", Severity.ERROR)
+                    notice = Notice(t("pc.map.err.region", "${e.javaClass.simpleName}: ${e.message}"), Severity.ERROR)
                 }
                 publish()
                 return@execute
@@ -149,7 +181,7 @@ class PlacesModel(
      * Rounding further would make two neighbouring shopfronts share a coordinate; keeping
      * every digit a `Double` prints would claim a precision the source data does not have.
      */
-    private fun coords(lat: Double, lon: Double): String = "%.6f, %.6f".format(lat, lon)
+    private fun coords(lat: Double, lon: Double): String = "%.6f, %.6f".format(java.util.Locale.ROOT, lat, lon)
 
     private fun snapshot(): PlacesState = synchronized(lock) {
         val data = runCatching { dataFactory(mapsDir) }.getOrNull()

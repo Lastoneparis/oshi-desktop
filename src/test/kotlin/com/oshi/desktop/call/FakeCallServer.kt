@@ -85,6 +85,42 @@ class FakeCallServer(
     /** Signature verdicts, in order: `verified`, `unsigned`, or a refusal reason. */
     val signatureVerdicts = CopyOnWriteArrayList<String>()
 
+    /**
+     * __CALL_PUSH_AUTH_DESKTOP_2026_09_23__ The server's TOFU table (`/var/oshi/auth_bindings.json`):
+     * normalized X25519 identity → the base64 Ed25519 key published with it on `/v2`.
+     * A VALID signature by a key bound to ANOTHER identity is a forgery (`mismatch` → 403).
+     */
+    val bindings = ConcurrentHashMap<String, String>()
+
+    /** Per call-server request: `bound` · `unbound` · `mismatch` · `unsigned` · `invalid`. */
+    val bindingVerdicts = CopyOnWriteArrayList<String>()
+
+    /** Per push request, the same outcomes. */
+    val pushVerdicts = CopyOnWriteArrayList<String>()
+
+    /** `(method, path push_service saw)`. */
+    val seenPushPaths = CopyOnWriteArrayList<Pair<String, String>>()
+
+    /** Raw `/push/signal-answered` bodies. */
+    val signalAnsweredBodies = CopyOnWriteArrayList<String>()
+
+    /**
+     * __CALL_MEDIA_AUTH_DESKTOP_2026_09_23__ A relay token issued by `POST /relay-token`
+     * (`docs/CALL_MEDIA_RELAY_AUTH_CONTRACT.md` §2), keyed by tokenId hex — what a fake
+     * `:8089` needs to verify a trailer.
+     */
+    class IssuedToken(val identity: String, val peer: String, val callId: String, val tokenId: ByteArray, val macKey: ByteArray, val expiresAt: Long)
+
+    val relayTokens = ConcurrentHashMap<String, IssuedToken>()
+
+    /** Every `/relay-token` request's outcome: `issued`, or the 4xx reason. */
+    val relayTokenVerdicts = CopyOnWriteArrayList<String>()
+
+    /** Bind [identity] to its own signing key, as a `/v2` key publication would. */
+    fun bind(identity: com.oshi.desktop.DesktopIdentity) {
+        bindings[normalizeKey(identity.userKey)] = Base64.getEncoder().encodeToString(identity.signingPub)
+    }
+
     /** `call_server.js:213` — 30 signals per 60 s per sender. Lowered by a test. */
     @Volatile var signalsPerWindow: Int = 30
 
@@ -132,18 +168,39 @@ class FakeCallServer(
         failWith?.let { return it to """{"error":"forced"}""" }
 
         val rawPath = ex.requestURI.rawPath
+        val method = ex.requestMethod
+        // nginx `location /push/ { proxy_pass http://127.0.0.1:8084/; }` — push_service.
+        if (rawPath.startsWith("${CallSignalClient.PUSH_PREFIX}/")) {
+            val path = rawPath.removePrefix(CallSignalClient.PUSH_PREFIX)
+            seenPushPaths += method to path
+            val sig = verifySignature(ex, method, path, body, listOf(CallSignalClient.PUSH_PREFIX))
+            val verdict = bindingVerdict(sig, ex, claimedIdentity(path, body))
+            pushVerdicts += verdict
+            if (verdict == "mismatch") return 403 to """{"error":"forbidden","reason":"binding-mismatch"}"""
+            return when {
+                method == "POST" && path == "/signal-answered" -> {
+                    signalAnsweredBodies += String(body, Charsets.UTF_8)
+                    200 to """{"success":true}"""
+                }
+                else -> 404 to """{"error":"no route for $method $path"}"""
+            }
+        }
         // nginx. A request that does not carry the prefix never reaches this app at all.
         if (apiPrefix.isNotEmpty() && !rawPath.startsWith("$apiPrefix/")) {
             return 404 to """{"error":"nginx has no location for $rawPath"}"""
         }
         val path = if (apiPrefix.isEmpty()) rawPath else rawPath.removePrefix(apiPrefix)
-        val method = ex.requestMethod
         seenPaths += method to path
 
-        val sig = verifySignature(ex, method, path, body)
+        val sig = verifySignature(ex, method, path, body, listOf("/api/call", "/voip"))
         signatureVerdicts += sig
-        if (requireSignature && sig != "verified") {
-            return 403 to JSONObject().put("error", "Invalid signature").put("reason", sig).toString()
+        val verdict = bindingVerdict(sig, ex, claimedIdentity(path, body))
+        bindingVerdicts += verdict
+        // The token route never accepts unsigned requests, in any mode (contract §2).
+        if (method == "POST" && path == "/relay-token") return relayToken(body, sig, verdict)
+        if (requireSignature && sig != "verified" || verdict == "mismatch") {
+            return 403 to JSONObject().put("error", "Invalid signature")
+                .put("reason", if (verdict == "mismatch") "mismatch" else sig).toString()
         }
 
         val query = ex.requestURI.rawQuery.orEmpty()
@@ -174,6 +231,43 @@ class FakeCallServer(
         }
     }
 
+    /** `call_server.js` `app.post('/relay-token')`, patched `__CALL_MEDIA_AUTH_2026_09_23__`. */
+    private fun relayToken(body: ByteArray, sig: String, verdict: String): Pair<Int, String> {
+        val o = runCatching { JSONObject(String(body, Charsets.UTF_8)) }.getOrNull()
+        val me = o?.optString("identity").orEmpty()
+        val peer = o?.optString("peer").orEmpty()
+        val callId = o?.optString("callId").orEmpty()
+        val key32 = { k: String ->
+            runCatching { Base64.getUrlDecoder().decode(normalizeKey(k)).size == 32 }.getOrDefault(false)
+        }
+        if (!key32(me) || !key32(peer) || normalizeKey(me) == normalizeKey(peer) ||
+            !Regex("^[A-Za-z0-9._:-]{1,64}$").matches(callId)
+        ) {
+            relayTokenVerdicts += "bad-body"
+            return 400 to JSONObject().put("error", "Bad identity, peer or callId").toString()
+        }
+        if (sig != "verified" || verdict == "mismatch") {
+            val reason = when {
+                verdict == "mismatch" -> "mismatch"
+                sig == "unsigned" -> "unsigned"
+                sig == "timestamp-expired" -> "expired"
+                else -> "invalid"
+            }
+            relayTokenVerdicts += reason
+            return 403 to JSONObject().put("error", "Signature required").put("reason", reason).toString()
+        }
+        val rnd = java.security.SecureRandom()
+        val id = ByteArray(16).also(rnd::nextBytes)
+        val key = ByteArray(32).also(rnd::nextBytes)
+        val expiresAt = nowMs() + 4 * 3_600_000L
+        relayTokens[id.joinToString("") { "%02x".format(it.toInt() and 0xFF) }] =
+            IssuedToken(normalizeKey(me), normalizeKey(peer), callId, id, key, expiresAt)
+        relayTokenVerdicts += "issued"
+        val b64u = { b: ByteArray -> Base64.getUrlEncoder().withoutPadding().encodeToString(b) }
+        return 200 to JSONObject().put("tokenId", b64u(id)).put("macKey", b64u(key)).put("expiresAt", expiresAt)
+            .put("ttlMs", 14_400_000L).put("udpPort", 8089).put("mode", "dual").put("v", 1).toString()
+    }
+
     private fun deviceIdOf(query: String): String =
         query.split('&').firstOrNull { it.startsWith("deviceId=") }
             ?.removePrefix("deviceId=")
@@ -185,7 +279,45 @@ class FakeCallServer(
      * (`call_server.js:98-106`) — and `PATH` is `req.originalUrl.split('?')[0]` evaluated
      * HERE, i.e. after the nginx strip. That is the whole point of this function.
      */
-    private fun verifySignature(ex: HttpExchange, method: String, path: String, body: ByteArray): String {
+    /** Contract §3: where each route's CLAIMED identity is read from. */
+    private fun claimedIdentity(path: String, body: ByteArray): String? {
+        val o = runCatching { JSONObject(String(body, Charsets.UTF_8)) }.getOrNull()
+        return when {
+            path == "/signal" || path == "/end" -> o?.optString("sender")
+            path.startsWith("/signals/") -> URLDecoder.decode(path.removePrefix("/signals/"), "UTF-8")
+            path == "/signal-answered" || path == "/relay-token" -> o?.optString("identity")
+            else -> null
+        }?.takeIf { it.isNotEmpty() }
+    }
+
+    private fun bindingVerdict(sig: String, ex: HttpExchange, claimed: String?): String {
+        if (sig == "unsigned") return "unsigned"
+        if (sig != "verified") return "invalid"
+        if (claimed == null) return "unbound"
+        val pub = normalizeKey(ex.requestHeaders.getFirst("x-oshi-signing-pubkey"))
+        val bound = bindings[normalizeKey(claimed)] ?: return "unbound"
+        return if (normalizeKey(bound) == pub) "bound" else "mismatch"
+    }
+
+    /**
+     * Verifies over the stripped path OR any known prefix + stripped path — exactly what the
+     * patched server does (contract §2). The client signs the full path it requested.
+     */
+    private fun verifySignature(
+        ex: HttpExchange,
+        method: String,
+        path: String,
+        body: ByteArray,
+        prefixes: List<String>,
+    ): String {
+        val candidates = listOf(path) + prefixes.map { it + path }
+        val first = verifySignatureOver(ex, method, candidates.first(), body)
+        if (first != "invalid-signature") return first
+        for (c in candidates.drop(1)) if (verifySignatureOver(ex, method, c, body) == "verified") return "verified"
+        return first
+    }
+
+    private fun verifySignatureOver(ex: HttpExchange, method: String, path: String, body: ByteArray): String {
         val sig = ex.requestHeaders.getFirst("x-oshi-signature")
         val ts = ex.requestHeaders.getFirst("x-oshi-timestamp")
         val pub = ex.requestHeaders.getFirst("x-oshi-signing-pubkey")

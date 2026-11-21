@@ -203,18 +203,55 @@ class CallMediaTest {
     // ============================================================== the audio format
 
     /**
-     * **Big-endian.** `javax.sound.sampled` defaults to little-endian on a PCM line, and
-     * every multi-byte field in this protocol is big-endian. Getting it wrong is not
-     * silence — it is white noise, because every sample has its bytes swapped.
+     * **Little-endian samples**, even though every protocol HEADER field is big-endian.
+     * iOS assembles each `0x15` sample from `[lo, hi]` (`int16ToFloat32`, "LE assemble")
+     * and Android plays the bytes straight into `AudioTrack` (native LE). This test used
+     * to assert big-endian, which is white noise against every phone and invisible
+     * desktop ↔ desktop, where the two byte swaps cancel.
      */
     @Test
-    fun `the pcm format is 48k mono signed 16-bit BIG-endian`() {
+    fun `the pcm format is 48k mono signed 16-bit LITTLE-endian like the phones`() {
         val f = CallAudio.FORMAT
         assertEquals(48_000f, f.sampleRate, 0f)
         assertEquals(16, f.sampleSizeInBits)
         assertEquals(1, f.channels)
         assertEquals(AudioFormat.Encoding.PCM_SIGNED, f.encoding)
-        assertTrue("little-endian here is white noise on the far end", f.isBigEndian)
+        assertFalse("big-endian here is white noise on every phone", f.isBigEndian)
+    }
+
+    /** A phone's 0x15 sample 0x1234 arrives as bytes [0x34, 0x12]. */
+    @Test
+    fun `a phone sample reads back through the fade helper in little-endian order`() {
+        val frame = ByteArray(CallAudio.BYTES_PER_FRAME)
+        for (i in 0 until CallAudio.SAMPLES_PER_FRAME) { frame[2 * i] = 0x34; frame[2 * i + 1] = 0x12 }
+        val faded = CallAudio.fadeIn(frame)
+        assertEquals(0, faded[0].toInt()); assertEquals(0, faded[1].toInt())
+        // Past the 2 ms ramp the sample is untouched: 0x1234 in LE byte order.
+        assertEquals(0x34, faded[2 * 96].toInt()); assertEquals(0x12, faded[2 * 96 + 1].toInt())
+        // Half way: 0x1234 * 48 / 96 = 0x091A.
+        assertEquals(0x1A, faded[2 * 48].toInt() and 0xFF); assertEquals(0x09, faded[2 * 48 + 1].toInt())
+        assertEquals(0x34, frame[0].toInt()) // input untouched
+    }
+
+    /** __DROP_CLICK_FADE_2026_09_22__: an overflow drop is reported once, then cleared. */
+    @Test
+    fun `an overflow drop marks one discontinuity`() {
+        val b = PlaybackBuffer(maxFrames = 2)
+        b.offer(byteArrayOf(1)); b.offer(byteArrayOf(2))
+        assertFalse(b.consumeDiscontinuity())
+        b.offer(byteArrayOf(3))
+        assertEquals(1L, b.overflowDrops.get())
+        assertTrue(b.consumeDiscontinuity())
+        assertFalse(b.consumeDiscontinuity())
+    }
+
+    /** The App Store iPhone's ~32 ms frames are waited for, not padded with silence. */
+    @Test
+    fun `frame duration follows the frame and never drops below twenty ms`() {
+        assertEquals(20, CallAudio.frameMsFor(CallAudio.BYTES_PER_FRAME))
+        assertEquals(32, CallAudio.frameMsFor(3_072))
+        assertEquals(20, CallAudio.frameMsFor(10))
+        assertEquals(120, CallAudio.frameMsFor(1 shl 20))
     }
 
     /** 20 ms at 48 kHz mono 16-bit = 960 samples = 1 920 bytes, 50 fps. */
