@@ -151,7 +151,40 @@ def make_m4a(path):
 
 
 # --------------------------------------------------------------------------- screen
+def hide_runner_consoles():
+    """__RUNNER_CONSOLE_2026_11_21__ The windows-latest image of 2026-11-11 shows the runner's own
+    agent console ("C:\\ProgramData\\GitHub\\Host", a Windows Terminal window) ON TOP of
+    everything, so every screenshot was that console: OCR checks failed, or passed vacuously on its
+    text. Minimise terminal/console windows that are not OSHI's before each screenshot."""
+    if not IS_WIN:
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+        u = ctypes.windll.user32
+        cb_t = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        found = []
+        def cb(hwnd, _):
+            if u.IsWindowVisible(hwnd) and not u.IsIconic(hwnd):
+                cls = ctypes.create_unicode_buffer(256)
+                u.GetClassNameW(hwnd, cls, 256)
+                n = u.GetWindowTextLengthW(hwnd)
+                t = ctypes.create_unicode_buffer(n + 1)
+                u.GetWindowTextW(hwnd, t, n + 1)
+                if cls.value in ("CASCADIA_HOSTING_WINDOW_CLASS", "ConsoleWindowClass") and not t.value.startswith("OSHI"):
+                    found.append(hwnd)
+            return True
+        u.EnumWindows(cb_t(cb), 0)
+        for h in found:
+            u.ShowWindow(h, 6)  # SW_MINIMIZE
+        if found:
+            time.sleep(0.5)
+    except Exception as e:
+        print(f"   hide_runner_consoles failed: {e}")
+
+
 def shot(name):
+    hide_runner_consoles()
     try:
         from PIL import ImageGrab
         img = ImageGrab.grab(all_screens=True) if IS_WIN else ImageGrab.grab()
@@ -311,8 +344,31 @@ def close_window(win):
 
 
 # --------------------------------------------------------------------------- the window
+def window_affinity(hwnd):
+    """GetWindowDisplayAffinity of an OSHI window (0x11 = WDA_EXCLUDEFROMCAPTURE), or None."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        v = wintypes.DWORD()
+        return v.value if ctypes.windll.user32.GetWindowDisplayAffinity(wintypes.HWND(hwnd), ctypes.byref(v)) else None
+    except Exception:
+        return None
+
+
 class Gui:
-    def __init__(self, exe, home, tag, env_extra=None, args_extra=None, plain=False):
+    def __init__(self, exe, home, tag, env_extra=None, args_extra=None, plain=False, keep_capture_guard=False):
+        # __SCREEN_CAPTURE_GUARD_2026_11_21__ Since 1.6.0 the Windows window is EXCLUDED FROM
+        # SCREEN CAPTURE by default (anti-spyware, Android's FLAG_SECURE rule): every screenshot
+        # this harness takes shows the desktop with no OSHI in it. The profiles driven by OCR
+        # opt out exactly as a user would in Settings (screen-capture.json); one dedicated launch
+        # (keep_capture_guard=True) checks the default really is ON.
+        if IS_WIN and not keep_capture_guard:
+            d = Path(home) if home is not None else default_profile_dir()
+            try:
+                d.mkdir(parents=True, exist_ok=True)
+                (d / "screen-capture.json").write_text('{"protect":false}', encoding="utf-8")
+            except Exception as e:
+                print(f"   could not opt {d} out of the capture guard: {e}")
         env = dict(os.environ)
         env.pop("OSHI_PASSPHRASE", None)
         env.update(env_extra or {})
@@ -596,6 +652,16 @@ def run_all(gui_exe, console_exe, homes, app):
     ok, h = alice2.poll_history(b_addr, r"Bonjour depuis le PC", 30)
     record("ALICE's history survives the restart", ok, h[-600:])
     alice2.quit()
+
+    # 2b ----------------------------------------------------------- anti-spyware default (Windows)
+    if IS_WIN:
+        gg = Gui(gui_exe, homes / "Garde", "capture-guard", keep_capture_guard=True)
+        gw = gg.wait_window(90)
+        time.sleep(5)
+        aff = [window_affinity(h) for h, _ in gw]
+        record("Windows: the window is excluded from screen capture by default (WDA_EXCLUDEFROMCAPTURE)",
+               bool(aff) and all(a in (0x11, 0x1) for a in aff), f"affinity={aff} windows={gw}")
+        gg.stop()
 
     # 3 ------------------------------------------------------------------ a fresh WINDOW
     gui_home = homes / "Fenêtre"
