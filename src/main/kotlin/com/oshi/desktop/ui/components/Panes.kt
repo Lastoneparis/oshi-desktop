@@ -1,5 +1,7 @@
 package com.oshi.desktop.ui.components
 
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -20,6 +22,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -28,7 +32,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.sp
-import com.oshi.desktop.i18n.dt
 import com.oshi.desktop.i18n.t
 import com.oshi.desktop.ui.OshiTheme
 import com.oshi.desktop.ui.state.DesktopLimits
@@ -46,28 +49,17 @@ private val PROSE = 720.dp
  * the window can actually do next.
  */
 @Composable
-fun NoConversationPane(state: ShellState) {
-    Column(
-        Modifier.fillMaxSize().background(OshiTheme.surface).padding(OshiTheme.xxl),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        BrandDisc(Glyph.LOCK, Metrics.avatarLarge)
-        Spacer(Modifier.height(OshiTheme.lg))
-        Text(dt("desktop.noConversation.title"), style = OshiTheme.typography.headlineMedium, color = Ink.strong)
-        Spacer(Modifier.height(OshiTheme.sm))
-        Text(
-            // The count used to be spelled inline as `conversation` + an English `s`. That is
-            // an English plural rule hardcoded into a window that renders in 34 languages, and
-            // it cannot be fixed by translating the sentence: Polish needs three forms, Arabic
-            // six, Japanese none. iOS ships ZERO .stringsdict (CatalogAuditTest asserts it), so
-            // this project has no plural machinery to port and must not invent one — the string
-            // labels the number instead of agreeing with it, which is correct for every n.
-            if (state.conversations.isEmpty()) dt("desktop.noConversation.empty")
-            else dt("desktop.noConversation.count", state.conversations.size),
-            style = OshiTheme.typography.bodyLarge,
-            color = Ink.soft,
-            modifier = Modifier.widthIn(max = Metrics.bubbleMax),
+fun NoConversationPane(state: ShellState, onNewChat: (() -> Unit)? = null) {
+    // __MASCOT_EMPTY_2027__ Nothing open: the mascot, what to do, and the one action.
+    Box(Modifier.fillMaxSize().background(OshiTheme.paneGround), contentAlignment = Alignment.Center) {
+        MascotEmptyState(
+            mascot = if (state.conversations.isEmpty()) "ok" else "peek",
+            // Empty profile: the list already says "No conversations yet" with its own action,
+            // so this side says the other true thing — what OSHI promises — not the same line twice.
+            title = if (state.conversations.isEmpty()) t("chat.empty.title") else t("conv.no_selection.title"),
+            body = if (state.conversations.isEmpty()) t("chat.empty.subtitle") else t("conv.no_selection.body"),
+            size = 128.dp,
+            action = onNewChat?.let { t("chats.merged.new_chat") to it },
         )
     }
 }
@@ -77,68 +69,35 @@ fun NoConversationPane(state: ShellState) {
  *
  * Two of the paragraphs at the bottom exist because they are what a user would otherwise
  * discover the hard way: delivery stops when the window closes (there is no push on desktop,
- * PARITY.md row 2.3), and the message log on this disk is PLAINTEXT, which is a documented
- * regression from both phones rather than an oversight. Neither belongs only in a code
- * comment.
+ * PARITY.md row 2.3), and the message journal is encrypted at rest. Neither belongs only in a
+ * code comment.
  */
 @Composable
-fun AccountPane(state: ShellState, onCopyAddress: (String) -> Unit) {
-    Column(
-        Modifier.fillMaxSize().background(OshiTheme.surface).verticalScroll(rememberScrollState()).padding(OshiTheme.xxl),
-    ) {
-        Column(Modifier.widthIn(max = PROSE)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(OshiTheme.lg)) {
-                Monogram(state.displayName, state.selfAddress, Metrics.avatarLarge)
-                Column {
-                    Text(state.displayName, style = OshiTheme.typography.headlineMedium, color = Ink.strong)
-                    Spacer(Modifier.height(OshiTheme.xs))
-                    Text(state.selfAddressShort, fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = Ink.soft)
-                }
-            }
-
-            Spacer(Modifier.height(OshiTheme.xl))
-
-            Card {
-                FieldRow(t("settings.profile.name"), state.displayName)
-                Hairline()
-                FieldRow(
-                    dt("desktop.account.address.label"),
-                    state.selfAddress,
-                    mono = true,
-                    action = Glyph.COPY to { onCopyAddress(state.selfAddress) },
-                )
-                Hairline()
-                FieldRow(t("portal.app.relay"), state.relayUrl, mono = true)
-                Hairline()
-                FieldRow(
-                    dt("desktop.account.gate.label"),
-                    if (state.gateOpen) dt("desktop.account.gate.open.value")
-                    else dt("desktop.account.gate.closed.value"),
-                )
-            }
-
-            Spacer(Modifier.height(OshiTheme.xl))
-            // All three of these are desktop facts — no push, a plaintext log, a separate
-            // account — and none of them is true of either phone, so none has a key upstream.
-            FactCard(
-                Glyph.ALERT,
-                dt("desktop.account.fact.noPush.title"),
-                dt("desktop.account.fact.noPush.body"),
-            )
-            Spacer(Modifier.height(OshiTheme.md))
-            FactCard(
-                Glyph.LOCK,
-                dt("desktop.account.fact.plaintext.title"),
-                dt("desktop.account.fact.plaintext.body"),
-            )
-            Spacer(Modifier.height(OshiTheme.md))
-            FactCard(
-                Glyph.ALERT,
-                dt("desktop.account.fact.separate.title"),
-                dt("desktop.account.fact.separate.body"),
-            )
-            Spacer(Modifier.height(OshiTheme.xl))
-        }
+fun AccountPane(
+    state: ShellState,
+    onCopyAddress: (String) -> Unit,
+    onDeliveryReceipts: (Boolean) -> Unit,
+    onReadReceipts: (Boolean) -> Unit,
+    onTypingIndicators: (Boolean) -> Unit = {},
+    onSyncPush: () -> Unit,
+    onSyncPull: () -> Unit,
+) {
+    // __DESKTOP_SETTINGS_2027__ The same page as Settings › Account, so the menu-bar route
+    // and the Settings section can never disagree. Receipts and the privacy relay live under
+    // Settings › Privacy now.
+    SettingsPageFrame {
+        SettingsPageHeader(SettingsIcon.KEY, t("desktop.settings.section.account"), t("desktop.settings.account.subtitle"))
+        AccountSettingsContent(
+            state,
+            SettingsActions(
+                onCopy = onCopyAddress,
+                onDeliveryReceipts = onDeliveryReceipts,
+                onReadReceipts = onReadReceipts,
+                onTypingIndicators = onTypingIndicators,
+                onSyncPush = onSyncPush,
+                onSyncPull = onSyncPull,
+            ),
+        )
     }
 }
 
@@ -151,53 +110,58 @@ fun AccountPane(state: ShellState, onCopyAddress: (String) -> Unit) {
  */
 @Composable
 fun LimitsPane() {
-    Column(
-        Modifier.fillMaxSize().background(OshiTheme.surface).verticalScroll(rememberScrollState()).padding(OshiTheme.xxl),
-    ) {
-        Column(Modifier.widthIn(max = PROSE)) {
-            // The same key the menu item and the sidebar row use: three call sites, one
-            // sentence, so a retranslation can never leave the screen and its entry points
-            // disagreeing about what the screen is called.
-            Text(dt("desktop.nav.limits"), style = OshiTheme.typography.headlineLarge, color = Ink.strong)
-            Spacer(Modifier.height(OshiTheme.sm))
-            Text(
-                dt("desktop.limits.intro"),
-                style = OshiTheme.typography.bodyLarge,
-                color = Ink.soft,
-            )
-
-            Spacer(Modifier.height(OshiTheme.xl))
-            SectionHeading(dt("desktop.limits.missing.heading"), OshiTheme.danger)
-            Spacer(Modifier.height(OshiTheme.xs))
-            Text(
-                dt("desktop.limits.missing.note"),
-                fontSize = 11.sp,
-                color = Ink.soft,
-            )
-            Spacer(Modifier.height(OshiTheme.md))
-            Card {
+    var ledgerOpen by remember { mutableStateOf(false) }
+    // __DESKTOP_TOOLS_2027__ First what a COMPUTER cannot do and why, in the person's language;
+    // the engineering ledger below, row by row, translated too (__DESKTOP_LEDGER_TRANSLATED_2027__).
+    ToolScaffold(t("pc.limits.title"), subtitle = t("pc.limits.subtitle"), icon = ToolGlyph.INFO) {
+        ToolColumns(
+            first = {
+                LimitCard(ToolGlyph.ALERT, t("pc.limits.push.title"), t("pc.limits.push.why"))
+                LimitCard(ToolGlyph.LOCATE, t("pc.limits.gps.title"), t("pc.limits.gps.why"))
+                LimitCard(ToolGlyph.RADIO, t("pc.limits.bluetooth.title"), t("pc.limits.bluetooth.why"))
+                LimitCard(ToolGlyph.WIFI, t("pc.limits.nearby.title"), t("pc.limits.nearby.why"))
+            },
+            second = {
+                LimitCard(ToolGlyph.EYE_OFF, t("pc.limits.screenshot.title"), t("pc.limits.screenshot.why"))
+                LimitCard(ToolGlyph.CLOCK, t("pc.limits.watch.title"), t("pc.limits.watch.why"))
+                LimitCard(ToolGlyph.VIDEO, t("pc.limits.camera.title"), t("pc.limits.camera.why"))
+                LimitCard(ToolGlyph.SPARKLE, t("pc.limits.systemAi.title"), t("pc.limits.systemAi.why"))
+            },
+        )
+        ToolCard(title = t("pc.limits.ledger"), icon = ToolGlyph.DOC, trailing = {
+            ToolIconButton(ToolGlyph.CHEVRON, if (ledgerOpen) t("common.collapse") else t("common.expand"), active = ledgerOpen) { ledgerOpen = !ledgerOpen }
+        }) {
+            ToolHint(t("pc.limits.ledger.note"))
+            if (ledgerOpen) {
+                Text(t("desktop.limits.intro"), style = ToolType.caption, color = Ink.soft)
+                SectionHeading(t("desktop.limits.missing.heading"), OshiTheme.danger)
+                Text(t("desktop.limits.missing.note"), style = ToolType.caption, color = Ink.soft)
                 DesktopLimits.MISSING.forEachIndexed { i, limit ->
                     if (i > 0) Hairline()
-                    LimitRow(limit.what, limit.why, OshiTheme.danger)
+                    LimitRow(limit, OshiTheme.danger)
                 }
-            }
-
-            Spacer(Modifier.height(OshiTheme.xl))
-            SectionHeading(dt("desktop.limits.notYet.heading"), OshiTheme.brand)
-            Spacer(Modifier.height(OshiTheme.xs))
-            Text(
-                dt("desktop.limits.notYet.note"),
-                fontSize = 11.sp,
-                color = Ink.soft,
-            )
-            Spacer(Modifier.height(OshiTheme.md))
-            Card {
+                SectionHeading(t("desktop.limits.notYet.heading"), OshiTheme.brand)
+                Text(t("desktop.limits.notYet.note"), style = ToolType.caption, color = Ink.soft)
                 DesktopLimits.NOT_IN_THIS_WINDOW.forEachIndexed { i, limit ->
                     if (i > 0) Hairline()
-                    LimitRow(limit.what, limit.why, OshiTheme.brand)
+                    LimitRow(limit, OshiTheme.brand)
                 }
             }
-            Spacer(Modifier.height(OshiTheme.xl))
+        }
+    }
+}
+
+@Composable
+private fun LimitCard(glyph: ToolGlyph, title: String, why: String) {
+    ToolCard {
+        Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.md), verticalAlignment = Alignment.Top) {
+            Box(Modifier.size(36.dp).clip(CircleShape).background(OshiTheme.brand.copy(alpha = 0.12f)), contentAlignment = Alignment.Center) {
+                ToolIcon(glyph, OshiTheme.brand, 18.dp)
+            }
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(OshiTheme.xs)) {
+                Text(title, style = ToolType.bodyStrong, color = Ink.strong)
+                Text(why, style = ToolType.caption, color = Ink.soft)
+            }
         }
     }
 }
@@ -209,9 +173,7 @@ private fun Card(content: @Composable ColumnScope.() -> Unit) {
     Column(
         Modifier
             .fillMaxWidth()
-            .clip(OshiTheme.radiusMd)
-            .background(OshiTheme.surfaceElevated)
-            .border(Metrics.hairline, OshiTheme.separator, OshiTheme.radiusMd),
+            .glass(OshiTheme.radiusMd, OshiTheme.surfaceElevated, OshiTheme.separator),
     ) { content() }
 }
 
@@ -265,9 +227,7 @@ private fun FactCard(glyph: Glyph, title: String, body: String) {
     Row(
         Modifier
             .fillMaxWidth()
-            .clip(OshiTheme.radiusMd)
-            .background(OshiTheme.surfaceElevated)
-            .border(Metrics.hairline, OshiTheme.separator, OshiTheme.radiusMd)
+            .glass(OshiTheme.radiusMd, OshiTheme.surfaceElevated, OshiTheme.separator)
             .padding(OshiTheme.lg),
         horizontalArrangement = Arrangement.spacedBy(OshiTheme.md),
         verticalAlignment = Alignment.Top,
@@ -282,7 +242,7 @@ private fun FactCard(glyph: Glyph, title: String, body: String) {
 }
 
 @Composable
-private fun LimitRow(what: String, why: String, tint: Color) {
+private fun LimitRow(limit: DesktopLimits.Limit, tint: Color) {
     Row(
         Modifier.fillMaxWidth().padding(OshiTheme.lg),
         horizontalArrangement = Arrangement.spacedBy(OshiTheme.md),
@@ -290,9 +250,12 @@ private fun LimitRow(what: String, why: String, tint: Color) {
     ) {
         Box(Modifier.padding(top = OshiTheme.xs).size(6.dp).clip(CircleShape).background(tint))
         Column {
-            Text(what, style = OshiTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = Ink.strong)
+            Text(t(limit.titleKey), style = OshiTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold, color = Ink.strong)
             Spacer(Modifier.height(OshiTheme.xs))
-            Text(why, fontSize = 11.sp, color = Ink.soft)
+            Text(t(limit.whyKey), fontSize = 11.sp, color = Ink.soft)
+            Spacer(Modifier.height(OshiTheme.xs))
+            // A reference, not prose: the ledger row a developer can check this against.
+            Text("PARITY.md · " + limit.row, fontSize = 10.sp, color = Ink.soft.copy(alpha = 0.45f))
         }
     }
 }

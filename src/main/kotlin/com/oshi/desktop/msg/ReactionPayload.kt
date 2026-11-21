@@ -142,7 +142,88 @@ data class ReactionPayload(
             "\u262A\uFE0F",  // ☪️ muslim
             "\u2721\uFE0F",  // ✡️ jewish
             "\u2638\uFE0F",  // ☸️ buddhist
+            // __OSHI_SMILE_REACTION_2026_11_09__ iOS `case oshiSmile` — the OSHI mark
+            // (`OshiReaction.OSHI_SMILE`), appended last in the Swift enum too. iPhones
+            // that predate it still rewrite it to 👍 (see point 4 above).
+            "\u2B55\uD83D\uDE0A",  // ⭕😊 oshiSmile
         )
+
+        /**
+         * __O_BUBBLE_MASCOT_2026_11_16__ The canonical emoji of the 20 O-bubble mascots
+         * (`resources/mascot/manifest.json`, [com.oshi.desktop.mascot.OshiMascot]), in
+         * manifest order. Eleven are already in [IOS_EMOJI]; the other NINE — 😭 😡 🙏 😍
+         * 😎 😴 👋 🫣 🥲 — are not, and are sendable anyway because the mascot reaction
+         * picker offers them. That is a KNOWN cross-platform cost, accepted on purpose and
+         * written down rather than hidden: an iPhone whose `ReactionEmoji` lacks them
+         * (1.0.43 and every build to date) shows 👍 for those nine (disagreement 4 above).
+         * Android stores any string and shows them as sent. Anything outside BOTH lists is
+         * still refused. `OshiMascotTest` fails if this list drifts from the manifest.
+         *
+         * __REACTION_COMPAT_2026_11_16__ These are the CANONICAL (drawing) values. What is
+         * SENT is [MASCOT_WIRE_EMOJI]: cry now sends 😢, so eight, not nine, reach an
+         * iPhone as 👍, and only from the full picker.
+         */
+        val MASCOT_EMOJI: List<String> = listOf(
+            "\u2764\uFE0F",       // ❤️ love
+            "\uD83D\uDE02",       // 😂 laugh
+            "\uD83D\uDC4D",       // 👍 thumbs
+            "\uD83D\uDE2D",       // 😭 cry          (not in IOS_EMOJI)
+            "\uD83D\uDE2E",       // 😮 wow
+            "\uD83D\uDE21",       // 😡 angry        (not in IOS_EMOJI)
+            "\uD83D\uDE4F",       // 🙏 pray         (not in IOS_EMOJI)
+            "\uD83D\uDD25",       // 🔥 fire
+            "\uD83C\uDF89",       // 🎉 party
+            "\uD83D\uDE0D",       // 😍 hearteyes    (not in IOS_EMOJI)
+            "\uD83D\uDE18",       // 😘 kiss
+            "\uD83D\uDC4F",       // 👏 clap
+            "\uD83E\uDD14",       // 🤔 thinking
+            "\uD83D\uDE0E",       // 😎 cool         (not in IOS_EMOJI)
+            "\uD83D\uDE34",       // 😴 sleep        (not in IOS_EMOJI)
+            "\u2705",              // ✅ ok
+            "\uD83D\uDCAF",       // 💯 hundred
+            "\uD83D\uDC4B",       // 👋 wave         (not in IOS_EMOJI)
+            "\uD83E\uDEE3",       // 🫣 peek         (not in IOS_EMOJI)
+            "\uD83E\uDD72",       // 🥲 tearsmile    (not in IOS_EMOJI)
+        )
+
+        /**
+         * __REACTION_COMPAT_2026_11_16__ "Safe mapping" — the ONE table that decides what a
+         * mascot SENDS when that differs from its canonical emoji (key = canonical, value =
+         * wire). Decided with the user on 2026-11-16 because iOS 1.0.43, the build on sale,
+         * shows 👍 for every emoji outside [IOS_EMOJI]:
+         *
+         *  * cry (😭) sends 😢 (`sad`, known to every iPhone). It is still DRAWN as the cry
+         *    mascot here (😢 is the manifest's alias for cry), and a received 😭 too.
+         *
+         * The other eight unknown-to-iOS mascots stay sendable from the full picker, marked
+         * "new" ([isNewForOlderIphones]). To revert once iPhones know 😭: empty this map
+         * (and put cry back where the quick row wants it, `OshiMascot.REACTION_BAR_NAMES`);
+         * `ReactionCompatPolicyTest` pins both.
+         */
+        val MASCOT_WIRE_OVERRIDES: Map<String, String> = mapOf(
+            "\uD83D\uDE2D" to "\uD83D\uDE22",   // 😭 cry → 😢 sad
+        )
+
+        /** What a mascot whose canonical emoji is [canonical] puts on the wire. */
+        fun mascotWireEmoji(canonical: String): String = MASCOT_WIRE_OVERRIDES[canonical] ?: canonical
+
+        /** The wire value of every mascot, in [MASCOT_EMOJI] order. */
+        val MASCOT_WIRE_EMOJI: List<String> = MASCOT_EMOJI.map { mascotWireEmoji(it) }
+
+        /**
+         * True when an iPhone that predates the mascots (1.0.43) would show 👍 for [emoji] —
+         * what the picker's "new" hint is computed from, never a hand-kept list.
+         */
+        fun isNewForOlderIphones(emoji: String): Boolean =
+            !OshiReaction.isOshiMark(emoji) && emoji !in IOS_EMOJI
+
+        /**
+         * What [encode] accepts: iOS's set plus what a mascot actually SENDS
+         * ([MASCOT_WIRE_EMOJI]). A canonical emoji that is remapped (😭) is therefore no
+         * longer sendable from this client — nothing in the UI can produce it any more, and
+         * refusing it keeps a future call site from quietly bypassing the policy.
+         */
+        val SENDABLE_EMOJI: Set<String> = (IOS_EMOJI + MASCOT_WIRE_EMOJI + OshiReaction.OSHI_O).toSet()
 
         /** iOS's fallback when the emoji is unknown — `?? .thumbsUp` (`swift:165`). */
         const val IOS_FALLBACK_EMOJI = "\uD83D\uDC4D"   // 👍
@@ -150,7 +231,7 @@ data class ReactionPayload(
         /**
          * The exact bytes to put inside a v2 envelope's ciphertext.
          *
-         * Throws when [emoji] is outside [IOS_EMOJI]. That is the strict half of working
+         * Throws when [emoji] is outside [SENDABLE_EMOJI] ([IOS_EMOJI] + [MASCOT_WIRE_EMOJI]). That is the strict half of working
          * rule 2 and the caller cannot opt out of it, because the failure it prevents is
          * invisible: a rejected emoji is an error a developer sees, an accepted one is a
          * thumbs-up an iPhone user sees instead of what was sent.
@@ -168,8 +249,9 @@ data class ReactionPayload(
         ): String {
             require(messageId.isNotBlank()) { "a reaction with no target message id acks nothing" }
             require(senderPublicKey.isNotBlank()) { "iOS decodes senderPublicKey non-optionally" }
-            require(emoji in IOS_EMOJI) {
-                "emoji '$emoji' is not one of iOS's 20 ReactionEmoji raw values. iOS would " +
+            require(emoji in SENDABLE_EMOJI) {
+                "emoji '$emoji' is neither one of iOS's 20 ReactionEmoji raw values nor a " +
+                    "mascot's wire emoji (MASCOT_WIRE_EMOJI). iOS would " +
                     "not throw — its lenient decoder substitutes ${IOS_FALLBACK_EMOJI} " +
                     "(MessageReactionManager.swift:165), so the peer would see a reaction " +
                     "nobody sent. Pick from ReactionPayload.IOS_EMOJI."

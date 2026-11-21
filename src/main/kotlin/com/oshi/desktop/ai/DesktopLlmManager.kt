@@ -72,7 +72,38 @@ class DesktopLlmManager(
          * cleanup pipeline will not recognise its special tokens. Nothing here detects
          * that, which is worth knowing before blaming the model.
          */
-        const val MODEL_SOURCES: String = "see the KDoc on DesktopLlmManager.MODEL_SOURCES"
+        /**
+         * __MODEL_SOURCES_NAMED_2026_10_29__ The three the phones offer, written out so this
+         * can be PRINTED to a person.
+         *
+         * It used to be the literal string `"see the KDoc on DesktopLlmManager.MODEL_SOURCES"`,
+         * while the console told the user *"See DesktopLlmManager.MODEL_SOURCES for the three
+         * the Android client offers"* and the KDoc above said `see [MODEL_SOURCES]`. Three
+         * pointers in a ring, no model named anywhere in it, and the one the user was sent to
+         * is a Kotlin symbol they cannot open. Anyone following the app's own instruction to
+         * get a model learned nothing.
+         *
+         * Copied from iOS `LocalLLMManager.availableModels` so a phone and this client can
+         * share one file, which is the whole point of listing the phones' models rather than
+         * picking our own. Order and RAM floors are iOS's: it takes the FIRST whose floor the
+         * machine clears (`availableModels.first { totalRAMMB >= $0.minRAMMB }`), i.e. the
+         * largest that fits, and this text says so rather than leaving the reader to guess.
+         */
+        val MODEL_SOURCES: String = """
+            The phones offer three. Take the largest your RAM clears — that is the rule iOS
+            itself uses — and point /ai model at the file.
+
+              OSHI AI Pro       Qwen3-4B-Q4_K_M.gguf      2380 MB   needs 6 GB RAM
+                https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf
+
+              OSHI AI Standard  Qwen3-1.7B-Q4_K_M.gguf    1056 MB   needs 2.5 GB RAM
+                https://huggingface.co/unsloth/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q4_K_M.gguf
+
+              OSHI AI Lite      Qwen3-0.6B-Q8_0.gguf       610 MB   needs 1 GB RAM
+                https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf
+
+            Each is also mirrored at https://oshi-messenger.com/files/models/<filename>.
+        """.trimIndent()
 
         /**
          * Android tiers this by device RAM (128/192/256) because a phone that overruns its

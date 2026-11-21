@@ -56,7 +56,27 @@ object OSHIRatchetV2 {
         return header to ct
     }
 
+    /** Commit state only after authentication succeeds, including skipped-key removal.
+     * A damaged/replayed carrier must not consume the key needed by a valid retry.
+     */
     fun decrypt(state: State, header: Header, ciphertext: ByteArray, associatedData: ByteArray): ByteArray {
+        val working = State(
+            dhs = X25519Pair(state.dhs.priv.copyOf(), state.dhs.pub.copyOf()),
+            dhr = state.dhr?.copyOf(), rk = state.rk.copyOf(),
+            cks = state.cks?.copyOf(), ckr = state.ckr?.copyOf(),
+            ns = state.ns, nr = state.nr, pn = state.pn,
+            skipped = state.skipped.mapValues { it.value.copyOf() }.toMutableMap(),
+        )
+        val plaintext = decryptAuthenticated(working, header, ciphertext, associatedData)
+        state.dhs = working.dhs; state.dhr = working.dhr; state.rk = working.rk
+        state.cks = working.cks; state.ckr = working.ckr
+        state.ns = working.ns; state.nr = working.nr; state.pn = working.pn
+        state.skipped.clear(); state.skipped.putAll(working.skipped)
+        return plaintext
+    }
+
+    private fun decryptAuthenticated(state: State, header: Header, ciphertext: ByteArray, associatedData: ByteArray): ByteArray {
+        require(header.dh.size == 32 && header.n in 0..0xffffffffL && header.pn in 0..0xffffffffL)
         trySkipped(state, header, ciphertext, associatedData)?.let { return it }
 
         if (state.dhr == null || !header.dh.contentEquals(state.dhr)) {
@@ -89,6 +109,7 @@ object OSHIRatchetV2 {
         val dhr = state.dhr ?: return
         var chain = ckr
         while (state.nr < until) {
+            check(state.skipped.size < MAX_SKIP) { "too many retained skipped messages" }
             val (ck, mk) = OSHICryptoV2.kdfCK(chain)
             chain = ck
             state.skipped[skKey(dhr, state.nr)] = mk
