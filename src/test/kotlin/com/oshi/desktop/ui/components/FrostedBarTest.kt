@@ -61,9 +61,11 @@ class FrostedBarTest {
             for (f in 1..10) scene.render(f * 50_000_000L)
             val before = shot(scene.render(11 * 50_000_000L))
             val mid = Offset(w * scale / 2, h * scale / 2)
-            repeat(3) { i ->
-                scene.sendPointerEvent(PointerEventType.Scroll, mid, scrollDelta = Offset(0f, -1f))
-                scene.render((12 + i) * 50_000_000L)
+            // Several larger notches: a wheel notch is worth fewer pixels on Windows than on
+            // macOS/Linux, and three single notches left the list where it was on the Windows CI.
+            repeat(6) { i ->
+                scene.sendPointerEvent(PointerEventType.Scroll, mid, scrollDelta = Offset(0f, -4f))
+                scene.render((12 + i) * 10_000_000L + 600_000_000L)
             }
             for (f in 15..20) scene.render(f * 50_000_000L)
             val after = shot(scene.render(21 * 50_000_000L))
