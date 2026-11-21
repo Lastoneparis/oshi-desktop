@@ -375,6 +375,7 @@ fun runDesktopUi(client: OshiClient, startHidden: Boolean = false) {
                 onDispose { }
             }
             MacTitleBarAppearance(window)
+            LinuxTitleBarAppearance(window)
             DisposableEffect(window) {
                 DialogOwner.current = window
                 onDispose { if (DialogOwner.current === window) DialogOwner.current = null }

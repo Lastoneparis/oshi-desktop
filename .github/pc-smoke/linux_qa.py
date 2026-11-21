@@ -183,6 +183,34 @@ def shell_eval(js):
     return (r.stdout + r.stderr).strip()
 
 
+LIGHT_TITLE = {}
+
+
+def title_bar(name):
+    """(_GTK_THEME_VARIANT of the OSHI window, mean luminance of a strip of its WM title bar, shot)."""
+    wid = (window_ids() or [None])[0]
+    if wid is None:
+        return "no window", None, None
+    prop = subprocess.run(["xprop", "-id", wid, "_GTK_THEME_VARIANT"], capture_output=True, text=True).stdout.strip()
+    geo = subprocess.run(["xdotool", "getwindowgeometry", wid], capture_output=True, text=True).stdout
+    p = S.shot(name)
+    lum = None
+    try:
+        m1 = re.search(r"Position:\s*(\d+),(\d+)", geo); m2 = re.search(r"Geometry:\s*(\d+)x(\d+)", geo)
+        x, y, w = int(m1.group(1)), int(m1.group(2)), int(m2.group(1))
+        from PIL import Image
+        img = Image.open(p).convert("L")
+        # the frame's title bar is above the client area; sample a strip left of centre (avoid the title text)
+        ys = [yy for yy in range(max(0, y - 30), max(1, y - 6))]
+        xs = range(x + 20, x + w // 3)
+        vals = [img.getpixel((xx, yy)) for yy in ys for xx in xs if 0 <= xx < img.width and 0 <= yy < img.height]
+        lum = round(sum(vals) / len(vals), 1) if vals else None
+    except Exception as e:
+        print(f"   title bar sample failed: {e} {geo}")
+    print(f"   [{name}] {prop} luminance={lum}")
+    return prop, lum, str(p)
+
+
 def gnome(exe, work):
     home = work / "gnome"
     print("   overview hide:", shell_eval("Main.overview.hide(); 'ok'"))
@@ -198,6 +226,10 @@ def gnome(exe, work):
     S.click_create("gnome-create")
     t = wait_text(r"Select a chat|Chats|Filter chats", "gnome-main", 90)
     S.record("GNOME: main window", t is not None, g.log()[-1500:])
+    light_prop, light_lum, shot_l = title_bar("gnome-light-titlebar")
+    LIGHT_TITLE["lum"] = light_lum
+    S.record("GNOME Light: _GTK_THEME_VARIANT is light", "light" in light_prop, light_prop)
+    S.record("GNOME Light: the title bar is light", light_lum is not None and light_lum > 170, f"luminance={light_lum} {shot_l}")
     apps = shell_eval("global.get_window_actors().map(a => { const w = a.meta_window; "
                       "const app = Shell.WindowTracker.get_default().get_window_app(w); "
                       "return w.get_wm_class() + ' -> ' + (app ? app.get_id() : 'none'); }).join('; ')")
@@ -213,6 +245,17 @@ def gnome(exe, work):
     while time.time() < deadline and g.alive():
         time.sleep(1)
     S.record("GNOME (no tray): closing the window quits OSHI", not g.alive(), g.log()[-1500:])
+    g.stop()
+    # __LINUX_DARK_TITLE_BAR_2026_11_21__ the same profile in Dark/OLED: the frame Mutter draws must turn dark.
+    (home / "appearance-preferences.json").write_text('{"theme":"dark","oledBlack":true}', encoding="utf-8")
+    g = gui(exe, home, "gnome-dark", env_extra={"OSHI_PASSPHRASE": PASS})
+    g.wait_window(120)
+    print("   overview hide:", shell_eval("Main.overview.hide(); 'ok'"))
+    wait_text(r"Select a chat|Chats|Filter chats", "gnome-dark-main", 90)
+    time.sleep(3)
+    dark_prop, dark_lum, shot_d = title_bar("gnome-dark-titlebar")
+    S.record("GNOME Dark/OLED: _GTK_THEME_VARIANT is dark", "dark" in dark_prop, dark_prop)
+    S.record("GNOME Dark/OLED: the title bar Mutter draws is dark", dark_lum is not None and dark_lum < 110, f"luminance={dark_lum} light-run={LIGHT_TITLE.get('lum')} {shot_d}")
     g.stop()
 
 
