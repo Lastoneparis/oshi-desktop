@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "product": "oshi-desktop",
+  "version": "9.8.7",
+  "released": "2026-11-21",
+  "page": "https://oshi-messenger.com/desktop",
+  "files": {
+    "exe": {
+      "url": "https://oshi-messenger.com/downloads/OSHI-9.8.7.exe",
+      "sha256": "e71c9742438f181bc4ae373d380b6d0e052edae60482ad89a04a2c5c9f0471f0",
+      "size": 9
+    },
+    "msi": {
+      "url": "https://oshi-messenger.com/downloads/OSHI-9.8.7.msi",
+      "sha256": "15459d13b0388fb52eb7d37c93a502a1fd9e2ce7fd2d7bea98d216df37a5cee7",
+      "size": 10
+    },
+    "deb": {
+      "url": "https://oshi-messenger.com/downloads/oshi-desktop_9.8.7-1_amd64.deb",
+      "sha256": "9cfa1468c93fc18652e34a000f0c6614b0fa18f6f4887477ad9b0d36ca6a7eaa",
+      "size": 3
+    },
+    "rpm": {
+      "url": "https://oshi-messenger.com/downloads/oshi-desktop-9.8.7-1.x86_64.rpm",
+      "sha256": "e262f1de2c38fd96cb1a8a8410f58222f0e0b5681b84217b877e78c114eb9a31",
+      "size": 9
+    }
+  },
+  "notes": {
+    "en": "Faster startup.",
+    "fr": "Démarrage plus rapide."
+  }
+}

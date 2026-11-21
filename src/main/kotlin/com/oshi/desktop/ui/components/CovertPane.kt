@@ -1,30 +1,15 @@
 package com.oshi.desktop.ui.components
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
+import com.oshi.desktop.i18n.t
+import com.oshi.desktop.ui.OshiTheme
 import com.oshi.desktop.covert.CovertText
 import com.oshi.desktop.covert.TextSteganography
-import com.oshi.desktop.ui.OshiTheme
 import com.oshi.desktop.ui.state.ContactRow
 
 /**
@@ -58,8 +43,7 @@ import com.oshi.desktop.ui.state.ContactRow
  * only has to phrase. A composable recomposes at times it does not choose; it is the wrong
  * place for anything that must happen exactly once.
  *
- * Strings are English in the window, matching every other pane in this client. That is a
- * known debt, not a decision — see the desktop overlay catalog.
+ * __DESKTOP_TOOLS_2027__ Now in the 34 languages (`pc.covert.*`), drawn with the tool kit.
  */
 @Composable
 fun CovertPane(
@@ -69,7 +53,6 @@ fun CovertPane(
     modifier: Modifier = Modifier,
 ) {
     val known = remember(contacts) { contacts.filterNot { it.blocked } }
-
     var hiding by remember { mutableStateOf(true) }
     var peer by remember(known) { mutableStateOf(known.firstOrNull()?.address.orEmpty()) }
     var message by remember { mutableStateOf("") }
@@ -78,214 +61,92 @@ fun CovertPane(
     var incoming by remember { mutableStateOf("") }
     var revealed by remember { mutableStateOf<String?>(null) }
     var note by remember { mutableStateOf<String?>(null) }
+    var limitsOpen by remember { mutableStateOf(false) }
 
-    Column(
-        modifier
-            .fillMaxSize()
-            .background(OshiTheme.surface)
-            .verticalScroll(rememberScrollState())
-            .padding(OshiTheme.xl),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Column(Modifier.widthIn(max = 720.dp)) {
-
-            PaneHeading(
-                "Covert text",
-                "Hide a message inside ordinary prose. OSHI does not send it — you copy it " +
-                    "out and carry it by whatever channel is open.",
-            )
-
-            if (known.isEmpty()) {
-                PaneCard {
-                    Text(
-                        "No contacts yet. A covert message is addressed to one person: the " +
-                            "carrier only opens with the key agreement between your two " +
-                            "identities. Add someone under New first.",
-                        style = OshiTheme.typography.bodyMedium,
-                        color = Ink.soft,
-                    )
+    ToolScaffold(t("pc.covert.title"), modifier, subtitle = t("pc.covert.subtitle"), icon = ToolGlyph.EYE_OFF, actions = {
+        ToolIconButton(ToolGlyph.INFO, t("pc.covert.limits.title"), active = limitsOpen) { limitsOpen = !limitsOpen }
+    }) {
+        if (limitsOpen) ToolCard(title = t("pc.covert.limits.title"), icon = ToolGlyph.SHIELD) {
+            for (k in listOf(t("pc.covert.limits.visible"), t("pc.covert.limits.forward"), t("pc.covert.limits.desktop"))) {
+                Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm)) {
+                    Text("•", style = ToolType.body, color = Ink.soft)
+                    Text(k, style = ToolType.body, color = Ink.strong)
                 }
-                return@Column
             }
-
-            // ---------------------------------------------------------------- who
-            PaneCard {
-                Text("For", style = OshiTheme.typography.titleMedium, color = Ink.strong)
-                Spacer(Modifier.height(OshiTheme.xs))
-                Text(
-                    "The carrier opens for this contact and for nobody else, including you " +
-                        "afterwards unless you keep the plain text.",
-                    style = OshiTheme.typography.bodySmall,
-                    color = Ink.soft,
+        }
+        if (known.isEmpty()) {
+            ToolEmptyState(t("empty.no_contacts"), t("pc.covert.noContacts"), mascot = "thinking")
+            return@ToolScaffold
+        }
+        ToolColumns(
+            minTwoColumnWidth = 820.dp,
+            first = {
+                ToolCard(title = t("pc.covert.for"), icon = ToolGlyph.PEOPLE) {
+                    ToolHint(t("pc.covert.for.hint"))
+                    for (c in known) ToolRow(
+                        c.label, subtitle = c.addressShort,
+                        leading = { Monogram(c.label, c.address, 32.dp) },
+                        selected = c.address == peer,
+                        onClick = { peer = c.address; carrier = ""; revealed = null; note = null },
+                    ) { if (c.address == peer) ToolIcon(ToolGlyph.CHECK, OshiTheme.brand, 16.dp) }
+                }
+            },
+            second = {
+                ToolTabs(
+                    listOf(true, false), hiding,
+                    label = { if (it) t("pc.covert.hide") else t("pc.covert.reveal") },
+                    icon = { if (it) ToolGlyph.LOCK else ToolGlyph.KEY },
+                    onSelect = { hiding = it; note = null; revealed = null },
                 )
-                Spacer(Modifier.height(OshiTheme.md))
-                for (c in known) {
-                    PeerChoice(c, selected = c.address == peer) {
-                        peer = c.address
-                        carrier = ""; revealed = null; note = null
-                    }
-                    Hairline(inset = Metrics.separatorInset)
-                }
-            }
-
-            Spacer(Modifier.height(OshiTheme.lg))
-
-            SegmentedControl(
-                options = listOf(true, false),
-                selected = hiding,
-                label = { if (it) "Hide a message" else "Reveal one" },
-                onSelect = { hiding = it; note = null; revealed = null },
-                modifier = Modifier.fillMaxWidth(),
-            )
-
-            Spacer(Modifier.height(OshiTheme.lg))
-
-            if (hiding) {
-                PaneCard {
-                    Text("Message", style = OshiTheme.typography.titleMedium, color = Ink.strong)
-                    Spacer(Modifier.height(OshiTheme.xs))
-                    PasteField(message, { message = it; note = null }, "What you actually want to say")
-
-                    Spacer(Modifier.height(OshiTheme.lg))
+                if (hiding) ToolCard {
+                    Text(t("new.composer.message"), style = ToolType.bodyStrong, color = Ink.strong)
+                    ToolField(message, { message = it; note = null }, t("pc.covert.message.placeholder"), Modifier.fillMaxWidth(), singleLine = false, minHeight = 76.dp)
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("Cover text", style = OshiTheme.typography.titleMedium, color = Ink.strong)
-                        Spacer(Modifier.weight(1f))
-                        TextAction("Suggest one") {
-                            cover = covert.suggestCover(TextSteganography.CoverTextStyle.SOCIAL_COMMENT)
-                            note = null
+                        Text(t("pc.covert.cover"), style = ToolType.bodyStrong, color = Ink.strong, modifier = Modifier.weight(1f))
+                        ToolButton(t("pc.covert.suggest"), icon = ToolGlyph.SPARKLE, style = ToolButtonStyle.QUIET) {
+                            cover = covert.suggestCover(TextSteganography.CoverTextStyle.SOCIAL_COMMENT); note = null
                         }
                     }
-                    Spacer(Modifier.height(OshiTheme.xs))
-                    Text(
-                        "The prose a reader sees. Longer carries more: this one holds about " +
-                            "${covert.roomFor(cover, TextSteganography.Method.COMBINED)} " +
-                            "characters of message.",
-                        style = OshiTheme.typography.bodySmall,
-                        color = Ink.soft,
-                    )
-                    Spacer(Modifier.height(OshiTheme.xs))
-                    PasteField(cover, { cover = it; note = null }, "Paste or write something unremarkable")
-
-                    Spacer(Modifier.height(OshiTheme.lg))
-                    PrimaryButton("Hide it", enabled = message.isNotEmpty() && cover.isNotEmpty()) {
+                    ToolHint(t("pc.covert.cover.room", covert.roomFor(cover, TextSteganography.Method.COMBINED)))
+                    ToolField(cover, { cover = it; note = null }, t("pc.covert.cover.placeholder"), Modifier.fillMaxWidth(), singleLine = false, minHeight = 76.dp)
+                    ToolButton(t("pc.covert.hide.action"), icon = ToolGlyph.LOCK, style = ToolButtonStyle.PRIMARY, enabled = message.isNotEmpty() && cover.isNotEmpty()) {
                         when (val r = covert.hide(message, cover, peer)) {
                             is CovertText.Hidden.Carrier -> { carrier = r.text; note = null }
-                            is CovertText.Hidden.CoverTooShort -> {
-                                carrier = ""
-                                note = "The cover text is too short: it holds ${r.available} bytes " +
-                                    "and this message needs ${r.needed}. Lengthen the cover, or " +
-                                    "shorten the message."
-                            }
-                            CovertText.Hidden.UnknownPeer ->
-                                { carrier = ""; note = "That contact's address is not usable." }
-                            CovertText.Hidden.EmptyMessage ->
-                                { carrier = ""; note = "Nothing to hide." }
-                            CovertText.Hidden.Refused ->
-                                { carrier = ""; note = "This cover text cannot carry a payload. Try another." }
+                            is CovertText.Hidden.CoverTooShort -> { carrier = ""; note = t("pc.covert.tooShort", r.available, r.needed) }
+                            CovertText.Hidden.UnknownPeer -> { carrier = ""; note = t("pc.covert.unknownPeer") }
+                            CovertText.Hidden.EmptyMessage -> { carrier = ""; note = t("pc.covert.nothing") }
+                            CovertText.Hidden.Refused -> { carrier = ""; note = t("pc.covert.refused") }
                         }
                     }
-
                     if (carrier.isNotEmpty()) {
-                        Spacer(Modifier.height(OshiTheme.lg))
-                        Text("Carrier", style = OshiTheme.typography.titleMedium, color = Ink.strong)
-                        Spacer(Modifier.height(OshiTheme.xs))
-                        Text(
-                            "Copy this whole block — it reads as the cover text and carries the " +
-                                "message in characters you cannot see. Anything that rewrites or " +
-                                "trims the text destroys the payload.",
-                            style = OshiTheme.typography.bodySmall,
-                            color = Ink.soft,
-                        )
-                        Spacer(Modifier.height(OshiTheme.xs))
+                        Hairline()
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(t("pc.covert.carrier"), style = ToolType.bodyStrong, color = Ink.strong, modifier = Modifier.weight(1f))
+                            ToolButton(t("common.copy"), icon = ToolGlyph.COPY) { onCopy(carrier) }
+                        }
+                        ToolHint(t("pc.covert.carrier.hint"))
                         MonoBlock(carrier)
-                        Spacer(Modifier.height(OshiTheme.md))
-                        TextAction("Copy carrier") { onCopy(carrier) }
                     }
-                }
-            } else {
-                PaneCard {
-                    Text("Paste what you received", style = OshiTheme.typography.titleMedium, color = Ink.strong)
-                    Spacer(Modifier.height(OshiTheme.xs))
-                    Text(
-                        "Paste the text exactly as it arrived. Retyping it, or letting an app " +
-                            "reformat it, removes the hidden characters.",
-                        style = OshiTheme.typography.bodySmall,
-                        color = Ink.soft,
-                    )
-                    Spacer(Modifier.height(OshiTheme.xs))
-                    PasteField(incoming, { incoming = it; revealed = null; note = null }, "Paste here")
-
-                    Spacer(Modifier.height(OshiTheme.lg))
-                    PrimaryButton("Reveal", enabled = incoming.isNotEmpty()) {
+                } else ToolCard {
+                    Text(t("pc.covert.paste"), style = ToolType.bodyStrong, color = Ink.strong)
+                    ToolHint(t("pc.covert.paste.hint"))
+                    ToolField(incoming, { incoming = it; revealed = null; note = null }, t("pc.covert.paste.placeholder"), Modifier.fillMaxWidth(), singleLine = false, minHeight = 96.dp)
+                    ToolButton(t("pc.covert.reveal.action"), icon = ToolGlyph.KEY, style = ToolButtonStyle.PRIMARY, enabled = incoming.isNotEmpty()) {
                         val out = covert.reveal(incoming, peer)
                         revealed = out
-                        // One message for every failure, because distinguishing them would
-                        // confirm to anyone running this client whether a given text is a
-                        // carrier addressed to a given contact.
-                        note = if (out == null)
-                            "Nothing readable for this contact. Either it carries nothing, it " +
-                                "is addressed to someone else, or it was altered in transit."
-                        else null
+                        note = if (out == null) t("pc.covert.unreadable") else null
                     }
-
                     revealed?.let {
-                        Spacer(Modifier.height(OshiTheme.lg))
-                        Text("Hidden message", style = OshiTheme.typography.titleMedium, color = Ink.strong)
-                        Spacer(Modifier.height(OshiTheme.xs))
+                        Hairline()
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(t("pc.covert.hidden"), style = ToolType.bodyStrong, color = Ink.strong, modifier = Modifier.weight(1f))
+                            ToolButton(t("common.copy"), icon = ToolGlyph.COPY) { onCopy(it) }
+                        }
                         MonoBlock(it)
-                        Spacer(Modifier.height(OshiTheme.md))
-                        TextAction("Copy message") { onCopy(it) }
                     }
                 }
-            }
-
-            note?.let {
-                Spacer(Modifier.height(OshiTheme.md))
-                Text(it, style = OshiTheme.typography.bodySmall, color = Ink.soft)
-            }
-
-            Spacer(Modifier.height(OshiTheme.lg))
-
-            // ------------------------------------------------------- the honest part
-            PaneCard {
-                Text("What this does not do", style = OshiTheme.typography.titleMedium, color = Ink.strong)
-                Spacer(Modifier.height(OshiTheme.xs))
-                Text(
-                    "It hides a message from a reader, not from an analyst. The carrier uses " +
-                        "invisible characters: someone inspecting the bytes can see them, and a " +
-                        "platform that strips them destroys the message.\n\n" +
-                        "It has no forward secrecy. The key is the agreement between your two " +
-                        "identities and never changes, so one compromised identity key opens " +
-                        "every carrier ever written between you. Ordinary OSHI messages do not " +
-                        "work this way.\n\n" +
-                        "It is desktop to desktop for now. The phone apps carry the same format " +
-                        "underneath but expose no screen for it.",
-                    style = OshiTheme.typography.bodySmall,
-                    color = Ink.soft,
-                )
-            }
-        }
-    }
-}
-
-/** One selectable contact. Deliberately plain: this list is a choice, not a conversation. */
-@Composable
-private fun PeerChoice(c: ContactRow, selected: Boolean, onPick: () -> Unit) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .clip(OshiTheme.radiusMd)
-            .background(if (selected) OshiTheme.surfaceElevated else OshiTheme.surface)
-            .clickable(onClick = onPick)
-            .padding(OshiTheme.md),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Monogram(c.label, c.address, Metrics.avatarHeader)
-        Spacer(Modifier.widthIn(min = OshiTheme.md))
-        Column(Modifier.weight(1f)) {
-            Text(c.label, style = OshiTheme.typography.bodyMedium, color = Ink.strong)
-            Text(c.addressShort, style = OshiTheme.typography.bodySmall, color = Ink.soft)
-        }
-        if (selected) Text("✓", style = OshiTheme.typography.bodyMedium, color = OshiTheme.brand)
+                note?.let { ToolNotice(it, ToolTone.WARNING) }
+            },
+        )
     }
 }

@@ -5,7 +5,10 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Typography
-import androidx.compose.material3.lightColorScheme
+import androidx.compose.material3.ColorScheme
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -52,22 +55,56 @@ object OshiTheme {
     // ------------------------------------------------------------------ colour
     // Theme.swift:18-19 — Color(red:0.337, green:0.086, blue:0.925) and the accent pink.
 
-    val brand = Color(0.337f, 0.086f, 0.925f)
+    /**
+     * __OLED_BLACK_2026_11_16__ THE PALETTE IS STATE NOW. Every colour token below that
+     * depends on light/dark is a GETTER over [palette], which reads two snapshot states
+     * ([appearance] and [systemDark]). Call sites did not change: a composable that reads
+     * `OshiTheme.surface` is subscribed to the palette by that read and recomposes when the
+     * person flips the setting — which is what "applies live" needs, with no CompositionLocal
+     * threaded through 36 files. See `OshiPalette` for the values and the reasoning.
+     */
+    var appearance: Appearance by mutableStateOf(Appearance.DEFAULT)
+
+    /** What the OS reports; written by [OshiMaterialTheme] from `isSystemInDarkTheme()`. */
+    var systemDark: Boolean by mutableStateOf(false)
+
+    val palette: OshiPalette get() = OshiPalette.resolve(appearance, systemDark)
+
+    /**
+     * The shipped violet as a FILL — constant in every theme. White on it is 7.74:1, and the
+     * outgoing bubble and primary buttons draw with it (via [brandGradient]).
+     */
+    val brandFill = Color(0.337f, 0.086f, 0.925f)
+
+    /**
+     * The violet as INK: text, glyphs, cursors, selection tints. It is [brandFill] in light;
+     * on a dark ground #5616EC measures 2.7:1 against black, so the dark palettes lighten it
+     * to #A98BFF — the same hue, readable. The accent stays purple.
+     */
+    val brand: Color get() = palette.brand
     val brandSecondary = Color(0.94f, 0.28f, 0.56f)
 
     /** Theme.swift:20-23 — brand → Color(red:0.20, green:0.40, blue:0.95). */
-    val brandGradient = Brush.linearGradient(listOf(brand, Color(0.20f, 0.40f, 0.95f)))
+    val brandGradient = Brush.linearGradient(listOf(brandFill, Color(0.20f, 0.40f, 0.95f)))
 
     /**
      * iOS reads these from UIKit semantic colours, which have no desktop equivalent, so
-     * they are pinned to the light-mode values those semantics resolve to on macOS. Named
-     * after the iOS semantic they stand in for, so a future dark mode has an obvious seam.
+     * they are pinned to the values those semantics resolve to on macOS — light ones in
+     * [OshiPalette.LIGHT], dark ones in [OshiPalette.DARK] / [OshiPalette.OLED].
      */
-    val background = Color(0xFFFFFFFF)              // systemBackground
-    val surface = Color(0xFFF2F2F7)                 // secondarySystemBackground
-    val surfaceElevated = Color(0xFFFFFFFF)         // tertiarySystemBackground
-    val separator = Color(0x4D3C3C43)               // separator (30% on light)
-    val textPrimary = Color(0xFF000000)             // label
+    val background: Color get() = palette.background              // systemBackground
+    val surface: Color get() = palette.surface                    // secondarySystemBackground
+    val surfaceElevated: Color get() = palette.surfaceElevated    // tertiarySystemBackground
+    val separator: Color get() = palette.separator                // separator (30% on light)
+    val textPrimary: Color get() = palette.textPrimary            // label
+    /** Hairline around cards; only OLED draws one (black card on a near-black ground). */
+    val cardOutline: Color get() = palette.cardOutline
+    /** The selected segment of a segmented control. White in light, lifted grey in dark. */
+    val selectedFill: Color get() = palette.selectedFill
+    /** The ground a whole pane is painted on — black in OLED (__OLED_GLASS_2026_11_16__). */
+    val paneGround: Color get() = palette.paneGround
+    /** The glass treatment, or null where the palette is flat. See `GlassTokens`. */
+    val glass: GlassTokens? get() = palette.glass
     /**
      * **Deliberately NOT iOS's `secondaryLabel`, and this is the one token that departs.**
      *
@@ -80,12 +117,12 @@ object OshiTheme {
      * 60% black is #666666 → **5.74:1**. The rhythm of the design is unchanged; the text
      * is legible. Fidelity to a palette is not worth failing contrast on the most-read
      * text in the app, and a token that fails AA must not sit in this file waiting for the
-     * next surface to use it.
+     * next surface to use it. (Dark: 60% white, measured per surface in PaletteContrastTest.)
      */
-    val textSecondary = Color(0x99000000)
-    val success = Color(0xFF34C759)
-    val danger = Color(0xFFFF3B30)
-    val warning = Color(0xFFFF9500)
+    val textSecondary: Color get() = palette.textSecondary
+    val success: Color get() = palette.success
+    val danger: Color get() = palette.danger
+    val warning: Color get() = palette.warning
 
     /**
      * THE OUTGOING BUBBLE IS A GRADIENT, NOT A FLAT FILL.
@@ -128,10 +165,10 @@ object OshiTheme {
     }
 
     // Theme.swift:36-39 — incoming is the grey surface; outgoing is the gradient above.
-    val bubbleOutgoing = brand
+    val bubbleOutgoing = brandFill
     val bubbleOutgoingText = Color.White
-    val bubbleIncoming = surface
-    val bubbleIncomingText = textPrimary
+    val bubbleIncoming: Color get() = palette.bubbleIncoming
+    val bubbleIncomingText: Color get() = palette.textPrimary
 
     // ------------------------------------------------------------------ spacing
     // Theme.swift:43-50, verbatim.
@@ -189,48 +226,118 @@ object OshiTheme {
         labelSmall = TextStyle(fontFamily = family, fontSize = 11.sp, fontWeight = FontWeight.Medium),
     )
 
-    val colors = lightColorScheme(
-        primary = brand,
-        onPrimary = Color.White,
-        secondary = brandSecondary,
-        background = background,
-        onBackground = textPrimary,
-        surface = surfaceElevated,
-        onSurface = textPrimary,
-        surfaceVariant = surface,
-        onSurfaceVariant = textSecondary,
-        error = danger,
-        outline = separator,
-    )
+    /** The Material scheme for the current palette (built once per palette). */
+    val colors: ColorScheme get() = palette.scheme
 
     /**
-     * The deterministic avatar gradient, mirroring the capture's circular monogram.
+     * __AVATAR_PALETTE_V2_2026_11_17__ The default-avatar palette — the SAME one the
+     * phones draw, from the one spec all three platforms share:
+     * `docs/avatar-palette.json` (hex values, gradient direction, highlight geometry,
+     * selection rule and identifier -> slot vectors). `AvatarParityTest` re-reads that
+     * file, so this client cannot drift from iOS/Android alone.
      *
-     * Derived from the address so the same peer is the same colour on every launch and on
-     * every machine, with no stored state — the desktop has no avatar to show (row 0.18:
-     * an Android peer's profile picture rides the legacy lane and never arrives), and a
-     * grey circle for everyone is worse than a stable identifying one.
+     * v1 (`__ONE_AVATAR_NOT_THREE_2026_11_07__`) ported the phones' fourteen flat hues and
+     * FNV-1a slot, replacing a desktop-only `h * 31 + c.code` hash that made one person a
+     * different colour here than on their iPhone. v2 (owner: "more agreeable and
+     * diversified colours or texture") is sixteen two-tone soft gradients — nine mid tones
+     * with WHITE initials, seven pastels with a deep ink of their own hue — plus a soft
+     * radial light blob baked into the fill (see `Monogram`).
+     *
+     * Selection: trim; a UUID (group id) is lowercased — iOS spells `uuidString` in
+     * UPPERCASE — anything else (a peer's base64 public key) is used verbatim; SHA-256 over
+     * the UTF-8 bytes; slot = first digest byte mod 16.
      */
-    fun avatarBrush(address: String): Brush {
-        var h = 0
-        for (c in address) h = h * 31 + c.code
-        val hue = ((h % 360) + 360) % 360
-        return Brush.linearGradient(
-            listOf(
-                Color.hsv(hue.toFloat(), 0.62f, 0.86f),
-                Color.hsv(((hue + 38) % 360).toFloat(), 0.70f, 0.72f),
-            )
-        )
+    data class AvatarEntry(val start: Color, val end: Color, val ink: Color)
+
+    private fun rgb(hex: Long): Color = Color(0xFF000000L or hex)
+
+    /** In spec order. Do not reorder: the index IS the identity. */
+    val avatarEntries: List<AvatarEntry> = listOf(
+        AvatarEntry(rgb(0xCB6C30), rgb(0xB63924), rgb(0xFFFFFF)),  //  0 coral
+        AvatarEntry(rgb(0xFDD7AC), rgb(0xF6A97A), rgb(0x743B1F)),  //  1 apricot
+        AvatarEntry(rgb(0xF8E9A3), rgb(0xF1BF5B), rgb(0x6B4716)),  //  2 honey
+        AvatarEntry(rgb(0xD8EFB4), rgb(0x9AD387), rgb(0x31552A)),  //  3 pistachio
+        AvatarEntry(rgb(0x43963C), rgb(0x027048), rgb(0xFFFFFF)),  //  4 fern
+        AvatarEntry(rgb(0xC2F5E0), rgb(0x7ED8C6), rgb(0x07564F)),  //  5 mint
+        AvatarEntry(rgb(0x179696), rgb(0x066674), rgb(0xFFFFFF)),  //  6 teal
+        AvatarEntry(rgb(0xC2ECFE), rgb(0x87C6F2), rgb(0x264B7A)),  //  7 sky
+        AvatarEntry(rgb(0x3E8CC9), rgb(0x2953A5), rgb(0xFFFFFF)),  //  8 ocean
+        AvatarEntry(rgb(0x7B7FC9), rgb(0x5E45AE), rgb(0xFFFFFF)),  //  9 periwinkle
+        AvatarEntry(rgb(0xE3DCFF), rgb(0xC9AFF4), rgb(0x553781)),  // 10 lavender
+        AvatarEntry(rgb(0xB76BC3), rgb(0x7D32A3), rgb(0xFFFFFF)),  // 11 grape
+        AvatarEntry(rgb(0xC96598), rgb(0x9E3082), rgb(0xFFFFFF)),  // 12 orchid
+        AvatarEntry(rgb(0xFEDAE1), rgb(0xF0A9C4), rgb(0x7E314D)),  // 13 blush
+        AvatarEntry(rgb(0xDB6371), rgb(0xA92552), rgb(0xFFFFFF)),  // 14 raspberry
+        AvatarEntry(rgb(0x768997), rgb(0x47536A), rgb(0xFFFFFF)),  // 15 slate
+    )
+
+    /** `start to end` per entry. */
+    val avatarGradients: List<Pair<Color, Color>> = avatarEntries.map { it.start to it.end }
+
+    /** Highlight geometry, fractions of the diameter (spec `highlight`). */
+    const val AVATAR_HIGHLIGHT_X = 0.30f
+    const val AVATAR_HIGHLIGHT_Y = 0.20f
+    const val AVATAR_HIGHLIGHT_RADIUS = 0.80f
+    const val AVATAR_HIGHLIGHT_ALPHA = 0.24f
+
+    private val UUID_RE = Regex("^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$")
+
+    /** Spec `selection.normalise`: a UUID is lowercased, anything else verbatim. */
+    fun avatarKey(key: String): String {
+        val trimmed = key.trim()
+        return if (UUID_RE.matches(trimmed)) trimmed.lowercase(java.util.Locale.ROOT) else key
     }
 
-    /** The two-letter monogram the capture draws inside that circle. */
-    fun monogram(name: String, address: String): String {
-        val source = name.trim().ifEmpty { address }
-        val words = source.split(' ', '-', '_').filter { it.isNotBlank() }
-        return when {
-            words.size >= 2 -> "${words[0].first()}${words[1].first()}".uppercase()
-            source.length >= 2 -> source.take(2).uppercase()
-            else -> source.take(1).uppercase().ifEmpty { "?" }
+    private val avatarDigestCache = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+    /** SHA-256(UTF-8(normalised key))[0] mod [modulo] — identical on every platform. */
+    fun avatarSlot(key: String, modulo: Int = avatarEntries.size): Int {
+        if (modulo <= 0) return 0
+        val normalized = avatarKey(key)
+        val byte = avatarDigestCache.getOrPut(normalized) {
+            java.security.MessageDigest.getInstance("SHA-256")
+                .digest(normalized.toByteArray(Charsets.UTF_8))[0].toInt() and 0xff
         }
+        return byte % modulo
+    }
+
+    fun avatarEntry(key: String): AvatarEntry = avatarEntries[avatarSlot(key)]
+
+    fun avatarBrush(address: String): Brush {
+        val (start, end) = avatarGradients[avatarSlot(address)]
+        return Brush.linearGradient(listOf(start, end))
+    }
+
+    /**
+     * The two-letter monogram the capture draws inside that circle.
+     *
+     * __DESKTOP_1_6_PARITY__ Same rule as iOS `AvatarIdentity.initials` / Android
+     * `avatarInitials` — two initials from a two-word name, else the name's first two, else
+     * the key's — with three things 1.5.1 got wrong fixed:
+     *  * it split on `-` and `_` as well as spaces, so "Jean-Luc" was "JL" here and "JE" on
+     *    the phones, and a default label like `lora!a1b2` became "L" + junk;
+     *  * it took `first()` CHARS, so a name starting with an emoji drew half a surrogate pair
+     *    (a box), and "(Bob)" or "@alice" drew the punctuation;
+     *  * a contact with no name is labelled with its shortened address ("Auk9VKn2…"); the
+     *    letters now come from the address itself, as on the phones, not from the label.
+     * Only letters and digits count; everything else is skipped, code point by code point.
+     */
+    fun monogram(name: String, address: String): String {
+        val trimmed = name.trim()
+        val isAddressLabel = trimmed.isEmpty() || trimmed.endsWith("…") && address.startsWith(trimmed.removeSuffix("…"))
+        fun alnum(word: String): List<String> = buildList {
+            var i = 0
+            while (i < word.length) {
+                val cp = word.codePointAt(i)
+                if (Character.isLetterOrDigit(cp)) add(String(Character.toChars(cp)))
+                i += Character.charCount(cp)
+            }
+        }
+        if (!isAddressLabel) {
+            val words = trimmed.split(Regex("\\s+")).map(::alnum).filter { it.isNotEmpty() }
+            if (words.size >= 2) return (words[0][0] + words[1][0]).uppercase()
+            if (words.size == 1) return words[0].take(2).joinToString("").uppercase()
+        }
+        return alnum(address).take(2).joinToString("").uppercase().ifEmpty { "?" }
     }
 }

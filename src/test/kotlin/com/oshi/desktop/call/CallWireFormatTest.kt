@@ -177,7 +177,9 @@ class CallWireFormatTest {
     @Test
     fun `offer body is key then salt then callId then capability bytes`() {
         val body = CallOffer(key32(0x5A), salt4(), callId).encode()
-        assertEquals(32 + 4 + callId.length + 2, body.size)
+        // __WB_ADPCM_CODEC_2026_09_23__ five slots [oshi][16k][apple][video][wb], as the phones;
+        // __OPUS_CODEC_2026_09_23__ plus a sixth, [opus].
+        assertEquals(32 + 4 + callId.length + 6, body.size)
         assertArrayEquals(key32(0x5A), body.copyOfRange(0, 32))
         assertArrayEquals(salt4(), body.copyOfRange(32, 36))
         assertEquals(callId, String(body, 36, callId.length, Charsets.UTF_8))
@@ -185,11 +187,12 @@ class CallWireFormatTest {
         assertEquals(0, body[37 + callId.length].toInt())
     }
 
-    /** Android emits two capability bytes (`EnhancedCallManager.kt:1413-1417`). */
+    /** __WB_ADPCM_CODEC_2026_09_23__ iOS and Android now write five slots; so does this client. */
     @Test
-    fun `this client emits two capability bytes, matching Android`() {
-        val body = CallOffer(key32(1), salt4(), callId).encode()
-        assertEquals(36 + callId.length + 2, body.size)
+    fun `this client emits six capability bytes, matching the phones`() {
+        val body = CallOffer(key32(1), salt4(), callId, supportsVideo = true, supportsWbAdpcm = true, supportsOpus = true).encode()
+        assertEquals(36 + callId.length + 6, body.size)
+        assertArrayEquals(byteArrayOf(0, 0, 0, 0x08, 0x10, 0x20), body.copyOfRange(body.size - 6, body.size))
     }
 
     /** The peel absorbs iOS's THREE-byte tail as readily as Android's two. */
@@ -257,10 +260,11 @@ class CallWireFormatTest {
      * that signals cleanly and then carries no media.
      */
     @Test
-    fun `the peel strips at most three bytes`() {
-        assertEquals(3, CallOffer.MAX_CAP_BYTES)
+    fun `the peel strips at most eight bytes`() {
+        // Same bound as iOS `peelOfferCapabilities` and Android `CallOfferCapabilities`.
+        assertEquals(8, CallOffer.MAX_CAP_BYTES)
         val body = key32(9) + salt4() + callId.toByteArray() +
-            byteArrayOf(0x01, 0x02, 0x04, 0x01, 0x02)
+            byteArrayOf(0x01, 0x02, 0x01, 0x02, 0x04, 0x08, 0x10, 0x00, 0x01, 0x02)
         val offer = CallOffer.decode(body)!!
         assertEquals(
             "two extra low bytes must stay in the callId rather than being eaten",
@@ -300,7 +304,7 @@ class CallWireFormatTest {
     @Test
     fun `accept body is capability bytes only and carries no callId`() {
         val body = CallAccept().encode()
-        assertEquals(2, body.size)
+        assertEquals(6, body.size)   // [oshi][16k][apple][video][wb][opus] — __OPUS_CODEC_2026_09_23__
         assertFalse(
             "an accept must not contain the callId",
             String(body, Charsets.ISO_8859_1).contains("1B2C"),

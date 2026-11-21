@@ -1,0 +1,158 @@
+{
+  "description": "Devsync relay upgrade (GET /v2/devsync?device=<id>), device-bound. B = 'OSHI-DEVSYNC-UPGRADE/1\\n<identity>\\n<deviceId>\\n<dk>\\n<dsk>\\n<nonce>' (UTF-8, no trailing newline). Account signature (account Ed25519 key) over 'GET\\n/v2/devsync\\n<sha256hex(B)>\\n<ts>' — B replaces the empty body. Device signature (device Ed25519 key dsk) over 'OSHI-DEVICE/1\\n<deviceId>\\nGET\\n/v2/devsync\\n<sha256hex(B)>\\n<ts>' (the per-device-mailbox request string with body = B). identity = normalised account X25519 userKey (standard base64, padded); dk/dsk = standard padded base64 of the raw 32-byte public keys; deviceId = hex(SHA-256('OSHI-DEVSYNC-id' || dk))[0..32]; nonce = 16 fresh random bytes per upgrade, 32 lowercase hex; ts = the x-oshi-timestamp (ms) of the account signature, reused in the device string. Every value below is standard padded base64 unless named hex. Seeds: RFC 8032 §7.1 tests 1-3.",
+  "cases": [
+    {
+      "name": "device1",
+      "inputs": {
+        "identity": "ERERERERERERERERERERERERERERERERERERERERERE=",
+        "accountSigningSeed": "c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7",
+        "dkPub": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+        "dskSeed": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+        "ts": "1790000000000",
+        "nonce": "000102030405060708090a0b0c0d0e0f"
+      },
+      "deviceId": "8a62844af4e6e7850a98c731308278e1",
+      "dk": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+      "dsk": "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
+      "binding": "OSHI-DEVSYNC-UPGRADE/1\nERERERERERERERERERERERERERERERERERERERERERE=\n8a62844af4e6e7850a98c731308278e1\nAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=\n11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\n000102030405060708090a0b0c0d0e0f",
+      "bindingSha256": "e5ab3e67aea6f6fdb47d28b1d4a7e74116fef6314306774c07fcc1db0c25281f",
+      "accountString": "GET\n/v2/devsync\ne5ab3e67aea6f6fdb47d28b1d4a7e74116fef6314306774c07fcc1db0c25281f\n1790000000000",
+      "accountSignature": "3Cy6CxAaev3+RWRRjiaFNHQD+Jchujv77mXL6UmCI6e+MlEBHUMhhmgRSWEubrmhZie6Z7VU4duj4FO5SVEABA==",
+      "deviceString": "OSHI-DEVICE/1\n8a62844af4e6e7850a98c731308278e1\nGET\n/v2/devsync\ne5ab3e67aea6f6fdb47d28b1d4a7e74116fef6314306774c07fcc1db0c25281f\n1790000000000",
+      "deviceSignature": "TRa4ToIqDhhogKZdLK1u1EQIFEpFtFJPzdPVGQbR+c8sLtUwF9TK9iAODpjIEst5u09ZK74naoh4DmDqNZ4xDQ==",
+      "requestTarget": "/v2/devsync?device=8a62844af4e6e7850a98c731308278e1",
+      "headers": {
+        "x-oshi-user": "ERERERERERERERERERERERERERERERERERERERERERE=",
+        "x-oshi-signing-pubkey": "/FHNjmIYoaONpH7QAjDwWAgW7RO6MwOsXeuRFUiQgCU=",
+        "x-oshi-signature": "3Cy6CxAaev3+RWRRjiaFNHQD+Jchujv77mXL6UmCI6e+MlEBHUMhhmgRSWEubrmhZie6Z7VU4duj4FO5SVEABA==",
+        "x-oshi-timestamp": "1790000000000",
+        "x-oshi-device": "8a62844af4e6e7850a98c731308278e1",
+        "x-oshi-device-dk": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+        "x-oshi-device-dsk": "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
+        "x-oshi-devsync-nonce": "000102030405060708090a0b0c0d0e0f",
+        "x-oshi-device-signature": "TRa4ToIqDhhogKZdLK1u1EQIFEpFtFJPzdPVGQbR+c8sLtUwF9TK9iAODpjIEst5u09ZK74naoh4DmDqNZ4xDQ=="
+      }
+    },
+    {
+      "name": "device2-same-millisecond",
+      "inputs": {
+        "identity": "ERERERERERERERERERERERERERERERERERERERERERE=",
+        "accountSigningSeed": "c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7",
+        "dkPub": "2122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40",
+        "dskSeed": "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+        "ts": "1790000000000",
+        "nonce": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"
+      },
+      "deviceId": "d3844945745f9ce113ab17a22aff66ae",
+      "dk": "ISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0A=",
+      "dsk": "PUAXw+hDiVqStwqnTRt+vJyYLM8uxJaMwM1V8Sr0Zgw=",
+      "binding": "OSHI-DEVSYNC-UPGRADE/1\nERERERERERERERERERERERERERERERERERERERERERE=\nd3844945745f9ce113ab17a22aff66ae\nISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0A=\nPUAXw+hDiVqStwqnTRt+vJyYLM8uxJaMwM1V8Sr0Zgw=\nf0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+      "bindingSha256": "a5e312de87aab319b5f0f8c8970b033e2394b8091bcda7a5417c70808b2d5af8",
+      "accountString": "GET\n/v2/devsync\na5e312de87aab319b5f0f8c8970b033e2394b8091bcda7a5417c70808b2d5af8\n1790000000000",
+      "accountSignature": "Xd3aWph9hSNUcH8tdXFawGbMWdk17J+sSkDRoPG7QTyOLx9HZ5yXNZ/V3BBL4EtSdMMZtbGU6LPXnA8boH+LBA==",
+      "deviceString": "OSHI-DEVICE/1\nd3844945745f9ce113ab17a22aff66ae\nGET\n/v2/devsync\na5e312de87aab319b5f0f8c8970b033e2394b8091bcda7a5417c70808b2d5af8\n1790000000000",
+      "deviceSignature": "EcVqH5sXE6+TUyGArPF2NCzONs/+O/6osr6asEqYw/JVNHLC4GEQ/Zpn5TFL78Ygh5YjT1llWbqj88baufPdBg==",
+      "requestTarget": "/v2/devsync?device=d3844945745f9ce113ab17a22aff66ae",
+      "headers": {
+        "x-oshi-user": "ERERERERERERERERERERERERERERERERERERERERERE=",
+        "x-oshi-signing-pubkey": "/FHNjmIYoaONpH7QAjDwWAgW7RO6MwOsXeuRFUiQgCU=",
+        "x-oshi-signature": "Xd3aWph9hSNUcH8tdXFawGbMWdk17J+sSkDRoPG7QTyOLx9HZ5yXNZ/V3BBL4EtSdMMZtbGU6LPXnA8boH+LBA==",
+        "x-oshi-timestamp": "1790000000000",
+        "x-oshi-device": "d3844945745f9ce113ab17a22aff66ae",
+        "x-oshi-device-dk": "ISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0A=",
+        "x-oshi-device-dsk": "PUAXw+hDiVqStwqnTRt+vJyYLM8uxJaMwM1V8Sr0Zgw=",
+        "x-oshi-devsync-nonce": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+        "x-oshi-device-signature": "EcVqH5sXE6+TUyGArPF2NCzONs/+O/6osr6asEqYw/JVNHLC4GEQ/Zpn5TFL78Ygh5YjT1llWbqj88baufPdBg=="
+      }
+    },
+    {
+      "name": "device1-same-millisecond-new-nonce",
+      "inputs": {
+        "identity": "ERERERERERERERERERERERERERERERERERERERERERE=",
+        "accountSigningSeed": "c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7",
+        "dkPub": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+        "dskSeed": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+        "ts": "1790000000000",
+        "nonce": "0f0e0d0c0b0a09080706050403020100"
+      },
+      "deviceId": "8a62844af4e6e7850a98c731308278e1",
+      "dk": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+      "dsk": "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
+      "binding": "OSHI-DEVSYNC-UPGRADE/1\nERERERERERERERERERERERERERERERERERERERERERE=\n8a62844af4e6e7850a98c731308278e1\nAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=\n11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\n0f0e0d0c0b0a09080706050403020100",
+      "bindingSha256": "8422bf61bde7d204635ce027047d6fbfb6750e90a9668324f8911f4a367accfa",
+      "accountString": "GET\n/v2/devsync\n8422bf61bde7d204635ce027047d6fbfb6750e90a9668324f8911f4a367accfa\n1790000000000",
+      "accountSignature": "drRDHTefKtpuBY/ShoqXgrEQRjoPJMMP3r81FpH4GWA5WhJsq1qdUpBw1IJkIM5KgkfUP3X4RK3xCyKlwNjxDg==",
+      "deviceString": "OSHI-DEVICE/1\n8a62844af4e6e7850a98c731308278e1\nGET\n/v2/devsync\n8422bf61bde7d204635ce027047d6fbfb6750e90a9668324f8911f4a367accfa\n1790000000000",
+      "deviceSignature": "yYwAVB0FXUJvXZb65lNIylkFcn4omeobMgoXuTugB2JkxTWmpXagbca5572K9HBKBK69sUFy2w+/B5e7sdVnAQ==",
+      "requestTarget": "/v2/devsync?device=8a62844af4e6e7850a98c731308278e1",
+      "headers": {
+        "x-oshi-user": "ERERERERERERERERERERERERERERERERERERERERERE=",
+        "x-oshi-signing-pubkey": "/FHNjmIYoaONpH7QAjDwWAgW7RO6MwOsXeuRFUiQgCU=",
+        "x-oshi-signature": "drRDHTefKtpuBY/ShoqXgrEQRjoPJMMP3r81FpH4GWA5WhJsq1qdUpBw1IJkIM5KgkfUP3X4RK3xCyKlwNjxDg==",
+        "x-oshi-timestamp": "1790000000000",
+        "x-oshi-device": "8a62844af4e6e7850a98c731308278e1",
+        "x-oshi-device-dk": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=",
+        "x-oshi-device-dsk": "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
+        "x-oshi-devsync-nonce": "0f0e0d0c0b0a09080706050403020100",
+        "x-oshi-device-signature": "yYwAVB0FXUJvXZb65lNIylkFcn4omeobMgoXuTugB2JkxTWmpXagbca5572K9HBKBK69sUFy2w+/B5e7sdVnAQ=="
+      }
+    }
+  ],
+  "serverRefuses": [
+    {
+      "when": "any device header missing (account-only upgrade, the pre-2026-09-23 scheme)",
+      "status": 401,
+      "error": "device-auth-required"
+    },
+    {
+      "when": "x-oshi-device != ?device=",
+      "status": 400,
+      "error": "device-mismatch"
+    },
+    {
+      "when": "dk/dsk not strict standard padded base64 of 32 bytes, or nonce not 32 lowercase hex",
+      "status": 400,
+      "error": "bad-device-auth"
+    },
+    {
+      "when": "deviceId != H(dk)",
+      "status": 400,
+      "error": "deviceId-not-bound-to-dk"
+    },
+    {
+      "when": "account signature bad / replayed / unbound, or B built with another identity",
+      "status": 401,
+      "error": "unauthorized"
+    },
+    {
+      "when": "device signature does not verify under dsk",
+      "status": 401,
+      "error": "bad-device-signature"
+    },
+    {
+      "when": "(deviceId, nonce) already seen in the last 60 s",
+      "status": 401,
+      "error": "replayed"
+    },
+    {
+      "when": "deviceId registered (per-device registry) with other dk/dsk",
+      "status": 403,
+      "error": "device-key-mismatch"
+    },
+    {
+      "when": "deviceId live on another socket with another dsk (and the newcomer is not the registered owner)",
+      "status": 409,
+      "error": "device-id-in-use"
+    },
+    {
+      "when": "bootstrap (pending) sockets of the identity already at the cap (2)",
+      "status": 429,
+      "error": "too-many-pending"
+    }
+  ],
+  "closeCodes": {
+    "4000": "replaced by a newer socket of the SAME device key (or a registered owner evicting an unregistered squatter)",
+    "4001": "pending-expired (bootstrap socket older than 15 min)",
+    "4003": "device-removed / device-reset / device-key-mismatch (registry changed under the socket)"
+  }
+}

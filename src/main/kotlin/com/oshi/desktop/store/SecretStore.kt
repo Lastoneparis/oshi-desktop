@@ -1,6 +1,9 @@
 package com.oshi.desktop.store
 
 import java.io.File
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.util.Base64
 import java.util.concurrent.TimeUnit
 
@@ -49,6 +52,32 @@ interface SecretStore {
             }
             return backend?.let { VerifiedSecretStore(it) }
         }
+
+        /**
+         * __DPAPI_PROBE_LOCKED_OUT_AN_EXISTING_VAULT_2026_11_19__ [detect], except that a probe
+         * failure must not lock a person out of a vault that ALREADY lives in the OS store.
+         *
+         * The Windows probe spawns PowerShell and gives it 15 s; a cold start under antivirus
+         * scanning can miss that, and then `detect()` answered "no store" and `KeyVault.open`
+         * refused the existing os-store vault outright. For such a vault the platform backend
+         * is returned unprobed: reading the master key is the real test, and when THAT fails
+         * the vault still refuses to open (never a fresh identity).
+         */
+        fun detectFor(vault: File, service: String = SERVICE): SecretStore? {
+            // __THROWAWAY_PROFILE_PASSPHRASE_2026_11_21__ `OSHI_KEY_STORE=passphrase` keeps a NEW
+            // (or passphrase) profile out of the OS key store entirely, so a scripted test
+            // identity on a developer's Mac never adds an entry to the login Keychain. An
+            // existing os-store vault still opens with its store: never a fresh identity.
+            if (System.getenv("OSHI_KEY_STORE") == "passphrase" && !KeyVault.isOsStoreVault(vault)) return null
+            detect(service)?.let { return it }
+            if (!KeyVault.isOsStoreVault(vault)) return null
+            val backend: SecretStore = when {
+                DesktopPaths.isMac -> MacKeychainStore(service)
+                DesktopPaths.isWindows -> WindowsDpapiStore(service)
+                else -> LinuxSecretToolStore(service)
+            }
+            return VerifiedSecretStore(backend)
+        }
     }
 }
 
@@ -77,8 +106,7 @@ internal class MacKeychainStore(private val service: String) : SecretStore {
     override fun get(account: String): ByteArray? {
         val r = Proc.run(listOf("/usr/bin/security", "find-generic-password", "-a", account, "-s", service, "-w"))
         if (r.exitCode != 0) return null
-        val out = r.stdout.trim()
-        return if (out.isEmpty()) null else Base64.getDecoder().decode(out)
+        return decodeStoredSecret(r.stdout, id)
     }
 
     override fun put(account: String, secret: ByteArray) {
@@ -112,32 +140,127 @@ internal class MacKeychainStore(private val service: String) : SecretStore {
 internal class LinuxSecretToolStore(private val service: String) : SecretStore {
     override val id = "libsecret (secret-tool)"
 
-    fun isUsable(): Boolean =
-        Proc.which("secret-tool") != null &&
-            // A keyring daemon that is not running makes every call hang or fail; a
-            // lookup of a key we do not have is the cheapest way to find out, and its
-            // "not found" (exit 1, empty stderr) is success for this purpose.
-            Proc.run(listOf("secret-tool", "lookup", "service", service, "account", "__probe__"),
-                timeoutSeconds = 5).timedOut.not()
+    private fun secretTool(): String? = resolveSecretTool(Proc::which)
 
+    fun isUsable(): Boolean = keyringAcceptsAWrite
+
+    /**
+     * __SECRET_TOOL_PROBE_2026_11_02__ Does this keyring accept a WRITE, not merely
+     * answer a question.
+     *
+     * The old probe was a `lookup` of a key we do not have, and it treated anything
+     * other than a timeout as success. A **locked** collection answers a lookup
+     * perfectly well — "not found", exit 1, instantly — so the probe passed, `detect()`
+     * chose this store, and the FIRST `put` of the master key threw:
+     *
+     *     Cannot open this account:
+     *     secret-tool store failed: secret-tool: Cannot create an item in a locked collection
+     *
+     * On a GUI launch that text goes to stderr, where nobody sees it, and the launcher
+     * returns. The app simply does not open. Measured on Ubuntu 24.04 by extracting the
+     * published .deb and running it under Xvfb: the published 1.4.1 cannot create an
+     * account on a machine whose keyring is locked or unwritable — a headless box, a
+     * minimal install, an auto-login desktop whose login keyring was never unlocked.
+     *
+     * This is the SAME defect as `__DPAPI_PROBE_2026_10_30__` on Windows, and the note
+     * there says "`LinuxSecretToolStore` has always probed the live keyring rather than
+     * the binary". It did — and asking the keyring whether it is alive is not asking
+     * whether it will take a secret.
+     *
+     * So: store three constant bytes, read them back, clear them. Never a real secret,
+     * and `lazy` because `detect()` runs at startup and this spawns processes.
+     *
+     * A keyring that is merely LOCKED may prompt here, or time out and send us to the
+     * passphrase path. That is the right trade: `KeyVault.open` records the protection
+     * scheme in the vault file, so the choice is made once on a fresh profile and never
+     * flips underneath an existing one — and a passphrase a user can type beats an app
+     * that will not start.
+     */
+    private val keyringAcceptsAWrite: Boolean by lazy {
+        val tool = secretTool() ?: return@lazy false
+        val probe = "__probe__"
+        val value = "AAEC"   // three constant bytes, base64
+        val put = Proc.run(
+            listOf(tool, "store", "--label=OSHI key store probe", "service", service, "account", probe),
+            // Long enough to answer a locked keyring's unlock prompt (see UNLOCK_PROMPT_SECONDS);
+            // a keyring that fails answers at once, so only a person at a dialog waits this long.
+            stdin = value, timeoutSeconds = 60,
+        )
+        if (!writeProbePassed(put, null, value)) return@lazy false
+        val got = Proc.run(
+            listOf(tool, "lookup", "service", service, "account", probe), timeoutSeconds = 8,
+        )
+        Proc.run(listOf(tool, "clear", "service", service, "account", probe), timeoutSeconds = 8)
+        writeProbePassed(put, got, value)
+    }
+
+    /**
+     * __LINUX_KEYRING_LOOKUP_2026_11_21__ "not found" and "could not ask" are different answers.
+     * Every failure used to be `null`, which `KeyVault` reads as "the master key is MISSING from
+     * the keyring" and answers with the scariest message it has (restore the entry, or lose the
+     * address) — for a user who had merely uninstalled `libsecret-tools`, dismissed the keyring's
+     * unlock prompt, or taken longer than 20 s to type their password into it. Those now throw
+     * with the real reason, and the window says what to do (install the tool / unlock).
+     */
     override fun get(account: String): ByteArray? {
-        val r = Proc.run(listOf("secret-tool", "lookup", "service", service, "account", account))
-        if (r.exitCode != 0) return null
-        val out = r.stdout.trim()
-        return if (out.isEmpty()) null else Base64.getDecoder().decode(out)
+        val tool = secretTool() ?: throw SecretStoreException(NOT_INSTALLED)
+        val r = Proc.run(listOf(tool, "lookup", "service", service, "account", account), timeoutSeconds = UNLOCK_PROMPT_SECONDS)
+        return lookupResult(r, id)
     }
 
     override fun put(account: String, secret: ByteArray) {
+        val tool = secretTool() ?: throw SecretStoreException(NOT_INSTALLED)
         val b64 = Base64.getEncoder().encodeToString(secret)
         val r = Proc.run(
-            listOf("secret-tool", "store", "--label=OSHI master key", "service", service, "account", account),
-            stdin = b64,
+            listOf(tool, "store", "--label=OSHI master key", "service", service, "account", account),
+            stdin = b64, timeoutSeconds = UNLOCK_PROMPT_SECONDS,
         )
         if (r.exitCode != 0) throw SecretStoreException("secret-tool store failed: ${r.stderr.trim()}")
     }
 
     override fun delete(account: String) {
-        Proc.run(listOf("secret-tool", "clear", "service", service, "account", account))
+        secretTool()?.let { Proc.run(listOf(it, "clear", "service", service, "account", account)) }
+    }
+
+    internal companion object {
+        /** Recognised by `UiLauncher.reportStartupFailure`, which then names the package to install. */
+        const val NOT_INSTALLED = "secret-tool is not installed (Debian/Ubuntu: libsecret-tools, Fedora: libsecret)"
+
+        /**
+         * A LOCKED keyring (auto-login desktops never unlock it) answers `store`/`lookup` with
+         * an unlock dialog and waits for the person. 8–20 s was not enough to read it and type
+         * a password: the process was killed mid-prompt and the app reported a missing key.
+         */
+        const val UNLOCK_PROMPT_SECONDS = 120L
+
+        /** `secret-tool lookup`: exit 0 = found, exit 1 with nothing on stderr = not found, anything else = failure. */
+        internal fun lookupResult(r: Proc.Result, id: String): ByteArray? {
+            if (r.timedOut) throw SecretStoreException("$id did not answer within $UNLOCK_PROMPT_SECONDS s (is the keyring locked, with an unlock prompt open?)")
+            if (r.exitCode == 0) return decodeStoredSecret(r.stdout, id)
+            if (r.exitCode == 1 && r.stderr.isBlank()) return null
+            throw SecretStoreException("secret-tool lookup failed (exit ${r.exitCode}): ${r.stderr.trim().ifEmpty { "no reason given" }}")
+        }
+
+        /**
+         * The probe's verdict, separated from the processes that produce it so the
+         * cases that matter can be asserted without a keyring.
+         *
+         * [lookup] is null on the first call, when only the WRITE has happened: a
+         * locked collection fails there, and there is no point reading back.
+         */
+        internal fun writeProbePassed(put: Proc.Result, lookup: Proc.Result?, expected: String): Boolean {
+            if (put.timedOut || put.exitCode != 0) return false
+            if (lookup == null) return true
+            return !lookup.timedOut && lookup.exitCode == 0 && lookup.stdout.trim() == expected
+        }
+
+        private const val SYSTEM_SECRET_TOOL = "/usr/bin/secret-tool"
+
+        /** Prefer the system binary so a writable PATH entry cannot receive the vault key. */
+        internal fun resolveSecretTool(
+            pathLookup: (String) -> String?,
+            isExecutable: (String) -> Boolean = { File(it).isFile && File(it).canExecute() },
+        ): String? = SYSTEM_SECRET_TOOL.takeIf(isExecutable) ?: pathLookup("secret-tool")
     }
 }
 
@@ -161,29 +284,68 @@ internal class WindowsDpapiStore(private val service: String) : SecretStore {
     private val dir get() = File(DesktopPaths.dataDir, "dpapi").also { DesktopPaths.ensurePrivateDir(it) }
     private fun blob(account: String) = File(dir, "${service}.${account.replace(Regex("[^A-Za-z0-9._-]"), "_")}.dpapi")
 
-    fun isUsable(): Boolean = Proc.which("powershell.exe") != null || Proc.which("powershell") != null
+    /**
+     * __DPAPI_PROBE_2026_10_30__ Does DPAPI actually work here, not merely "is PowerShell
+     * installed".
+     *
+     * This asked `powershell() != null`, which answers a different question. On a Windows
+     * box where `ProtectedData.Protect` fails — a service account, no loaded user profile,
+     * which is the normal shape of a CI runner — PowerShell is present, so `detect()` chose
+     * this store and the FIRST `put` of the master key threw. The app should have degraded
+     * to a passphrase, which is exactly what this class's own doc says happens "on a machine
+     * where the OS store is unavailable".
+     *
+     * Caught on `windows-latest`, where `SecretStoreTest` says in its own comment that a
+     * skip here would be "how an unrun backend gets reported as working" — and the other
+     * half of that is a backend reported as working because its probe was too weak.
+     * `LinuxSecretToolStore` probed the live keyring rather than the binary — which, as
+     * __SECRET_TOOL_PROBE_2026_11_02__ found, still answered "alive" for a keyring that
+     * would refuse the write. Both probes are now round trips.
+     *
+     * A full Protect→Unprotect round trip of three constant bytes, never a secret. `lazy`
+     * because `detect()` runs at startup and this spawns a process: at most one, once.
+     */
+    private val dpapiRoundTrips: Boolean by lazy {
+        val shell = powershell() ?: return@lazy false
+        val r = Proc.run(
+            listOf(shell, "-NoProfile", "-NonInteractive", "-Command",
+                "Add-Type -AssemblyName System.Security; " +
+                    "\$b=[Convert]::FromBase64String('AAEC'); " +
+                    "\$p=[Security.Cryptography.ProtectedData]::Protect(\$b,\$null,'CurrentUser'); " +
+                    "[Convert]::ToBase64String(" +
+                    "[Security.Cryptography.ProtectedData]::Unprotect(\$p,\$null,'CurrentUser'))"),
+            timeoutSeconds = 15,
+        )
+        r.exitCode == 0 && r.stdout.trim() == "AAEC"
+    }
 
-    private fun powershell(): String = Proc.which("powershell.exe") ?: Proc.which("powershell") ?: "powershell.exe"
+    fun isUsable(): Boolean = dpapiRoundTrips
+
+    private fun powershell(): String? = resolvePowerShell(
+        System.getenv("SystemRoot") ?: System.getenv("WINDIR"),
+        Proc::which,
+    )
 
     override fun get(account: String): ByteArray? {
         val f = blob(account)
         if (!f.isFile) return null
+        val shell = powershell() ?: return null
         val r = Proc.run(
-            listOf(powershell(), "-NoProfile", "-NonInteractive", "-Command",
+            listOf(shell, "-NoProfile", "-NonInteractive", "-Command",
                 "Add-Type -AssemblyName System.Security; " +
-                    "\$p=[Convert]::FromBase64String((Get-Content -Raw \$env:OSHI_BLOB_PATH).Trim()); " +
+                    "\$p=[Convert]::FromBase64String((Get-Content -LiteralPath \$env:OSHI_BLOB_PATH -Raw).Trim()); " +
                     "\$b=[Security.Cryptography.ProtectedData]::Unprotect(\$p,\$null,'CurrentUser'); " +
                     "[Convert]::ToBase64String(\$b)"),
             env = mapOf("OSHI_BLOB_PATH" to f.absolutePath),
         )
         if (r.exitCode != 0) return null
-        val out = r.stdout.trim()
-        return if (out.isEmpty()) null else Base64.getDecoder().decode(out)
+        return decodeStoredSecret(r.stdout, id)
     }
 
     override fun put(account: String, secret: ByteArray) {
+        val shell = powershell() ?: throw SecretStoreException("PowerShell is unavailable")
         val r = Proc.run(
-            listOf(powershell(), "-NoProfile", "-NonInteractive", "-Command",
+            listOf(shell, "-NoProfile", "-NonInteractive", "-Command",
                 "Add-Type -AssemblyName System.Security; " +
                     "\$b=[Convert]::FromBase64String(\$env:OSHI_SECRET_IN); " +
                     "\$p=[Security.Cryptography.ProtectedData]::Protect(\$b,\$null,'CurrentUser'); " +
@@ -197,6 +359,24 @@ internal class WindowsDpapiStore(private val service: String) : SecretStore {
 
     override fun delete(account: String) {
         blob(account).delete()
+    }
+
+    internal companion object {
+        /**
+         * A user-writable directory can precede System32 on PATH. Prefer the PowerShell
+         * bundled with Windows, then retain PATH only for stripped-down Windows images.
+         */
+        internal fun resolvePowerShell(
+            systemRoot: String?,
+            pathLookup: (String) -> String?,
+            isExecutable: (String) -> Boolean = { File(it).isFile && File(it).canExecute() },
+        ): String? {
+            val systemPowerShell = systemRoot
+                ?.takeIf { it.isNotBlank() }
+                ?.let { File(it, "System32/WindowsPowerShell/v1.0/powershell.exe").path }
+                ?.takeIf(isExecutable)
+            return systemPowerShell ?: pathLookup("powershell.exe") ?: pathLookup("powershell")
+        }
     }
 }
 
@@ -243,6 +423,17 @@ internal class VerifiedSecretStore(private val delegate: SecretStore) : SecretSt
 }
 
 class SecretStoreException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
+
+/** A helper printing non-base64 must not leak an implementation exception into account open. */
+internal fun decodeStoredSecret(stdout: String, backend: String): ByteArray? {
+    val encoded = stdout.trim()
+    if (encoded.isEmpty()) return null
+    return try {
+        Base64.getDecoder().decode(encoded)
+    } catch (e: IllegalArgumentException) {
+        throw SecretStoreException("$backend returned malformed base64 for a stored secret", e)
+    }
+}
 
 /** An in-memory store. Tests use it; nothing else should. */
 class InMemorySecretStore(override val id: String = "in-memory (NOT PERSISTENT)") : SecretStore {
@@ -291,23 +482,16 @@ internal object Proc {
     }
 
     /** `which`, without a shell. */
-    fun which(binary: String): String? {
-        val path = System.getenv("PATH") ?: return null
-        val sep = if (DesktopPaths.isWindows) ";" else ":"
-        for (dir in path.split(sep)) {
-            val f = File(dir, binary)
-            if (f.isFile && f.canExecute()) return f.absolutePath
-        }
-        return null
-    }
+    fun which(binary: String): String? = ExecutableLookup.which(binary)
 }
 
 /**
- * Write-to-temp-then-rename.
+ * Write-to-temp-then-replace.
  *
  * A half-written vault is an unrecoverable account: the file exists, so nothing offers
  * to create a new identity, and it does not decrypt, so nothing can read the old one.
- * The rename is the only step that must be atomic, and on every platform it is.
+ * Prefer an atomic replacement where the filesystem supports it. The fallback never
+ * deletes the old file first, avoiding a Windows delete-then-rename loss window.
  */
 internal object AtomicFile {
     fun write(target: File, bytes: ByteArray) {
@@ -317,10 +501,13 @@ internal object AtomicFile {
         try {
             DesktopPaths.makePrivate(tmp)
             tmp.writeBytes(bytes)
-            if (!tmp.renameTo(target)) {
-                // Windows will not rename onto an existing file.
-                if (!target.delete() && target.exists()) throw SecretStoreException("cannot replace $target")
-                if (!tmp.renameTo(target)) throw SecretStoreException("cannot rename $tmp to $target")
+            try {
+                Files.move(
+                    tmp.toPath(), target.toPath(),
+                    StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING,
+                )
+            } catch (_: AtomicMoveNotSupportedException) {
+                Files.move(tmp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
             }
             DesktopPaths.makePrivate(target)
         } finally {

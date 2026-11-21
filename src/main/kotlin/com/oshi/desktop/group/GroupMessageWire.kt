@@ -123,7 +123,35 @@ object GroupMessageWire {
         val plaintextContent: String? = null,
         val senderName: String? = null,
         val chainIndex: Int = 0,
-    )
+        /** __GROUP_E2E_V2_2026_09_23__ spec §2.2 `mediaFileName` (v2 media). */
+        val mediaFileName: String? = null,
+        /**
+         * __GROUP_E2E_V2_2026_09_23__ spec §2.4: `message_edited` / `message_deleted`. When set the
+         * message is a COMMAND: `senderPublicKey:"SYSTEM"`, `encryptedContent:""`, `isRead:true`.
+         */
+        val systemMessageType: String? = null,
+        /** `actorPublicKey`, `editedMessageId`/`editedContent` or `deletedMessageId`. Strings only. */
+        val systemMessageData: Map<String, String>? = null,
+        /** __MENTIONS_2026_09_23__ optional `mentions` key, see [MentionWire]. Unfiltered on decode. */
+        val mentions: List<MentionWire.Mention> = emptyList(),
+        /** __VIDEO_NOTE_2026_09_24__ spec §2.B/§2.D: `videoNote`/`durationMs` next to `mediaType`. */
+        val videoNote: com.oshi.desktop.media.VideoNoteWire.Meta? = null,
+        /**
+         * __GROUP_COMMENTS_2026_11_21__ GROUP_INFO_SETTINGS_SPEC §2.12.2: this message is a comment
+         * under the post with this id (emitted UPPERCASE, compared case-insensitively). Shipped
+         * decoders ignore the key and show the body — always a `💬REPLY💬` envelope — as a reply.
+         */
+        val commentOn: String? = null,
+    ) {
+        val isSystem: Boolean get() = systemMessageType != null || senderPublicKey == SYSTEM_SENDER
+    }
+
+    /** `senderPublicKey` of a system message (spec §2.4). */
+    const val SYSTEM_SENDER: String = "SYSTEM"
+    const val SYSTEM_EDITED: String = "message_edited"
+    const val SYSTEM_DELETED: String = "message_deleted"
+    /** __GROUP_COMMENTS_2026_11_21__ §2.12.2 top-level key. */
+    const val KEY_COMMENT_ON: String = "commentOn"
 
     /**
      * The JSON an iPhone's `JSONDecoder().decode(GroupMessage.self, …)` accepts, in Android's
@@ -136,6 +164,22 @@ object GroupMessageWire {
      * should stop here rather than render as the year 55 000 on somebody's phone.
      */
     fun encode(msg: GroupMessagePayload): String {
+        if (msg.systemMessageType != null) {
+            // __GROUP_E2E_V2_2026_09_23__ spec §2.4 / vectors `edit`, `delete`.
+            val data = GroupJson()
+            msg.systemMessageData.orEmpty().forEach { (k, v) -> data.str(k, v) }
+            return GroupJson()
+                .str("id", msg.messageId)
+                .str("groupId", GroupIdentity.canonicalGroupId(msg.groupId))
+                .str("senderPublicKey", SYSTEM_SENDER)
+                .str("encryptedContent", "")
+                .num("timestamp", WireClock.toAppleSeconds(msg.timestampUnixMillis))
+                .bool("isRead", true)
+                .int("messageChainIndex", 0)
+                .str("systemMessageType", msg.systemMessageType)
+                .obj("systemMessageData", data.build())
+                .build()
+        }
         val json = GroupJson()
             .str("id", msg.messageId)
             .str("groupId", GroupIdentity.canonicalGroupId(msg.groupId))
@@ -148,17 +192,27 @@ object GroupMessageWire {
             .bool("isRead", false)
             .int("messageChainIndex", msg.chainIndex)
         msg.mediaType?.let { json.str("mediaType", it.raw) }
+        if (msg.mediaType != null) json.optional("mediaFileName", msg.mediaFileName?.takeIf { it.isNotEmpty() })
         // Caption: media only. On a plain text message the body already travels in
         // `encryptedContent`, and duplicating it here makes iOS draw the same string twice
         // (Android's own note, GroupManager.kt:2305-2311).
         if (msg.mediaType != null) {
             msg.plaintextContent?.takeIf { it.isNotEmpty() }?.let { json.str("plaintextContent", it) }
         }
+        // __VIDEO_NOTE_2026_09_24__ only `true`, only on a video, never `false` (VIDEO_NOTE_SPEC §1).
+        if (msg.mediaType == GroupMediaType.VIDEO) msg.videoNote?.let { note ->
+            json.bool(com.oshi.desktop.media.VideoNoteWire.KEY_VIDEO_NOTE, true)
+            note.wireDurationMs?.let { json.int(com.oshi.desktop.media.VideoNoteWire.KEY_DURATION_MS, it) }
+        }
         // Android compatibility keys. iOS's CodingKeys omit all three, so they are inert
         // there; Android reads `content`.
         json.str("messageId", msg.messageId)
         json.str("content", msg.body)
         json.str("senderName", msg.senderName.orEmpty())
+        // __MENTIONS_2026_09_23__ last, optional, ignored by every shipped decoder (MentionWire).
+        MentionWire.render(msg.mentions)?.let { json.obj(MentionWire.FIELD, it) }
+        // __GROUP_COMMENTS_2026_11_21__ §2.12.2, optional, never on a system message.
+        GroupComments.wireCommentOn(msg.commentOn)?.let { json.str(KEY_COMMENT_ON, it.uppercase(java.util.Locale.ROOT)) }
         return json.build()
     }
 
@@ -224,6 +278,14 @@ object GroupMessageWire {
             plaintextContent = (o.opt("plaintextContent") as? String)?.takeIf { it.isNotEmpty() },
             senderName = (o.opt("senderName") as? String)?.takeIf { it.isNotEmpty() },
             chainIndex = (o.opt("messageChainIndex") as? Number)?.toInt() ?: 0,
+            mediaFileName = (o.opt("mediaFileName") as? String)?.takeIf { it.isNotEmpty() },
+            systemMessageType = (o.opt("systemMessageType") as? String)?.takeIf { it.isNotEmpty() },
+            systemMessageData = (o.opt("systemMessageData") as? JSONObject)?.let { d ->
+                d.keys().asSequence().mapNotNull { k -> (d.opt(k) as? String)?.let { k to it } }.toMap()
+            },
+            mentions = MentionWire.parse(o.opt(MentionWire.FIELD)),
+            videoNote = com.oshi.desktop.media.VideoNoteWire.read(o, o.opt("mediaType") as? String, null),
+            commentOn = GroupComments.wireCommentOn(o.opt(KEY_COMMENT_ON) as? String),
         )
     }
 

@@ -1,6 +1,7 @@
 package com.oshi.desktop.ui.components
 
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -20,6 +21,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.ProvidableCompositionLocal
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -37,8 +40,18 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.oshi.desktop.i18n.t
+import com.oshi.desktop.media.AudioPlayer
+import com.oshi.desktop.media.PlaybackEnd
+import com.oshi.desktop.media.PlaybackStart
 import com.oshi.desktop.store.MediaType
 import com.oshi.desktop.ui.OshiTheme
+import com.oshi.desktop.media.VideoNotePlayer
+import com.oshi.desktop.media.VideoNoteReader
+import com.oshi.desktop.media.VideoNoteThumbnails
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.awt.EventQueue
 import java.io.File
 import org.jetbrains.skia.Codec
 import org.jetbrains.skia.Data
@@ -50,8 +63,9 @@ import org.jetbrains.skia.Image as SkiaImage
  * ============================================================ WHAT IT CLOSES
  *
  * PARITY.md rows 0.15 and 1.4. The blob path has been decrypting inbound media straight to
- * `OshiClient.mediaDir` since row 0.15 went green — a photograph from a phone lands on this
- * disk as an ordinary file — and until this file existed, nothing in the window opened one.
+ * `OshiClient.mediaDir` since row 0.15 went green — since 2026-09-22 SEALED at rest
+ * (`MediaVault`, "OSHIMED1"), so every read below goes through the vault and decrypts in
+ * memory — and until this file existed, nothing in the window opened one.
  * `MessageBubble` draws a 250pt thumbnail inside the bubble; a thumbnail is not a viewer.
  * This is the full-size look, and it is the ONLY place in the window that reads media bytes
  * for a size the user chose rather than a size the layout chose.
@@ -84,19 +98,15 @@ import org.jetbrains.skia.Image as SkiaImage
  *
  * ============================================================ IT NEVER PLAYS ANYTHING
  *
- * No video playback, no audio playback, and no path here that could grow one by accident. A
- * video or a voice note opens [NoPlayerPanel] — the file, where it is, and the sentence
- * "this window does not play it" — because a user who can see the file and read why is
- * better served than one staring at a dead triangle.
+ * Video playback is not implemented. A video opens [NoPlayerPanel] — the file, where it is,
+ * and the sentence "this window does not play it" — because a user who can see the file and
+ * read why is better served than one staring at a dead triangle. Voice notes use the existing
+ * [AudioPlayer] backend: it opens JDK-readable audio directly and asks the configured
+ * transcoder for a temporary WAV when a phone-recorded m4a needs it.
  *
- * **The claim is scoped to this window, and deliberately.** Checked 2026-09-11 rather than
- * copied: nothing under `com.oshi.desktop.ui` starts playback of anything. The CLIENT is a
- * different story and the difference matters — `com.oshi.desktop.media.AudioPlayer` and
- * `VoiceNotes` exist, transcode an m4a the JDK refuses, and are referenced by nothing
- * outside their own tests; `AudioPlayer`'s own note says no sound has ever been produced by
- * it on any machine. So "this window has no player" is true, "this project can never play
- * audio" would not be, and a `DesktopLimits` row that says the second would be stale the day
- * somebody wires the first. Nothing in this file decodes a video FILE, and this viewer is
+ * `AudioPlayer` has unit coverage with a fake render device, but no test has opened a real
+ * speaker. This panel reports the backend's named failures instead of promising a sound that
+ * this machine cannot produce. Nothing in this file decodes a video file, and this viewer is
  * not the place to start: it would be a codec, a clock and a device, none of which a still
  * viewer has any business owning.
  *
@@ -145,28 +155,14 @@ object MediaViewerLimits {
      */
     const val MAX_PIXELS = 32_000_000L
 
-    const val NOT_A_FILE =
-        "There is no file at that path any more. The bytes were decrypted to this disk when " +
-            "the message arrived; something has removed or moved them since. Nothing was lost " +
-            "on the wire and the sender does not need to resend for this window's sake."
-
-    const val EMPTY_FILE =
-        "The file on disk is zero bytes. That is a failed or interrupted write here, not a " +
-            "damaged message — the download deletes a partial file, so an empty one means the " +
-            "path was created by something else."
-
+    val NOT_A_FILE: String get() = t("desktop.media.note.not_a_file")
+    val EMPTY_FILE: String get() = t("desktop.media.note.empty")
     /** Called with the file's size; the number is in the message because a cap without one is folklore. */
     fun oversizeNote(bytes: Long): String =
-        "This file is ${humanBytes(bytes)}, over this window's ${humanBytes(MAX_FILE_BYTES)} " +
-            "ceiling for reading an image into memory in one piece. The file is on disk and " +
-            "intact; open it in an image viewer, which can decode it without holding all of it."
+        t("desktop.media.note.oversize", humanBytes(bytes), humanBytes(MAX_FILE_BYTES))
 
     fun tooManyPixelsNote(w: Int, h: Int): String =
-        "This image declares ${w}×$h — ${decimal(w.toLong() * h / 1_000_000.0)} " +
-            "megapixels, over this window's ${MAX_PIXELS / 1_000_000} MP decoding ceiling. " +
-            "Nothing was decoded: the dimensions come from the file's header. A small file " +
-            "that claims enormous dimensions is the shape of a deliberate attack as well as " +
-            "the shape of a panorama, and this window declines both the same way."
+        t("desktop.media.note.too_many_pixels", "${w}×$h", decimal(w.toLong() * h / 1_000_000.0), "${MAX_PIXELS / 1_000_000}")
 
     /**
      * The header did not parse at all — `Codec` could not even say how big the picture is.
@@ -175,23 +171,11 @@ object MediaViewerLimits {
      * able to tell them apart: this one means the file was refused BEFORE any pixel budget
      * was spent, which is the property the ordering in the class note promises.
      */
-    const val NO_IMAGE_HEADER =
-        "This file does not begin with an image header this window can read — truncated at " +
-            "the very start, or not a picture at all whatever it is called. Nothing was " +
-            "decoded, because there were no dimensions to decode into."
-
-    const val UNDECODABLE =
-        "The bytes are on disk but this window's image library could not turn them into a " +
-            "picture. Truncated, or a format this build of skia does not carry. That is a " +
-            "statement about THIS decoder and not about the file: another OSHI client, and " +
-            "your own image viewer, may well open it."
-
+    val NO_IMAGE_HEADER: String get() = t("desktop.media.note.no_header")
+    val UNDECODABLE: String get() = t("desktop.media.note.undecodable")
     /** What a non-image signature is told, naming what the bytes actually look like. */
     fun notAnImageNote(signature: ByteSignature): String =
-        "These bytes are ${signature.label}, which is not a still image, whatever the file is " +
-            "called — the name came from the sender and this is what the file itself says. " +
-            "This window draws still pictures and does not play anything, so there is nothing " +
-            "honest for it to show. The file is on disk and unchanged."
+        t("desktop.media.note.not_image", signature.label)
 
     /**
      * MEASURED, 2026-09-11, and the reason this constant exists at all.
@@ -209,20 +193,9 @@ object MediaViewerLimits {
      * showing, and saying "some of this is missing" is the whole difference between a viewer
      * and a liar.
      */
-    const val TRUNCATED_CAVEAT =
-        "Incomplete: this file does not end the way its format requires, so part of the " +
-            "picture is missing and what fills that space was never sent. A download that " +
-            "was interrupted, or a copy that was. Ask the sender to send it again."
-
-    const val ANIMATION_CAVEAT =
-        "Animated — the first frame is shown. This window has no animation loop; playing it " +
-            "would need a frame clock this viewer deliberately does not have."
-
-    const val VIEW_ONCE_CAVEAT =
-        "View once: you have opened this. The file stays on this disk — this client does not " +
-            "destroy it and the sender is never told — and it is not revealed in your file " +
-            "manager from here."
-
+    val TRUNCATED_CAVEAT: String get() = t("desktop.media.caveat.truncated")
+    val ANIMATION_CAVEAT: String get() = t("desktop.media.caveat.animated")
+    val VIEW_ONCE_CAVEAT: String get() = t("media_picker.view_once.warning")   // __VIEW_ONCE_DESKTOP_2027__
     /** KB/MB with one decimal, so a ceiling and a file size can be compared by eye. */
     fun humanBytes(n: Long): String = when {
         n >= 1024L * 1024 -> "${decimal(n / (1024.0 * 1024.0))} MB"
@@ -234,9 +207,9 @@ object MediaViewerLimits {
      * One decimal, in `Locale.ROOT`, and the locale is not an oversight.
      *
      * `"%.1f".format(x)` uses the DEFAULT locale, so on a French machine this window would
-     * print "1,0 MB" and "2,3 megapixels" inside sentences that are otherwise English — the
-     * window is not localised at all (PARITY.md row 1.5; the REPL's 12 keys are the only
-     * translated surface). Half-localising a number inside an English sentence is worse than
+     * print "1,0 MB" and "2,3 megapixels" inside sentences that may otherwise be English —
+     * the media viewer's own prose is desktop-only English even though other window strings
+     * use the shared catalogs (PARITY.md row 1.5). Half-localising a number inside an English sentence is worse than
      * not localising it, and it made a ceiling this file states in its own message
      * unsearchable. Caught by `MediaViewerTest` on a machine whose default locale is fr_FR.
      */
@@ -256,13 +229,13 @@ object MediaViewerLimits {
  * NOT COVERED: containers whose signature lies about their contents (an MP4 renamed .png is
  * caught here; a JPEG with a PNG header prepended is not — the decoder catches that instead).
  */
-enum class ByteSignature(val label: String, val stillImage: Boolean) {
-    PNG("a PNG image", true),
-    JPEG("a JPEG image", true),
-    GIF("a GIF image", true),
-    WEBP("a WebP image", true),
-    BMP("a BMP image", true),
-    ICO("a Windows icon", true),
+enum class ByteSignature(private val labelKey: String, val stillImage: Boolean) {
+    PNG(labelKey = "desktop.media.sig.png", stillImage = true),
+    JPEG(labelKey = "desktop.media.sig.jpeg", stillImage = true),
+    GIF(labelKey = "desktop.media.sig.gif", stillImage = true),
+    WEBP(labelKey = "desktop.media.sig.webp", stillImage = true),
+    BMP(labelKey = "desktop.media.sig.bmp", stillImage = true),
+    ICO(labelKey = "desktop.media.sig.ico", stillImage = true),
 
     /**
      * HEIF/AVIF: a STILL image, and one this build of skia most likely cannot decode —
@@ -271,20 +244,23 @@ enum class ByteSignature(val label: String, val stillImage: Boolean) {
      * refused by [MediaViewerLimits.UNDECODABLE], which is the truthful message, rather than
      * refused here as "not an image", which would not be.
      */
-    HEIF("a HEIF/AVIF still image", true),
+    HEIF(labelKey = "desktop.media.sig.heif", stillImage = true),
 
-    MP4("an MP4/QuickTime video container", false),
-    MATROSKA("a Matroska/WebM container", false),
-    AVI("an AVI video container", false),
-    OGG("an Ogg container", false),
-    MPEG_AUDIO("MPEG audio", false),
-    FLAC("FLAC audio", false),
-    WAVE("WAV audio", false),
-    PDF("a PDF document", false),
-    ZIP("a ZIP-based file", false),
+    MP4(labelKey = "desktop.media.sig.mp4", stillImage = false),
+    MATROSKA(labelKey = "desktop.media.sig.matroska", stillImage = false),
+    AVI(labelKey = "desktop.media.sig.avi", stillImage = false),
+    OGG(labelKey = "desktop.media.sig.ogg", stillImage = false),
+    MPEG_AUDIO(labelKey = "desktop.media.sig.mpeg_audio", stillImage = false),
+    FLAC(labelKey = "desktop.media.sig.flac", stillImage = false),
+    WAVE(labelKey = "desktop.media.sig.wave", stillImage = false),
+    PDF(labelKey = "desktop.media.sig.pdf", stillImage = false),
+    ZIP(labelKey = "desktop.media.sig.zip", stillImage = false),
 
     /** Nothing matched. Offered to the decoder anyway — see the class note. */
-    UNKNOWN("not in a form this window recognises", true);
+    UNKNOWN(labelKey = "desktop.media.sig.unknown", stillImage = true);
+
+    /** What the bytes are, in the app's language — inserted into [MediaViewerLimits.notAnImageNote]. */
+    val label: String get() = t(labelKey)
 
     companion object {
         /** The ISO base-media brands that are still pictures rather than movies. */
@@ -399,34 +375,38 @@ object MediaViewerLoader {
      */
     fun load(
         path: String,
-        probe: (String) -> Long? = { File(it).takeIf { f -> f.isFile }?.length() },
-        read: (String) -> ByteArray = { File(it).readBytes() },
+        // __LOCAL_DATA_AT_REST_2026_09_22__ plaintext size and bytes through the media vault:
+        // a sealed attachment is decrypted in memory (after the size gates), never to disk.
+        probe: (String) -> Long? = { com.oshi.desktop.store.MediaVault.lengthOf(File(it)) },
+        read: (String) -> ByteArray = {
+            com.oshi.desktop.store.MediaVault.readAny(File(it), MediaViewerLimits.MAX_FILE_BYTES)
+        },
     ): MediaLoad {
         val size = probe(path)
-            ?: return MediaLoad.Refused("Not on this disk", MediaViewerLimits.NOT_A_FILE)
-        if (size == 0L) return MediaLoad.Refused("Empty file", MediaViewerLimits.EMPTY_FILE)
+            ?: return MediaLoad.Refused(t("desktop.media.headline.not_on_disk"), MediaViewerLimits.NOT_A_FILE)
+        if (size == 0L) return MediaLoad.Refused(t("desktop.media.headline.empty"), MediaViewerLimits.EMPTY_FILE)
         if (size > MediaViewerLimits.MAX_FILE_BYTES) {
-            return MediaLoad.Refused("Too large to open here", MediaViewerLimits.oversizeNote(size))
+            return MediaLoad.Refused(t("desktop.media.headline.too_large"), MediaViewerLimits.oversizeNote(size))
         }
 
         // Everything from here can throw on hostile input, and an I/O error mid-read is
         // ordinary rather than exceptional on a file another process may be touching.
         val bytes = try {
             read(path)
-        } catch (t: Throwable) {
-            return MediaLoad.Refused("Could not be read", "${MediaViewerLimits.NOT_A_FILE}\n\n${t.javaClass.simpleName}")
+        } catch (e: Throwable) {
+            return MediaLoad.Refused(t("desktop.media.headline.unreadable"), "${MediaViewerLimits.NOT_A_FILE}\n\n${e.javaClass.simpleName}")
         }
 
         val signature = ByteSignature.of(bytes)
         if (!signature.stillImage) {
-            return MediaLoad.Refused("Not a still image", MediaViewerLimits.notAnImageNote(signature))
+            return MediaLoad.Refused(t("desktop.media.headline.not_image"), MediaViewerLimits.notAnImageNote(signature))
         }
 
         val header = header(bytes)
-            ?: return MediaLoad.Refused("No image header", MediaViewerLimits.NO_IMAGE_HEADER)
+            ?: return MediaLoad.Refused(t("desktop.media.headline.no_header"), MediaViewerLimits.NO_IMAGE_HEADER)
         if (header.width.toLong() * header.height.toLong() > MediaViewerLimits.MAX_PIXELS) {
             return MediaLoad.Refused(
-                "Too many pixels to decode",
+                t("desktop.media.headline.too_many_pixels"),
                 MediaViewerLimits.tooManyPixelsNote(header.width, header.height),
             )
         }
@@ -449,8 +429,8 @@ object MediaViewerLoader {
         // every platform, and the cost of being wrong without it is the whole window.
         val image = try {
             SkiaImage.makeFromEncoded(bytes).toComposeImageBitmap()
-        } catch (t: Throwable) {
-            return MediaLoad.Refused("Could not be decoded", MediaViewerLimits.UNDECODABLE)
+        } catch (e: Throwable) {
+            return MediaLoad.Refused(t("desktop.media.headline.undecodable"), MediaViewerLimits.UNDECODABLE)
         }
 
         return MediaLoad.Ready(
@@ -577,6 +557,11 @@ fun WithMediaViewer(content: @Composable () -> Unit) {
  */
 @Composable
 fun MediaViewerOverlay(target: MediaViewerTarget, onClose: () -> Unit) {
+    // One overlay means one player. Creating it here rather than in every bubble preserves
+    // the phones' one-note-at-a-time rule, and disposal stops a note before navigation can
+    // leave an invisible speaker running.
+    val audio = remember(target.path) { AudioPlayer() }
+    DisposableEffect(audio) { onDispose { audio.stop() } }
     // A scrim that swallows the click that dismisses it. `indication = null` because a
     // ripple on a full-screen scrim reads as the surface itself being a control.
     val scrim = remember { MutableInteractionSource() }
@@ -594,26 +579,28 @@ fun MediaViewerOverlay(target: MediaViewerTarget, onClose: () -> Unit) {
             Modifier
                 .padding(OshiTheme.xxl)
                 .widthIn(max = 760.dp)
-                .clip(OshiTheme.radiusMd)
-                .background(OshiTheme.surfaceElevated)
-                .border(Metrics.hairline, OshiTheme.separator, OshiTheme.radiusMd)
+                // OLED: glass over the scrim (__OLED_GLASS_2026_11_16__).
+                .glassFloating(OshiTheme.radiusMd, OshiTheme.surfaceElevated, OshiTheme.separator)
                 .clickable(interactionSource = panel, indication = null, onClick = {})
                 .padding(OshiTheme.lg),
             verticalArrangement = Arrangement.spacedBy(OshiTheme.md),
         ) {
-            val playable = target.kind == MediaType.VIDEO || target.kind == MediaType.AUDIO
-            val load = remember(target.path, playable) {
-                if (playable) null else MediaViewerLoader.load(target.path)
+            // Video and audio do not go through the still-image loader. In particular, an
+            // unopened voice note must not be read merely because its viewer is visible.
+            val isStillImage = target.kind == MediaType.IMAGE
+            val load = remember(target.path, isStillImage) {
+                if (isStillImage) MediaViewerLoader.load(target.path) else null
             }
 
             ViewerHeader(target, load, onClose)
             Hairline()
 
             when {
-                playable -> NoPlayerPanel(target)
+                target.kind == MediaType.VIDEO -> VideoPlayerPanel(target)
+                target.kind == MediaType.AUDIO -> AudioPlayerPanel(target, audio)
                 load is MediaLoad.Ready -> ReadyPanel(load)
                 load is MediaLoad.Refused -> RefusedPanel(load)
-                else -> RefusedPanel(MediaLoad.Refused("Nothing to open", MediaViewerLimits.NOT_A_FILE))
+                else -> RefusedPanel(MediaLoad.Refused(t("desktop.media.headline.nothing"), MediaViewerLimits.NOT_A_FILE))
             }
 
             if (target.viewOnce) {
@@ -707,14 +694,55 @@ private fun RefusedPanel(load: MediaLoad.Refused) {
 }
 
 /**
- * A video or a voice note: named, located, and explicitly not played.
+ * A video attachment, PLAYED — picture and sound, in the viewer.
  *
- * The file is NOT read here at all — not a byte. There is nothing this window could do with
- * the contents, and reading a stranger's MP4 into memory to display its size would be work
- * done for no reason on bytes chosen by somebody else.
+ * This panel used to be `NoPlayerPanel` and said, in these words: *"Nothing in this window
+ * plays video, and it will not pretend otherwise with a play button that produces silence."*
+ * That was true when it was written and had stopped being true before it was replaced. The
+ * decoder arrived with round video notes (__VIDEO_NOTE_2026_09_24__): `VideoNoteReader`
+ * demuxes and decodes H.264/AAC through the FFmpeg natives the CALL pipeline already ships,
+ * and `VideoNotePlayer` paces frames against a monotonic clock and writes the audio to the
+ * voice notes' speaker seam. All of it was wired to exactly one place — the round bubble —
+ * while the viewer two files away still refused to play anything.
+ *
+ * So nothing new was imported to make this work. The two differences from a note are both
+ * in [VideoNoteReader]: the picture is CONTAIN rather than centre-cropped to a square,
+ * because an ordinary clip is a rectangle somebody filmed and cropping it to a circle's
+ * shape would throw away a third of it; and the duration cap is the viewer's rather than a
+ * note's 15 seconds.
+ *
+ * The still is decoded once off the UI thread and cached, so opening the viewer does not
+ * block on a decode and closing and reopening it does not pay for one twice.
  */
 @Composable
-private fun NoPlayerPanel(target: MediaViewerTarget) {
+private fun VideoPlayerPanel(target: MediaViewerTarget) {
+    val player = remember(target.path) {
+        VideoNotePlayer(side = VIDEO_VIEWER_SIDE, fit = VideoNoteReader.Fit.CONTAIN, maxDurationMs = VIDEO_VIEWER_MAX_MS)
+    }
+    var thumb by remember(target.path) {
+        mutableStateOf(VideoNoteThumbnails.cached(target.path, VIDEO_VIEWER_SIDE, VideoNoteReader.Fit.CONTAIN))
+    }
+    var frame by remember(target.path) { mutableStateOf<ImageBitmap?>(null) }
+    var playing by remember(target.path) { mutableStateOf(false) }
+    var positionMs by remember(target.path) { mutableStateOf(0L) }
+    var note by remember(target.path) { mutableStateOf<String?>(null) }
+
+    // The first frame, off the UI thread. A LaunchedEffect keyed on the path so reopening
+    // the same video reuses the cache and a different one decodes again.
+    LaunchedEffect(target.path) {
+        if (thumb == null) {
+            thumb = withContext(Dispatchers.IO) {
+                VideoNoteThumbnails.load(target.path, VIDEO_VIEWER_SIDE, VideoNoteReader.Fit.CONTAIN)
+            }
+        }
+    }
+    // Leaving the viewer stops the sound. Without this the audio keeps playing over a
+    // closed panel, which is the one failure a person cannot ignore.
+    DisposableEffect(target.path) { onDispose { player.stop() } }
+
+    val still = remember(thumb) { thumb?.image?.toImageBitmap() }
+    val shown = frame ?: still
+
     Column(
         Modifier
             .fillMaxWidth()
@@ -724,27 +752,151 @@ private fun NoPlayerPanel(target: MediaViewerTarget) {
         verticalArrangement = Arrangement.spacedBy(OshiTheme.sm),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Spacer(Modifier.height(OshiTheme.sm))
-        GlyphIcon(Glyph.FILE, Ink.soft, 34.dp)
-        // NOT `cardLabel(kind)`: the header two lines above already says "Video — no player
-        // in this window", and the first render of this panel printed that sentence twice on
-        // one screen. Caught by looking at `build/screens/viewer-04-video.png`, which is the
-        // only thing that catches it — no assertion in this repository reads words.
+        if (shown != null) {
+            Image(
+                bitmap = shown,
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 420.dp)
+                    .clip(OshiTheme.radiusSm),
+            )
+        } else {
+            GlyphIcon(Glyph.FILE, Ink.soft, 34.dp)
+        }
+
+        // The decode failure is named rather than swallowed: a file this window cannot open
+        // is a different thing from one it has not been asked to open yet, and "Open in
+        // another app" below is the answer to the first.
+        thumb?.error?.let {
+            Text(t("conv.media.video_failed", it), fontSize = 11.sp, color = Ink.soft)
+        }
+
+        val total = thumb?.durationMs
+        if (thumb?.error == null) {
+            TextAction(if (playing) t("conv.media.stop") else t("audio.play")) {
+                if (playing) {
+                    player.stop()
+                    playing = false
+                } else {
+                    // One video at a time in this window, and that includes a note bubble
+                    // playing behind the viewer.
+                    VideoNotePlayer.stopAll()
+                    frame = null
+                    positionMs = 0
+                    note = null
+                    val failure = player.play(File(target.path), object : VideoNotePlayer.Listener {
+                        override fun onFrame(image: com.oshi.desktop.call.video.VideoImage, ms: Long) {
+                            val bmp = image.toImageBitmap()
+                            EventQueue.invokeLater { frame = bmp; positionMs = ms }
+                        }
+                        override fun onEnd(error: String?) {
+                            EventQueue.invokeLater {
+                                playing = false
+                                frame = null
+                                positionMs = 0
+                                note = error?.let { t("conv.media.playback_failed", it) }
+                            }
+                        }
+                    })
+                    if (failure == null) playing = true else note = t("conv.media.playback_failed", failure)
+                }
+            }
+        }
+
+        if (total != null) {
+            val at = if (playing) "${fmtMs(positionMs)} / ${fmtMs(total)}" else fmtMs(total)
+            Text(at, fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = Ink.soft)
+        }
+        note?.let { Text(it, fontSize = 11.sp, color = Ink.soft) }
         Text(
-            "Not played here",
+            t("conv.media.video_note"),
+            fontSize = 11.sp,
+            color = Ink.soft,
+        )
+    }
+}
+
+/**
+ * The longest edge the viewer decodes to. 720 rather than the source's own size: every frame
+ * becomes an `IntArray` of w×h, so a 1920×1080 clip would allocate 8 MB per frame and hand
+ * the compositor more pixels than the panel can draw — it is capped at 420.dp tall.
+ */
+private const val VIDEO_VIEWER_SIDE = 720
+
+/**
+ * The viewer's media ceiling: ten minutes. It is a CAP and not "no limit" — a container
+ * whose timestamps claim an hour must not be able to hold a decode thread that long on
+ * bytes a stranger chose.
+ */
+private const val VIDEO_VIEWER_MAX_MS = 10L * 60 * 1000
+
+private fun fmtMs(ms: Long): String {
+    val total = ms / 1000
+    return "%d:%02d".format(total / 60, total % 60)
+}
+
+/**
+ * The one media player this window can truthfully offer: a decrypted voice note. The player
+ * owns decoding and its worker thread; this composable only translates its named outcomes
+ * back onto the AWT event queue before changing Compose state.
+ */
+@Composable
+private fun AudioPlayerPanel(target: MediaViewerTarget, player: AudioPlayer) {
+    var playing by remember(target.path) { mutableStateOf(false) }
+    var note by remember(target.path) { mutableStateOf<String?>(null) }
+    val file = remember(target.path) { File(target.path) }
+
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(OshiTheme.radiusSm)
+            .background(OshiTheme.surface)
+            .padding(OshiTheme.lg),
+        verticalArrangement = Arrangement.spacedBy(OshiTheme.sm),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        GlyphIcon(Glyph.FILE, Ink.soft, 34.dp)
+        Text(
+            t("conv.media.voice_note"),
             style = OshiTheme.typography.bodyMedium,
             fontWeight = FontWeight.SemiBold,
             color = Ink.strong,
         )
         Text(
-            "Nothing in this window plays audio or video, and it will not pretend otherwise " +
-                "with a play button that produces silence. The file is decrypted on this " +
-                "disk and is not touched by this panel; open it in a player that has the " +
-                "codecs. PARITY.md rows 1.4 and 2.1.",
+            t("conv.media.voice_hint"),
             fontSize = 11.sp,
             color = Ink.soft,
         )
-        Spacer(Modifier.height(OshiTheme.xxs))
+        TextAction(if (playing) t("conv.media.stop") else t("conv.media.play_voice")) {
+            if (playing) {
+                player.stop()
+                playing = false
+                note = t("conv.media.stopped")
+            } else {
+                when (val start = player.play(file) { end ->
+                    EventQueue.invokeLater {
+                        playing = false
+                        note = when (end) {
+                            PlaybackEnd.Completed -> t("conv.media.finished")
+                            PlaybackEnd.Stopped -> t("conv.media.stopped")
+                            is PlaybackEnd.Failed -> t("conv.media.playback_failed", end.detail)
+                        }
+                    }
+                }) {
+                    is PlaybackStart.Started -> {
+                        playing = true
+                        note = null
+                    }
+                    is PlaybackStart.Failure -> {
+                        playing = false
+                        note = start.reason.message
+                    }
+                }
+            }
+        }
+        note?.let { Text(it, fontSize = 11.sp, color = Ink.soft) }
     }
 }
 
@@ -765,8 +917,17 @@ private fun ViewerFooter(target: MediaViewerTarget) {
         // longer resolved still offered "Show in folder" (seen in
         // `build/screens/viewer-04-video.png`), which is a button that can only apologise.
         val here = remember(target.path) { File(target.path).isFile }
+        // __LOCAL_DATA_AT_REST_2026_09_22__ A sealed attachment is ciphertext on disk:
+        // revealing it in a file manager would hand over a file nothing else can open. It
+        // gets the two things a person actually wanted from "show in folder" instead —
+        // open it in another app (via a scratch copy) or save a decrypted copy where they
+        // choose. Still never for view-once.
+        val sealed = remember(target.path) { com.oshi.desktop.store.MediaVault.isSealed(File(target.path)) }
+        if (sealed && here && !target.viewOnce) {
+            SealedMediaActions(target) { problem = it }
+        }
         val reveal = FolderReveal.action
-        if (reveal != RevealAction.NONE && !target.viewOnce && here) {
+        if (reveal != RevealAction.NONE && !target.viewOnce && here && !sealed) {
             Text(
                 reveal.label,
                 style = OshiTheme.typography.bodyMedium,
@@ -784,18 +945,137 @@ private fun ViewerFooter(target: MediaViewerTarget) {
     }
 }
 
+@Composable
+private fun SealedMediaActions(target: MediaViewerTarget, onProblem: (String?) -> Unit) {
+    var working by remember(target.path) { mutableStateOf(false) }
+    Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm)) {
+        if (MediaExport.canOpenExternally) {
+            TextAction(t("conv.media.open_external")) {
+                if (!working) {
+                    working = true
+                    MediaExport.inBackground({
+                        // The kind the bubble DISPLAYED and the name on disk: the
+                        // two sides of the confusion, checked against each other.
+                        MediaExport.openExternally(
+                            File(target.path),
+                            displayedKind = target.kind.wire,
+                            displayName = target.fileName,
+                        )
+                    }) {
+                        working = false; onProblem(it)
+                    }
+                }
+            }
+        }
+        TextAction(t("conv.media.save_copy")) {
+            val dest = MediaExport.chooseDestination(target.fileName)
+            if (dest != null && !working) {
+                working = true
+                MediaExport.inBackground({ MediaExport.saveCopy(File(target.path), dest) }) {
+                    working = false; onProblem(it)
+                }
+            }
+        }
+    }
+}
+
+/**
+ * __LOCAL_DATA_AT_REST_2026_09_22__ The only two ways plaintext of a sealed attachment
+ * leaves this process on purpose.
+ *
+ *  - [openExternally] decrypts to `media-tmp/` (the vault's scratch dir) and hands that path
+ *    to the OS. This process cannot know when the other app is done with it, so the copy is
+ *    deleted at client close, at JVM exit, and by the sweep at the next start — not sooner.
+ *  - [saveCopy] streams a decrypted copy to a path the USER picked. That is an export; it is
+ *    theirs and is not tracked or deleted.
+ *
+ * Both stream (one chunk in memory) and delete their own output on a failed decrypt.
+ */
+object MediaExport {
+    val canOpenExternally: Boolean by lazy {
+        try {
+            java.awt.Desktop.isDesktopSupported() &&
+                java.awt.Desktop.getDesktop().isSupported(java.awt.Desktop.Action.OPEN)
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /**
+     * Null on success, or a sentence to put on screen.
+     *
+     * __ATTACHMENT_TYPE_CONFUSION_2026_11_02__ The policy check comes FIRST,
+     * before the decrypt: `java.awt.Desktop.open` is the shell, the extension
+     * it acts on comes from the SENDER, and the kind the bubble displayed is a
+     * separate wire field. See `AttachmentOpenPolicy` for the mechanism — it
+     * is CVE-2025-30401's shape, and the two names must agree before anything
+     * is handed to the system.
+     */
+    fun openExternally(file: File, displayedKind: String? = null, displayName: String? = null): String? = try {
+        val shownName = displayName ?: file.name
+        val decision = com.oshi.desktop.store.AttachmentOpenPolicy.decide(shownName, displayedKind)
+        if (!decision.allowed) {
+            decision.reason
+        } else {
+            val vault = com.oshi.desktop.store.MediaVault.current()
+            if (vault == null) {
+                t("desktop.media.no_key")
+            } else {
+                // __MARK_OF_THE_WEB_2026_11_20__ the OS must know this came from someone else.
+                java.awt.Desktop.getDesktop().open(vault.decryptToScratch(file).also { com.oshi.desktop.store.DownloadMark.mark(it) })
+                null
+            }
+        }
+    } catch (e: Throwable) {
+        t("desktop.media.open_failed", "${e.javaClass.simpleName}: ${e.message ?: t("desktop.media.no_detail")}")
+    }
+
+    /** Null on success, or a sentence to put on screen. */
+    fun saveCopy(file: File, dest: File): String? = try {
+        val vault = com.oshi.desktop.store.MediaVault.current()
+            ?: return t("desktop.media.no_key")
+        vault.decryptTo(file, dest)
+        com.oshi.desktop.store.DownloadMark.mark(dest)
+        null
+    } catch (e: Throwable) {
+        t("desktop.media.save_failed", "${e.javaClass.simpleName}: ${e.message ?: t("desktop.media.no_detail")}", dest.path)
+    }
+
+    fun chooseDestination(suggested: String): File? = try {
+        val dialog = com.oshi.desktop.ui.DialogOwner.fileDialog(t("desktop.media.save_dialog"), java.awt.FileDialog.SAVE)
+        dialog.file = suggested
+        dialog.isVisible = true
+        val name = dialog.file
+        val dir = dialog.directory
+        if (name == null || dir == null) null else File(dir, name)
+    } catch (_: Throwable) {
+        null
+    }
+
+    /** Runs [work] off the event thread and delivers its result back on it. */
+    fun inBackground(work: () -> String?, done: (String?) -> Unit) {
+        Thread({
+            val result = runCatching(work).getOrElse { t("desktop.media.failed", it.javaClass.simpleName) }
+            EventQueue.invokeLater { done(result) }
+        }, "oshi-media-export").apply { isDaemon = true; start() }
+    }
+}
+
 // ---------------------------------------------------------------------------- reveal
 
 /** What the platform can actually be asked to do with a folder. */
-enum class RevealAction(val label: String) {
+enum class RevealAction(private val labelKey: String?) {
     /** Nothing. No control is drawn. */
-    NONE(""),
+    NONE(labelKey = null),
 
     /** `Desktop.browseFileDirectory` — opens the folder with the file selected. */
-    SELECT_IN_FOLDER("Show in folder"),
+    SELECT_IN_FOLDER(labelKey = "desktop.media.reveal.select"),
 
     /** `Desktop.open` on the PARENT — the folder opens, nothing is selected. */
-    OPEN_FOLDER("Open containing folder"),
+    OPEN_FOLDER(labelKey = "desktop.media.reveal.open");
+
+    /** In the app's language (`t`), read when drawn. */
+    val label: String get() = labelKey?.let { t(it) } ?: ""
 }
 
 /**
@@ -852,8 +1132,7 @@ object FolderReveal {
             RevealAction.NONE -> Unit
         }
         null
-    } catch (t: Throwable) {
-        "This machine's desktop refused to open the folder (${t.javaClass.simpleName}). " +
-            "The path above is the file; nothing about the file has changed."
+    } catch (e: Throwable) {
+        t("desktop.media.reveal.failed", e.javaClass.simpleName)
     }
 }

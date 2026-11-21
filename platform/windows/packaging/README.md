@@ -4,7 +4,7 @@ This directory is passed to jpackage as `--resource-dir` by the `packageExe` and
 tasks, but **only when it contains something jpackage recognises**. The build is written so that
 an empty directory changes nothing: jpackage uses its own built-in templates.
 
-It holds the launcher icons, and nothing else.
+It holds the launcher icons and `main.wxs` (since 1.5.1).
 
 Drop a file here only to override a specific jpackage default. jpackage looks for exact
 filenames; anything else (this README included) is ignored.
@@ -13,7 +13,7 @@ filenames; anything else (this README included) is ignored.
 |---|---|
 | `OSHI.ico` | the application and installer icon — **present** |
 | `OSHI-Console.ico` | the `OSHI-Console` launcher's icon — **present** |
-| `main.wxs` | the WiX installer definition — full control, and full responsibility |
+| `main.wxs` | the WiX installer definition — **present**: jpackage **21**'s own template plus one custom action that ends this user's running OSHI before an upgrade/uninstall (`__CLOSE_RUNNING_OSHI_2026_11_20__`). Re-copy the template if the release JDK changes major version. |
 | `overrides.wxi` | a WiX include, for smaller changes than replacing `main.wxs` |
 | `OSHI-post-image.wsf` | a script run after the app image is built |
 | `WinLauncher.template` | launcher properties |

@@ -15,22 +15,20 @@ import java.io.File
  * ### Two catalogs, not one
  *
  * Each `.lproj` holds `Localizable.strings` AND `InfoPlist.strings`, and they are
- * SEPARATE assets: 3820 keys against 16. This project has a memory of exactly the
+ * SEPARATE assets: thousands of Localizable keys against 16. This project has a memory of exactly the
  * confusion that invites — a `Localizable.xcstrings` at 100% while the permission prompts
  * were English in 34 languages, because `InfoPlist.xcstrings` is a different file that
  * nobody had looked at. So both are extracted, filed separately, and counted separately.
  *
  * **What `InfoPlist.strings` maps to on the desktop.** Its 16 keys are iOS permission
- * prompts (`NSCameraUsageDescription`, `NSBluetoothAlwaysUsageDescription`, …) plus
- * `CFBundleDisplayName`. Windows and Linux have no permission-prompt strings at all:
- * there is no OS dialog asking the user to grant the camera, so 15 of the 16 map to
- * NOTHING and are extracted only so that the desktop never has to go back to the iOS tree
- * to answer a question about them. The sixteenth, `CFBundleDisplayName`, maps to real
- * installer metadata — jpackage's `--name` / `--description`, which become the Start Menu
- * shortcut and the `.deb` package description. **jpackage takes exactly one `--name` per
- * invocation and has no localised-metadata mechanism at all**, so the installer is
- * single-language by construction; `InfoPlistMappingTest` records that as a measured
- * property of jpackage 17's command line rather than an assumption.
+ * prompts (`NSCameraUsageDescription`, `NSBluetoothAlwaysUsageDescription`, …). Windows
+ * and Linux have no permission-prompt strings at all, so all 16 map to NOTHING and are
+ * extracted only so that the desktop never has to go back to the iOS tree to answer a
+ * question about them. Installer metadata is jpackage's independent `--name` /
+ * `--description`; **jpackage takes exactly one `--name` per invocation and has no
+ * localised-metadata mechanism at all**, so the installer is single-language by
+ * construction. `CatalogAuditTest` records the all-permission-prompt shape rather than
+ * assuming it.
  */
 object CatalogExtractor {
 
