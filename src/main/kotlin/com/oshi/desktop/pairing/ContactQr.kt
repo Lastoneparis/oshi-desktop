@@ -111,25 +111,35 @@ import java.util.Base64
  * Saying that plainly matters more than implementing something extra here: a reader who
  * assumes the QR is authenticated will put weight on it that it cannot carry.
  *
- * ============================================================ DESKTOP SCOPE — NO CAMERA
+ * ============================================================ DESKTOP SCOPE — THREE WAYS IN
  *
- * **This client has no camera and does not decode images.** Nothing here reads a PNG, a
- * screenshot or a webcam frame; there is no ZXing, no `AVCaptureMetadataOutput`
- * equivalent, and adding one would be a new dependency plus a platform abstraction over
- * V4L2 / Media Foundation / AVFoundation for three OSes — far past this row.
+ * This block said, in bold, **"This client has no live camera"**, and that live webcam
+ * integration *"over V4L2 / Media Foundation / AVFoundation … would require a separate
+ * native capability on each desktop OS"*. That was wrong on 2026-10-28 and had been for
+ * months: `CameraCapture` opens exactly those three — `avfoundation`, `dshow`,
+ * `video4linux2` — honours the camera the user picked in settings, and renders a BGRA
+ * preview of every frame. It had ONE caller, the video call, which is why a search for a
+ * webcam feature found nothing and a search for the class would have found everything.
  *
- * The desktop-side contract is therefore two halves of the exchange, not three:
+ * So there are three ways a code gets in here, not two:
+ *
+ *   - **SCAN**: [QrCameraScanner] drives those preview frames through ZXing until one of
+ *     them holds a code. It decides nothing — what it reads is handed to [parse], the same
+ *     call a pasted string gets. A camera is an input method, not an authority, and this QR
+ *     was never authenticated in the first place (see above).
+ *   - **PICK**: [QrImageDecoder] reads a user-selected PNG/JPEG screenshot or photo through
+ *     ZXing with an explicit pixel bound — still the right answer for a code someone sent
+ *     you in a message rather than one held up in front of you.
  *
  *   - **DISPLAY**: [payloadFor] gives the exact string to encode, and [QrMatrix] turns it
  *     into modules a phone camera can read (terminal text or PNG). This is the direction
  *     that matters, because it is the one where a wrong byte is invisible until someone
  *     points a phone at the screen.
- *   - **PARSE**: [parse] takes an ALREADY-DECODED string — pasted from a phone's "Copy
- *     key" button, typed in, dropped in from a share sheet, or handed over by some future
- *     image decoder — and returns either a canonical address or a named reason it was
- *     refused. Both phones offer exactly this manual-entry path next to their scanner
- *     (`QRScannerView.swift:76-99`, `NewMessageScreen.kt` "Paste Key"), so this is a
- *     shipped affordance being ported, not a workaround for the missing camera.
+ *   - **PARSE**: [parse] takes an already-decoded string — pasted from a phone's "Copy key"
+ *     button, typed in, dropped in from a share sheet, or returned by [QrImageDecoder] — and
+ *     returns either a canonical address or a named reason it was refused. Both phones offer
+ *     this manual-entry path next to their scanner (`QRScannerView.swift:76-99`,
+ *     `NewMessageScreen.kt` "Paste Key").
  */
 object ContactQr {
 

@@ -1,0 +1,350 @@
+# ==============================================================================
+# OSHI desktop — Linux readiness (1.6.1). What the PC smoke run does not cover:
+#   package       .deb + .rpm built here; declared dependencies printed and checked;
+#                 the window's screens rendered offscreen with this runner's fonts.
+#   arm64         is a Linux arm64 (aarch64) build possible at all? build + launch.
+#   unit-audio    the Linux-gated tests for real: libsecret round trip, GLib parses the
+#                 autostart entry, and the call audio format opened on PulseAudio / PipeWire
+#                 (null sink, no hardware) — LiveAudioDeviceBench, speaker AND microphone.
+#   nokeyring     a stock session with NO Secret Service and NO tray: the passphrase window,
+#                 first run, WM_CLASS, 0700 profile, close = quit, unlock / wrong passphrase.
+#   gnome         a real GNOME Shell (headless Wayland, app on Xwayland).
+#   fedora        the .rpm on Fedora: dependencies resolve, probe + console client.
+# Throwaway profiles, nothing published, signed or tagged.
+# ==============================================================================
+name: linux-qa
+
+on:
+  push:
+    branches: ['ci/desktop-161-linux', 'ci/linux-qa']
+  workflow_dispatch:
+
+concurrency:
+  group: linux-qa-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  APP_VERSION: '1.6.1'
+  PYTHONUTF8: '1'
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '21' }
+      - name: Build .deb and .rpm
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq fakeroot binutils rpm >/dev/null
+          chmod +x ./gradlew
+          ./gradlew packageDeb packageRpm -PappVersion="$APP_VERSION" --no-daemon --console=plain
+          ls -la build/jpackage/out
+      - name: Declared dependencies
+        run: |
+          set -euo pipefail
+          deb=$(ls build/jpackage/out/*.deb); rpm=$(ls build/jpackage/out/*.rpm)
+          dpkg-deb -I "$deb" | sed -n '/Package:/,/Description:/p'
+          dpkg-deb -I "$deb" | grep -E '^ Depends:.*libsecret-tools' || { echo "::error::the .deb does not depend on libsecret-tools"; exit 1; }
+          if dpkg-deb -I "$deb" | grep -E '^ Depends:' | grep -E 't64(,|$)' | grep -vq '|'; then echo "::error::a bare *t64 dependency: not installable before Ubuntu 24.04 / Debian 13"; exit 1; fi
+          rpm -qpR "$rpm" | sort -u | head -60
+          rpm -qpR "$rpm" | grep -qx '/usr/bin/secret-tool' || { echo "::error::the .rpm does not require /usr/bin/secret-tool"; exit 1; }
+          echo "--- .desktop inside the .deb"; dpkg-deb --fsys-tarfile "$deb" | tar -xO --wildcards '*.desktop' || true
+          echo "--- maintainer scripts"; dpkg-deb -e "$deb" /tmp/ctl && ls /tmp/ctl && cat /tmp/ctl/postinst
+          echo "--- rpm scriptlets"; rpm -qp --scripts "$rpm"
+          echo "--- natives in the image (linux)"; dpkg-deb -c "$deb" | grep -oE '[^/]*linux[^/]*\.jar' | sort -u
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: build/jpackage/out/*
+      - name: Render the window's screens offscreen (this runner's fonts)
+        run: |
+          sudo apt-get install -y -qq fonts-noto-color-emoji fonts-noto-cjk fonts-noto-core fonts-dejavu-core >/dev/null || true
+          fc-match sans-serif; fc-match "Noto Sans" || true
+          # the fontconfig default (DejaVu on Debian/Ubuntu), for comparison
+          OSHI_UI_FONT=system ./gradlew renderSettingsScreens --no-daemon --console=plain -q || true
+          mv build/screens-settings build/screens-settings-fontconfig-default || true
+          ./gradlew renderScreens renderSettingsScreens --no-daemon --console=plain -q || true
+          OSHI_RENDER_THEME=dark ./gradlew renderScreens --no-daemon --console=plain -q || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-rendered-screens
+          path: |
+            build/screens/**
+            build/screens-settings/**
+            build/screens-settings-fontconfig-default/**
+          if-no-files-found: warn
+
+  arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '21' }
+      - name: Build the arm64 .deb
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq fakeroot binutils xvfb imagemagick >/dev/null
+          chmod +x ./gradlew
+          ./gradlew packageDeb -PappVersion="$APP_VERSION" --no-daemon --console=plain
+          ls -la build/jpackage/out
+      - name: Install, probe, open the window
+        run: |
+          set -x
+          sudo apt-get install -y ./build/jpackage/out/*.deb
+          L="$(dpkg -L oshi-desktop | grep -E '/bin/OSHI$' | head -1)"
+          dpkg-deb -c build/jpackage/out/*.deb | grep -oE '[^/]*(linux|aarch|arm)[^/]*\.(jar|so)' | sort -u
+          "$L" --probe > probe.log 2>&1; tail -5 probe.log
+          Xvfb :97 -screen 0 1440x900x24 & sleep 2
+          OSHI_PASSPHRASE=arm64-ci DISPLAY=:97 "$L" --ui --home /tmp/armhome > gui.log 2>&1 & pid=$!
+          sleep 45; DISPLAY=:97 import -window root arm64-window.png; kill $pid || true; tail -30 gui.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-arm64
+          path: |
+            build/jpackage/out/*.deb
+            *.png
+            *.log
+
+  unit-audio:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        audio: [pulseaudio, pipewire]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '21' }
+      - name: Session bus, keyring, ${{ matrix.audio }} with a null sink
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gnome-keyring libsecret-1-0 libsecret-tools dbus-x11 python3-gi gir1.2-glib-2.0 \
+            alsa-utils libasound2-plugins >/dev/null
+          if [ "${{ matrix.audio }}" = pulseaudio ]; then
+            sudo apt-get install -y -qq pulseaudio >/dev/null
+          else
+            sudo apt-get install -y -qq pipewire pipewire-pulse pipewire-alsa wireplumber pulseaudio-utils >/dev/null
+          fi
+          export XDG_RUNTIME_DIR=/tmp/xdg-rt; mkdir -p -m 700 $XDG_RUNTIME_DIR; echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
+          eval "$(dbus-launch --sh-syntax)"; echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
+          eval "$(printf '\n' | gnome-keyring-daemon --daemonize --login | sed 's/^/export /')" || true
+          eval "$(gnome-keyring-daemon --start --components=secrets | sed 's/^/export /')" || true
+          printf 'x' | secret-tool store --label=probe service ci-probe account p
+          if [ "${{ matrix.audio }}" = pulseaudio ]; then
+            pulseaudio --start --exit-idle-time=-1 --daemonize=yes
+            sleep 2
+            pactl load-module module-null-sink sink_name=oshi_null || true
+            pactl set-default-sink oshi_null || true; pactl set-default-source oshi_null.monitor || true
+          else
+            (pipewire >/tmp/pw.log 2>&1 &) ; sleep 2
+            (wireplumber >/tmp/wp.log 2>&1 &) ; sleep 2
+            (pipewire-pulse >/tmp/pwp.log 2>&1 &) ; sleep 3
+            pactl load-module module-null-sink sink_name=oshi_null || true
+            pactl set-default-sink oshi_null || true; pactl set-default-source oshi_null.monitor || true
+          fi
+          pactl info | grep -E 'Server Name|Default Sink|Default Source' || true
+          aplay -L | head -20 || true
+      - name: A virtual webcam (v4l2loopback fed by ffmpeg's test pattern)
+        if: matrix.audio == 'pulseaudio'
+        continue-on-error: true
+        run: |
+          set -x
+          sudo apt-get install -y -qq v4l2loopback-dkms v4l-utils ffmpeg "linux-headers-$(uname -r)" >/dev/null 2>&1 || sudo apt-get install -y -qq v4l2loopback-dkms v4l-utils ffmpeg
+          sudo modprobe v4l2loopback video_nr=0 card_label="OSHI CI Cam" exclusive_caps=1 && ls -la /dev/video* || exit 0
+          sudo udevadm settle || true; sleep 2
+          sudo chmod 666 /dev/video0; sudo setfacl -m "u:$USER:rw" /dev/video0 2>/dev/null || true
+          ls -la /dev/video0
+          (ffmpeg -nostdin -loglevel error -re -f lavfi -i testsrc2=size=1280x720:rate=30 -pix_fmt yuyv422 -f v4l2 /dev/video0 > /tmp/ffcam.log 2>&1 &)
+          sleep 3; v4l2-ctl -d /dev/video0 --all | head -30 || true
+          cat /sys/class/video4linux/video0/name /sys/class/video4linux/video0/index || true
+          echo "OSHI_EXPECT_CAMERA=1" >> "$GITHUB_ENV"
+      - name: Linux-gated tests (libsecret, GLib autostart parse, audio devices, notifier, cameras, updater)
+        env:
+          OSHI_EXPECT_SECRET_STORE: libsecret
+          OSHI_AUDIO_PLAYBACK: '1'
+          OSHI_AUDIO_MIC: '1'
+        run: |
+          [ -e /dev/video0 ] && { sudo chmod 666 /dev/video0; ls -la /dev/video0; }
+          chmod +x ./gradlew
+          ./gradlew test --no-daemon --console=plain \
+            --tests 'com.oshi.desktop.store.SecretStoreTest' --tests 'com.oshi.desktop.store.VerifiedSecretStoreTest' \
+            --tests 'com.oshi.desktop.store.KeyVaultTest' \
+            --tests 'com.oshi.desktop.ui.BackgroundPresenceTest' --tests 'com.oshi.desktop.ui.DesktopNotifierTest' \
+            --tests 'com.oshi.desktop.ui.SleepInhibitorTest' --tests 'com.oshi.desktop.ui.PassphrasePromptTest' \
+            --tests 'com.oshi.desktop.call.LiveAudioDeviceBench' --tests 'com.oshi.desktop.update.*' \
+            --tests 'com.oshi.desktop.i18n.SystemLanguageTest' --tests 'com.oshi.desktop.media.*' \
+            --tests 'com.oshi.desktop.call.video.CameraLoopbackTest' --tests 'com.oshi.desktop.pairing.QrCameraScannerTest' || true
+          python3 - <<'PY'
+          import glob, os, re, sys
+          bad = False
+          for f in sorted(glob.glob("build/test-results/test/TEST-*.xml")):
+              head = open(f, encoding="utf-8", errors="replace").read(600)
+              m = re.search(r'tests="(\d+)" skipped="(\d+)" failures="(\d+)" errors="(\d+)"', head)
+              name = f.split("TEST-")[1][:-4]
+              print(f"{name}: tests={m[1]} skipped={m[2]} failures={m[3]} errors={m[4]}")
+              if int(m[3]) or int(m[4]): bad = True
+              if "LiveAudioDeviceBench" in name and int(m[2]): print("::error::the audio bench SKIPPED: no call-format line on this audio server"); bad = True
+              if "CameraLoopbackTest" in name and int(m[2]) and os.environ.get("OSHI_EXPECT_CAMERA"): print("::error::the camera loopback SKIPPED with a v4l2loopback camera present"); bad = True
+          for f in glob.glob("build/test-results/test/TEST-*CameraLoopbackTest.xml"):
+              print("\n".join(re.findall(r"CAMERA_LOOPBACK[^\n<]*|camera did not open[^\n<]*|no usable camera[^\n<]*", open(f, encoding="utf-8").read())))
+          body = open(glob.glob("build/test-results/test/TEST-com.oshi.desktop.call.LiveAudioDeviceBench.xml")[0], encoding="utf-8").read()
+          print("\n".join(re.findall(r"\[audio[^\n<]*", body)[:40]))
+          sys.exit(1 if bad else 0)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unit-audio-${{ matrix.audio }}
+          path: |
+            build/test-results/test/*.xml
+            build/camera-loopback-*.png
+
+  nokeyring:
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [nokeyring, hidpi]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - uses: actions/download-artifact@v4
+        with: { name: linux-packages, path: pkg }
+      - name: A stock box — install the .deb with apt (nothing pre-installed for it)
+        run: |
+          set -euo pipefail
+          echo "before: secret-tool=$(command -v secret-tool || echo none) gnome-keyring=$(dpkg -s gnome-keyring 2>/dev/null | grep -c installed || true)"
+          sudo apt-get update -qq
+          sudo apt-get install -y ./pkg/*.deb 2>&1 | tail -15
+          command -v secret-tool || { echo "::error::installing the .deb did not bring secret-tool"; exit 1; }
+          dpkg -s gnome-keyring >/dev/null 2>&1 && echo "::warning::gnome-keyring is installed on this image" || echo "no gnome-keyring: no Secret Service on this box"
+          ls -la /etc/xdg/menus 2>/dev/null || echo "no /etc/xdg/menus here (xdg-desktop-menu refuses)"
+          ls /usr/share/applications | grep -i oshi || { echo "::error::no OSHI menu entry after installing the .deb"; exit 1; }
+          echo "oshi:// handler: $(xdg-mime query default x-scheme-handler/oshi 2>&1)"
+          grep -l 'x-scheme-handler/oshi' /usr/share/applications/mimeinfo.cache 2>/dev/null || echo "::warning::mimeinfo.cache has no oshi:// (update-desktop-database absent?)"
+      - name: Display without a tray (openbox), no keyring, OCR
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y -qq xvfb xdotool wmctrl openbox x11-utils x11-xserver-utils tesseract-ocr dbus-x11 >/dev/null
+          python -m pip install --quiet pillow pytesseract
+          if [ "${{ matrix.scenario }}" = hidpi ]; then size=3840x2160x24; else size=1920x1080x24; fi
+          Xvfb :99 -screen 0 $size >/tmp/xvfb.log 2>&1 &
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"; sleep 2
+          DISPLAY=:99 openbox >/tmp/openbox.log 2>&1 &
+          eval "$(dbus-launch --sh-syntax)"; echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
+          printf 'x' | timeout 10 secret-tool store --label=p service s account a && echo "::error::a Secret Service answered" || echo "secret-tool store fails here, as wanted"
+      - name: Drive it
+        run: |
+          L="$(dpkg -L oshi-desktop | grep -E '/bin/OSHI$' | head -1)"
+          python .github/pc-smoke/linux_qa.py --scenario ${{ matrix.scenario }} --app "$(dirname "$(dirname "$L")")" --out qa-out
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-qa-${{ matrix.scenario }}
+          path: qa-out/**
+
+  gnome:
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - uses: actions/download-artifact@v4
+        with: { name: linux-packages, path: pkg }
+      - name: Install GNOME Shell + the .deb
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends gnome-shell mutter xwayland gnome-settings-daemon \
+            libnotify-bin dbus-x11 xdotool x11-utils tesseract-ocr fonts-cantarell fonts-noto-color-emoji >/dev/null
+          sudo apt-get install -y -qq ./pkg/*.deb >/dev/null
+          python -m pip install --quiet pillow pytesseract
+          echo "--- registered menu entry"; ls -la /usr/share/applications | grep -i oshi || echo "::warning::no OSHI entry in /usr/share/applications"
+          for f in /usr/share/applications/*OSHI*.desktop /usr/share/applications/*oshi*.desktop; do [ -f "$f" ] && { echo "== $f"; cat "$f"; desktop-file-validate "$f" || true; }; done
+          xdg-mime query default x-scheme-handler/oshi || true
+      - name: Start a headless GNOME session and drive the app on Xwayland
+        run: |
+          set -x
+          export XDG_RUNTIME_DIR=/tmp/xdg-rt; mkdir -p -m 700 $XDG_RUNTIME_DIR
+          export XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=GNOME
+          eval "$(dbus-launch --sh-syntax)"
+          gnome-shell --headless --unsafe-mode --wayland --virtual-monitor 1920x1080 > /tmp/gnome-shell.log 2>&1 &
+          for i in $(seq 1 30); do ls /tmp/.X11-unix/ 2>/dev/null | grep -q X && break; sleep 1; done
+          ls -la /tmp/.X11-unix/ $XDG_RUNTIME_DIR || true
+          export DISPLAY=":$(ls /tmp/.X11-unix/ | sed -n 's/^X//p' | head -1)"
+          export XAUTHORITY="$(ls $XDG_RUNTIME_DIR/.mutter-Xwaylandauth* 2>/dev/null | head -1)"
+          export LINUXQA_SHOT=gnome
+          L="$(dpkg -L oshi-desktop | grep -E '/bin/OSHI$' | head -1)"
+          python .github/pc-smoke/linux_qa.py --scenario gnome --app "$(dirname "$(dirname "$L")")" --out qa-out; rc=$?
+          tail -60 /tmp/gnome-shell.log
+          exit $rc
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-qa-gnome
+          path: |
+            qa-out/**
+            /tmp/gnome-shell.log
+
+  older-debs:
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ['ubuntu:22.04', 'debian:12', 'debian:13']
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: linux-packages, path: pkg }
+      - name: apt install the .deb built on 24.04; probe + console client
+        run: |
+          set -eux
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -y ./pkg/*.deb 2>&1 | tail -12
+          command -v secret-tool
+          dpkg -s oshi-desktop | grep -E '^(Version|Depends)'
+          L="$(dpkg -L oshi-desktop | grep -E '/bin/OSHI$' | head -1)"
+          "$L" --probe > /tmp/probe.log 2>&1 || true; tail -3 /tmp/probe.log; grep -q 'known-answer vectors' /tmp/probe.log
+          printf '/whoami\n/quit\n' | OSHI_PASSPHRASE=ci-old timeout 120 "$L" --client --home /tmp/oldhome --name Old > /tmp/client.log 2>&1 || true
+          head -20 /tmp/client.log; grep -E '^\s*address\s*:' /tmp/client.log
+          apt-get remove -y oshi-desktop 2>&1 | tail -2
+
+  fedora:
+    needs: package
+    runs-on: ubuntu-24.04
+    container: fedora:41
+    timeout-minutes: 30
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: linux-packages, path: pkg }
+      - name: dnf install the .rpm; dependencies resolve; probe + console client
+        run: |
+          set -eux
+          rpm -q libsecret && echo "::warning::libsecret preinstalled" || true
+          dnf install -y pkg/*.rpm 2>&1 | tail -25
+          command -v secret-tool
+          rpm -q --requires oshi-desktop | sort -u | head -40
+          L="$(rpm -ql oshi-desktop | grep -E '/bin/OSHI$' | head -1)"; test -x "$L"
+          "$L" --probe > /tmp/probe.log 2>&1 || true; tail -3 /tmp/probe.log; grep -q 'known-answer vectors' /tmp/probe.log
+          printf '/whoami\n/quit\n' | OSHI_PASSPHRASE=ci-rpm timeout 120 "$L" --client --home /tmp/rpmhome --name RPM > /tmp/client.log 2>&1 || true
+          head -30 /tmp/client.log; grep -E '^\s*address\s*:' /tmp/client.log
+          ls -la /usr/share/applications | grep -i oshi || echo "::warning::no menu entry registered by the rpm"
+          dnf remove -y oshi-desktop 2>&1 | tail -3

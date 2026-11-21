@@ -36,22 +36,35 @@
 # which LOOK like a working install. This script finds the .desktop file on disk instead,
 # so it is correct by inspection and cannot desynchronise from a renamed token.
 #
-# `/opt/oshi-desktop` is jpackage's default install root for this package: `/opt/<package>`
-# where `<package>` is `linuxPackageName` in build.gradle.kts. Change that and change this.
+# The app lives at `<--install-dir>/<package>` = `/opt/oshi-desktop/oshi-desktop` (`linuxInstallDir`
+# and `linuxPackageName` in build.gradle.kts). __DEB_NEVER_HAD_A_MENU_ENTRY_2026_11_19__ this said
+# `/opt/oshi-desktop` until 1.5.0: the glob below matched nothing, and no .deb install ever got
+# an Applications-menu entry. Verified by `dpkg-deb -c` of the 1.5.0 package.
 
 set -e
 
-APPDIR=/opt/oshi-desktop
+APPDIR=/opt/oshi-desktop/oshi-desktop
 
 register_menu() {
     # Every failure here is non-fatal, deliberately: no menu directory, no xdg-utils
     # installed, a read-only /usr — none of them mean the application is unusable.
-    command -v xdg-desktop-menu >/dev/null 2>&1 || return 0
+    #
+    # __MENU_ENTRY_WITHOUT_XDG_MENUS_2026_11_21__ xdg-desktop-menu refuses when there is no
+    # $XDG_CONFIG_DIRS/menus directory ("No writable system menu directory found") — minimal and
+    # container installs, some tiling-WM setups — and then there was no .desktop entry at all, so
+    # no x-scheme-handler/oshi either: oshi:// links opened the BROWSER. The entry is then copied
+    # into /usr/share/applications directly, which is all GNOME, KDE and gio actually read.
     for d in "$APPDIR"/lib/*.desktop; do
         [ -e "$d" ] || continue
-        xdg-desktop-menu install --novendor "$d" >/dev/null 2>&1 || return 0
+        if ! { command -v xdg-desktop-menu >/dev/null 2>&1 && xdg-desktop-menu install --novendor "$d" >/dev/null 2>&1; }; then
+            mkdir -p /usr/share/applications 2>/dev/null || true
+            cp -f "$d" /usr/share/applications/ 2>/dev/null && chmod 644 "/usr/share/applications/$(basename "$d")" 2>/dev/null || true
+        fi
     done
-    xdg-desktop-menu forceupdate >/dev/null 2>&1 || true
+    command -v xdg-desktop-menu >/dev/null 2>&1 && xdg-desktop-menu forceupdate >/dev/null 2>&1 || true
+    # __OSHI_LINKS_ON_PC_2026_11_20__ the entry declares MimeType=x-scheme-handler/oshi; refresh
+    # the MIME cache so browsers and mail clients hand oshi:// links to OSHI.
+    command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q /usr/share/applications >/dev/null 2>&1 || true
     return 0
 }
 

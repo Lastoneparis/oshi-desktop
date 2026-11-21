@@ -38,7 +38,8 @@ import com.oshi.desktop.ui.OshiTheme
 object WallpaperPainter {
 
     /** The ground colour, always painted first so an alpha wash has something to sit on. */
-    val ground: Color get() = OshiTheme.background
+    // __BUBBLE_MEDIA_2026_11_21__ the thread's own ground (soft lavender / deep neutral / black).
+    val ground: Color get() = OshiTheme.bubbles.chatBackground
 
     fun brush(id: WallpaperId): Brush = when (id) {
         WallpaperId.NONE -> SolidColor(Color.Transparent)

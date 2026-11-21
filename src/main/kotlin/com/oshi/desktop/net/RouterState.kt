@@ -1,6 +1,7 @@
 package com.oshi.desktop.net
 
 import com.oshi.desktop.store.AtomicFile
+import com.oshi.messenger.network.v2.V2PaddingPeers
 import com.oshi.messenger.network.v2.V2RetryBudget
 import java.io.File
 import org.json.JSONArray
@@ -30,8 +31,52 @@ import org.json.JSONObject
 class RouterState(private val file: File) {
 
     private var lastSeq: Long = 0
+    /**
+     * __PER_DEVICE_MAILBOX_2026_09_23__ The DEVICE view's cursor, kept apart from the legacy
+     * one (CLIENT_SPEC.md §3.3): `seq` is global so `after` means the same thing in both, but
+     * each view acks different items, so one cursor would skip what the other never acked.
+     */
+    private var deviceLastSeq: Long = 0
     private val seen = LinkedHashSet<String>()
-    private val retries = LinkedHashMap<String, Int>()
+    private val retries = LinkedHashMap<String, V2RetryBudget.Entry>()
+
+    /**
+     * __DESKTOP_RATCHET_HEAL_2026_10_29__ When a peer's session first looked broken, and when
+     * we last sent that peer a heal acknowledgement.
+     *
+     * **Persisted, and that is the point rather than a nicety.** `RatchetHealSignal.Policy`
+     * has a one-minute cooldown and a `me < peer` tie-break in which the non-initiator waits
+     * a full cooldown from FIRST EVIDENCE. Both numbers are useless if a restart forgets
+     * them: the cooldown stops bounding anything, and — worse — the non-initiator's clock
+     * restarts, so a pair that keeps reconnecting could both act and reproduce exactly the
+     * symmetric loop the tie-break exists to prevent.
+     *
+     * Kept apart from [retries] for the reason the stall clock is: the retry map is CAPPED
+     * and evicts, and a rate limit that can be evicted is not a rate limit.
+     */
+    private val healEvidence = HashMap<String, Long>()
+    private val healSent = HashMap<String, Long>()
+
+    /**
+     * __BUDGET_REFUND_DEADLOCK_2026_10_20__ Epoch millis since which the ack cursor
+     * has NOT advanced, or 0 when it has never been set.
+     *
+     * Kept apart from [retries] on purpose, and that separation IS the guarantee:
+     * the retry map is capped, so any ceiling written into it is refunded the
+     * moment an entry is evicted — which, with a backlog larger than the cap, is
+     * the normal case and not the rare one. A ceiling that can be evicted holds
+     * nothing. This one number never can be.
+     */
+    private var stallSince: Long = 0
+
+    /**
+     * __V2_PADDING_2026_11_09__ The shared [V2PaddingPeers] map, serialized (per-session
+     * "strips padding" knowledge), and the `caps` last published in the account bundle — so a
+     * build that learns a new capability republishes it once instead of waiting for the
+     * one-time pool to run low.
+     */
+    private var paddingSlots: String? = null
+    private var publishedCaps: Int = -1
     private var dirty = false
 
     init {
@@ -44,6 +89,14 @@ class RouterState(private val file: File) {
     @Synchronized
     fun setLastSeq(v: Long) {
         if (v > lastSeq) { lastSeq = v; dirty = true }
+    }
+
+    @Synchronized
+    fun deviceLastSeq(): Long = deviceLastSeq
+
+    @Synchronized
+    fun setDeviceLastSeq(v: Long) {
+        if (v > deviceLastSeq) { deviceLastSeq = v; dirty = true }
     }
 
     /** @return true if this id is new (and now recorded); false if it was already delivered. */
@@ -67,12 +120,62 @@ class RouterState(private val file: File) {
     @Synchronized
     fun hasSeen(msgId: String): Boolean = msgId in seen
 
-    /** The persistence seam [V2RetryBudget] injects. */
+    /** The per-envelope persistence seam [V2RetryBudget] injects. */
     fun retryStore(): V2RetryBudget.Store = object : V2RetryBudget.Store {
-        override fun read(): Map<String, Int> = synchronized(this@RouterState) { LinkedHashMap(retries) }
-        override fun write(counts: Map<String, Int>) = synchronized(this@RouterState) {
-            retries.clear(); retries.putAll(counts); dirty = true
+        override fun read(): Map<String, V2RetryBudget.Entry> =
+            synchronized(this@RouterState) { LinkedHashMap(retries) }
+        override fun write(entries: Map<String, V2RetryBudget.Entry>) = synchronized(this@RouterState) {
+            retries.clear(); retries.putAll(entries); dirty = true
         }
+    }
+
+    /** The cursor-stall seam, deliberately NOT part of [retryStore]. */
+    fun retryStall(): V2RetryBudget.Stall = object : V2RetryBudget.Stall {
+        override fun since(): Long = synchronized(this@RouterState) { stallSince }
+        override fun set(millis: Long) = synchronized(this@RouterState) {
+            stallSince = millis; dirty = true
+        }
+    }
+
+    /**
+     * When this peer's session first looked broken. Records [nowMs] the first time and
+     * returns it unchanged afterwards, so the non-initiator's wait is measured from the
+     * FIRST evidence and not from the latest envelope in a long broken batch.
+     */
+    @Synchronized
+    fun healEvidenceAt(peer: String, nowMs: Long): Long =
+        healEvidence.getOrPut(peer) { nowMs.also { dirty = true } }
+
+    /** When we last sent this peer a heal acknowledgement, or null. */
+    @Synchronized
+    fun healSentAt(peer: String): Long? = healSent[peer]
+
+    /**
+     * Record that an acknowledgement went out, and CLEAR the evidence stamp: the next
+     * breakage is a new episode, and measuring its wait from an old stamp would let the
+     * non-initiator act immediately for ever after one slow repair.
+     */
+    @Synchronized
+    fun noteHealSent(peer: String, nowMs: Long) {
+        healSent[peer] = nowMs
+        healEvidence.remove(peer)
+        dirty = true
+    }
+
+    /** __V2_PADDING_2026_11_09__ The persistence seam [V2PaddingPeers.attach] takes. */
+    fun paddingStore(): V2PaddingPeers.Store = object : V2PaddingPeers.Store {
+        override fun read(): String? = synchronized(this@RouterState) { paddingSlots }
+        override fun write(json: String) = synchronized(this@RouterState) {
+            if (paddingSlots != json) { paddingSlots = json; dirty = true }
+        }
+    }
+
+    @Synchronized
+    fun publishedCaps(): Int = publishedCaps
+
+    @Synchronized
+    fun setPublishedCaps(caps: Int) {
+        if (publishedCaps != caps) { publishedCaps = caps; dirty = true }
     }
 
     /** Write, if anything changed. A quiet poll must not cost a file write. */
@@ -81,20 +184,40 @@ class RouterState(private val file: File) {
         if (!dirty) return
         val json = JSONObject()
             .put("lastSeq", lastSeq)
+            .apply { if (deviceLastSeq > 0) put("deviceLastSeq", deviceLastSeq) }
             // Only the newest ids are persisted: the in-memory set bounds duplicates for
             // this run, the file only has to bound them across a restart. Both mobile
             // clients persist 500.
             .put("seen", JSONArray().apply {
                 seen.asSequence().drop((seen.size - SEEN_PERSIST_CAP).coerceAtLeast(0)).forEach { put(it) }
             })
-            .put("retries", JSONObject().apply { retries.forEach { (k, v) -> put(k, v) } })
+            // `a` attempts, `t` first-failure millis. The timestamp is what makes
+            // eviction deterministic; without it a restart refunds the budget of
+            // whatever the cap dropped.
+            .put("retries", JSONObject().apply {
+                retries.forEach { (k, v) ->
+                    put(k, JSONObject().put("a", v.attempts).put("t", v.firstFailedAt))
+                }
+            })
+            .apply { if (stallSince > 0) put("cursorStalledSince", stallSince) }
+            .apply {
+                if (healEvidence.isNotEmpty()) put("healEvidence", JSONObject().apply {
+                    healEvidence.forEach { (k, v) -> put(k, v) }
+                })
+                if (healSent.isNotEmpty()) put("healSent", JSONObject().apply {
+                    healSent.forEach { (k, v) -> put(k, v) }
+                })
+                paddingSlots?.let { runCatching { put("paddingSlots", JSONObject(it)) } }
+                if (publishedCaps >= 0) put("publishedCaps", publishedCaps)
+            }
         AtomicFile.write(file, json.toString().toByteArray(Charsets.UTF_8))
         dirty = false
     }
 
     @Synchronized
     fun clear() {
-        lastSeq = 0; seen.clear(); retries.clear(); dirty = true
+        lastSeq = 0; deviceLastSeq = 0; seen.clear(); retries.clear(); stallSince = 0
+        healEvidence.clear(); healSent.clear(); paddingSlots = null; publishedCaps = -1; dirty = true
         flush()
     }
 
@@ -103,10 +226,36 @@ class RouterState(private val file: File) {
         try {
             val o = JSONObject(file.readText(Charsets.UTF_8))
             lastSeq = o.optLong("lastSeq", 0)
+            deviceLastSeq = o.optLong("deviceLastSeq", 0)
             o.optJSONArray("seen")?.let { arr ->
                 for (i in 0 until arr.length()) arr.optString(i).takeIf { it.isNotEmpty() }?.let(seen::add)
             }
-            o.optJSONObject("retries")?.let { r -> for (k in r.keys()) retries[k] = r.optInt(k, 0) }
+            // Two shapes on disk. The object form is current. A bare int is a file
+            // written before the budget had a timestamp: the ATTEMPTS are what the
+            // bound is made of, so they are kept, and the missing first-failure is
+            // dated now — the alternative, zero, would make every migrated entry the
+            // first thing evicted and hand back exactly the budget this is here to
+            // spend.
+            o.optJSONObject("healEvidence")?.let { h ->
+                for (k in h.keys()) h.optLong(k, 0L).takeIf { it > 0 }?.let { healEvidence[k] = it }
+            }
+            o.optJSONObject("healSent")?.let { h ->
+                for (k in h.keys()) h.optLong(k, 0L).takeIf { it > 0 }?.let { healSent[k] = it }
+            }
+            o.optJSONObject("retries")?.let { r ->
+                val now = System.currentTimeMillis()
+                for (k in r.keys()) {
+                    val entry = r.optJSONObject(k)
+                    retries[k] = if (entry != null) {
+                        V2RetryBudget.Entry(entry.optInt("a", 0), entry.optLong("t", now))
+                    } else {
+                        V2RetryBudget.Entry(r.optInt(k, 0), now)
+                    }
+                }
+            }
+            stallSince = o.optLong("cursorStalledSince", 0)
+            paddingSlots = o.optJSONObject("paddingSlots")?.toString()
+            publishedCaps = o.optInt("publishedCaps", -1)
         } catch (_: Exception) {
             // A corrupt cursor file degrades to "start from the beginning": the relay is
             // non-destructive until acked, so the worst case is re-pulling what is still
