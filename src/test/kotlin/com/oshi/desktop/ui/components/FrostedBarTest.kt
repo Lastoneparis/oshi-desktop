@@ -91,9 +91,9 @@ class FrostedBarTest {
         val saved = BackdropBlur.DOWNSCALE
         try {
             BackdropBlur.DOWNSCALE = 1f
-            val (_, full) = renderPair("dark")
+            val (full, _) = renderPair("dark")   // resting frame: wheel steps differ per OS
             BackdropBlur.DOWNSCALE = 4f
-            val (_, quarter) = renderPair("dark")
+            val (quarter, _) = renderPair("dark")
             // The whole header row, text included: a misplaced backdrop (offset or scaled)
             // moves the blurred bubbles and shows up as large local differences.
             var sum = 0L; var worst = 0; var n = 0
