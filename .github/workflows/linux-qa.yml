@@ -160,7 +160,9 @@ jobs:
           set -x
           sudo apt-get install -y -qq v4l2loopback-dkms v4l-utils ffmpeg "linux-headers-$(uname -r)" >/dev/null 2>&1 || sudo apt-get install -y -qq v4l2loopback-dkms v4l-utils ffmpeg
           sudo modprobe v4l2loopback video_nr=0 card_label="OSHI CI Cam" exclusive_caps=1 && ls -la /dev/video* || exit 0
-          sudo chmod 666 /dev/video0
+          sudo udevadm settle || true; sleep 2
+          sudo chmod 666 /dev/video0; sudo setfacl -m "u:$USER:rw" /dev/video0 2>/dev/null || true
+          ls -la /dev/video0
           (ffmpeg -nostdin -loglevel error -re -f lavfi -i testsrc2=size=1280x720:rate=30 -pix_fmt yuyv422 -f v4l2 /dev/video0 > /tmp/ffcam.log 2>&1 &)
           sleep 3; v4l2-ctl -d /dev/video0 --all | head -30 || true
           cat /sys/class/video4linux/video0/name /sys/class/video4linux/video0/index || true
@@ -171,6 +173,7 @@ jobs:
           OSHI_AUDIO_PLAYBACK: '1'
           OSHI_AUDIO_MIC: '1'
         run: |
+          [ -e /dev/video0 ] && { sudo chmod 666 /dev/video0; ls -la /dev/video0; }
           chmod +x ./gradlew
           ./gradlew test --no-daemon --console=plain \
             --tests 'com.oshi.desktop.store.SecretStoreTest' --tests 'com.oshi.desktop.store.VerifiedSecretStoreTest' \

@@ -205,13 +205,14 @@ def gnome(exe, work):
     subprocess.run(["notify-send", "--app-name=OSHI", "OSHI", "notification test"])
     time.sleep(2)
     ocr("gnome-notification")
-    for wid in window_ids():
-        subprocess.run(["xdotool", "windowactivate", "--sync", wid]); time.sleep(0.5)
-        subprocess.run(["xdotool", "key", "--window", wid, "alt+F4"])
+    # The title-bar close, as GNOME sends it (XTEST keys on Xwayland never reach mutter's alt+F4).
+    print("   close:", shell_eval("global.get_window_actors().map(a => a.meta_window)"
+                                 ".filter(w => w.get_wm_class() === 'OSHI')"
+                                 ".map(w => { w.delete(global.get_current_time()); return w.get_title(); }).join(',')"))
     deadline = time.time() + 30
     while time.time() < deadline and g.alive():
         time.sleep(1)
-    S.record("GNOME (no tray): closing quits", not g.alive(), g.log()[-1500:], must=False)
+    S.record("GNOME (no tray): closing the window quits OSHI", not g.alive(), g.log()[-1500:])
     g.stop()
 
 
