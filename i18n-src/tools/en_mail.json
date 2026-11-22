@@ -1,0 +1,17 @@
+{
+"pc.mail.alias.confirmRemove": "Remove the alias %@? Mail sent to it will no longer arrive.",
+"pc.mail.discard": "Discard draft",
+"pc.mail.draftTextOnly": "Drafts keep text only. Send the message, or remove the attachments before saving it as a draft.",
+"pc.mail.drive.confirmDelete": "Delete this file for ever? There is no copy to recover it from.",
+"pc.mail.drive.unnamed": "Unnamed file",
+"pc.mail.drive.upload": "Upload a file",
+"pc.mail.field.from": "From",
+"pc.mail.newBrowser": "A new browser can read this mailbox: %@. If it was not you, sign it out.",
+"pc.mail.pair.code": "Code",
+"pc.mail.reader.emptyBody": "Choose a message on the left to read it here.",
+"pc.mail.reader.emptyTitle": "Nothing open",
+"pc.mail.review": "Review",
+"pc.mail.saveClose": "Save and close",
+"pc.mail.search": "Search mail",
+"pc.mail.field.cc": "Cc"
+}

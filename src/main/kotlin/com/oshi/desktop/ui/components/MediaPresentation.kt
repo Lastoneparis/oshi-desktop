@@ -1,5 +1,7 @@
 package com.oshi.desktop.ui.components
 
+import com.oshi.desktop.i18n.t
+
 import com.oshi.desktop.store.MediaType
 import java.io.File
 
@@ -39,9 +41,18 @@ import java.io.File
  *      so a full-resolution decode is what an inline image costs and the cap is lower;
  *   5. the row is not a sealed view-once.
  *
- * Everything that is not an inline image is a named file card. A card is a true statement
- * about a file on disk; a thumbnail this window could not actually produce would be a
- * promise, which is the failure mode `DesktopLimits` exists to prevent.
+ * [posterVideo] is the same contract for a VIDEO: the type is [MediaType.VIDEO], the file is
+ * on this disk, and the row is not a sealed view-once. There is no byte cap on it, and that
+ * is deliberate rather than an omission — an inline image costs a FULL-RESOLUTION decode
+ * (this window has no downsampling image decoder, which is what [MAX_INLINE_BYTES] is
+ * protecting against), while a poster costs one video frame scaled down by swscale, and the
+ * decoder refuses a source over 1920px itself. A 200 MB film and a 2 MB clip cost the same
+ * first frame.
+ *
+ * Everything that is not an inline image or a poster is a named file card. A card is a true
+ * statement about a file on disk; a thumbnail this window could not actually produce would be
+ * a promise, which is the failure mode `DesktopLimits` exists to prevent — and until
+ * 2026-10-28 a video WAS that card, because nothing here could decode one.
  */
 data class MediaPresentation(
     /** The declared type. [MediaType.UNKNOWN] when the reference could not be parsed. */
@@ -52,6 +63,8 @@ data class MediaPresentation(
     val fileName: String,
     /** True only when all five conditions in the class note hold. */
     val inlineImage: Boolean,
+    /** A video whose first frame this window can draw in the bubble. See the class note. */
+    val posterVideo: Boolean = false,
     /** Sealed view-once: the bytes exist and this window is deliberately not drawing them. */
     val sealedViewOnce: Boolean,
     /**
@@ -78,15 +91,8 @@ data class MediaPresentation(
          */
         private val REF = Regex("""^\[([^\]]+)] (.+)$""", RegexOption.DOT_MATCHES_ALL)
 
-        const val MISSING_FILE_NOTE =
-            "The decrypted file is not at that path any more. Nothing was lost on the wire — " +
-                "the bytes were written to this disk when the message arrived and something " +
-                "has removed them since."
-
-        const val SEALED_NOTE =
-            "View once, as the sender marked it. Reveal is a LOCAL action: this client does " +
-                "not destroy the file afterwards and the sender is never told you opened it."
-
+        val MISSING_FILE_NOTE: String get() = t("desktop.media.note.missing_file")
+        val SEALED_NOTE: String get() = t("media.view_once.will_disappear")   // __VIEW_ONCE_DESKTOP_2027__ the bytes ARE destroyed now
         /**
          * The ceiling on a decoded-in-full inline image, in bytes.
          *
@@ -98,14 +104,8 @@ data class MediaPresentation(
          */
         const val MAX_INLINE_BYTES = 16L * 1024 * 1024
 
-        const val OVERSIZE_NOTE =
-            "This image is too large for this window to decode in one piece (over 16 MiB). " +
-                "The file is on disk and intact; open it in an image viewer."
-
-        const val UNPARSEABLE_NOTE =
-            "This attachment reference is not in the form this window knows how to read, so " +
-                "it is shown verbatim rather than interpreted."
-
+        val OVERSIZE_NOTE: String get() = t("desktop.media.note.inline_oversize")
+        val UNPARSEABLE_NOTE: String get() = t("desktop.media.note.unparseable")
         /**
          * @param attachment `MessageRow.attachment` — null or blank means "no media".
          * @param viewOnce whether the underlying `Message.isViewOnce` was set.
@@ -117,7 +117,9 @@ data class MediaPresentation(
             attachment: String?,
             viewOnce: Boolean = false,
             revealed: Boolean = false,
-            probe: (String) -> Long? = { File(it).takeIf { f -> f.isFile }?.length() },
+            // __LOCAL_DATA_AT_REST_2026_09_22__ the PLAINTEXT size, from the header of a
+            // sealed attachment, so the inline cap is the same cap it was before sealing.
+            probe: (String) -> Long? = { com.oshi.desktop.store.MediaVault.lengthOf(File(it)) },
         ): MediaPresentation? {
             val raw = attachment?.trim().orEmpty()
             if (raw.isEmpty()) return null
@@ -143,8 +145,9 @@ data class MediaPresentation(
             return MediaPresentation(
                 kind = kind,
                 path = path,
-                fileName = nameOf(path),
+                fileName = com.oshi.desktop.store.SafeFileName.displayName(nameOf(path)),
                 inlineImage = kind == MediaType.IMAGE && size != null && !oversize && !sealed,
+                posterVideo = kind == MediaType.VIDEO && size != null && !sealed,
                 sealedViewOnce = sealed,
                 viewOnceRow = viewOnce,
                 note = when {
@@ -163,13 +166,13 @@ data class MediaPresentation(
 
         /** The word a file card puts above the filename. Never "Photo" for a non-image. */
         fun cardLabel(kind: MediaType): String = when (kind) {
-            MediaType.IMAGE -> "Image"
-            MediaType.VIDEO -> "Video — no player in this window"
-            MediaType.AUDIO -> "Voice note — no player in this window"
-            MediaType.DOCUMENT -> "File"
-            MediaType.CONTACT -> "Contact card"
-            MediaType.LOCATION -> "Location"
-            MediaType.UNKNOWN -> "Attachment"
+            MediaType.IMAGE -> t("desktop.media.card.image")
+            MediaType.VIDEO -> t("desktop.media.card.video")
+            MediaType.AUDIO -> t("desktop.media.card.audio")
+            MediaType.DOCUMENT -> t("desktop.media.card.document")
+            MediaType.CONTACT -> t("desktop.media.card.contact")
+            MediaType.LOCATION -> t("desktop.media.card.location")
+            MediaType.UNKNOWN -> t("desktop.media.card.unknown")
         }
     }
 }

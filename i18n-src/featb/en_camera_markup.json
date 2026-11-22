@@ -1,0 +1,19 @@
+{
+"markup.undo": "Undo",
+"pc.camera.record": "Record video",
+"pc.camera.stop_send": "Stop and send",
+"pc.camera.video_failed": "The video could not be recorded.",
+"pc.camera.unavailable": "The camera could not be opened.",
+"pc.camera.hint": "A photo opens in the editor before it is sent. A video is sent when you stop it (one minute at most). On a Mac, the first use asks for camera permission.",
+"pc.markup.title": "Edit photo",
+"pc.markup.draw": "Draw",
+"pc.markup.text": "Text",
+"pc.markup.blur": "Blur",
+"pc.markup.crop": "Crop",
+"pc.markup.draw.hint": "Drag on the photo to draw.",
+"pc.markup.text.hint": "Click where the text goes, type it, then press Enter.",
+"pc.markup.text.placeholder": "Text on the photo",
+"pc.markup.blur.hint": "Drag a box over what must not be seen: faces, names, numbers. Blurred areas cannot be recovered from what is sent.",
+"pc.markup.crop.hint": "Drag the area to keep. Undo removes the crop.",
+"pc.markup.failed": "The edited photo could not be prepared."
+}

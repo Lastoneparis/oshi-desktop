@@ -70,7 +70,7 @@ object DayBreaks {
      * `messages.yesterday` are present and non-blank in all 34 locales — checked, not
      * assumed — so this is a free win: the separator over every conversation was English
      * in 33 languages for the price of two string literals. The weekday and the date were
-     * already localised, by `Locale.getDefault()` inside `DayOfWeek.getDisplayName` and
+     * already localised, by `appLocale()` inside `DayOfWeek.getDisplayName` and
      * the formatters, which is what made the two hardcoded words easy to miss: eight days
      * out of ten this function returns something correctly translated.
      */
@@ -80,7 +80,7 @@ object DayBreaks {
         return when {
             delta == 0L -> t("messages.today")
             delta == -1L -> t("messages.yesterday")
-            delta in -6L..-2L -> date.dayOfWeek.getDisplayName(TextStyle.FULL, Locale.getDefault())
+            delta in -6L..-2L -> date.dayOfWeek.getDisplayName(TextStyle.FULL, appLocale())
             else -> LONG_DATE.format(date)
         }
     }
@@ -98,7 +98,7 @@ object DayBreaks {
         return when {
             delta == 0L -> timeOf(stamp)
             delta == -1L -> t("messages.yesterday")
-            delta in -6L..-2L -> date.dayOfWeek.getDisplayName(TextStyle.SHORT, Locale.getDefault())
+            delta in -6L..-2L -> date.dayOfWeek.getDisplayName(TextStyle.SHORT, appLocale())
             else -> SHORT_DATE.format(date)
         }
     }
@@ -129,9 +129,16 @@ object DayBreaks {
     /** The two fields grouping depends on, so the rule can be tested without a `MessageRow`. */
     data class RowKey(val fromMe: Boolean, val stamp: String?)
 
-    private val LONG_DATE: DateTimeFormatter =
-        DateTimeFormatter.ofPattern("d MMMM yyyy", Locale.getDefault())
+    private val LONG_DATE: DateTimeFormatter get() =
+        DateTimeFormatter.ofPattern("d MMMM yyyy", appLocale())
 
-    private val SHORT_DATE: DateTimeFormatter =
-        DateTimeFormatter.ofPattern("d MMM", Locale.getDefault())
+    private val SHORT_DATE: DateTimeFormatter get() =
+        DateTimeFormatter.ofPattern("d MMM", appLocale())
 }
+
+/**
+ * __MESSAGES_PARITY_2027__ Dates in the APP's language (the catalog the window is drawn in),
+ * not the JVM default: the two differ as soon as the language is chosen in the app, and an
+ * Arabic window then printed "18 November 2025" under Arabic text.
+ */
+private fun appLocale(): Locale = Locale.forLanguageTag(com.oshi.desktop.i18n.Strings.activeTag)

@@ -1,0 +1,8 @@
+{
+  "pc.location.paste_hint": "Or paste coordinates or a map link",
+  "pc.location.paste_invalid": "That is not a point on the map.",
+  "pc.location.label_hint": "Name this place (optional)",
+  "pc.alive.note.desktop": "On a computer, the countdown shows only while OSHI is open.",
+  "desktop.settings.notOnDesktop.liveLocation": "Sharing where you are, live",
+  "desktop.settings.notOnDesktop.liveLocation.why": "A computer has no GPS, and OSHI will not guess your position from your network. You can still send a place you pick on the map, and see the locations your contacts share."
+}

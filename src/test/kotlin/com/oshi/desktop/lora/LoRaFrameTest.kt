@@ -298,6 +298,17 @@ class LoRaFrameTest {
         assertNull(r.accept(f[2], 5_000))
     }
 
+    @Test
+    fun `fresh random ids cannot exceed the pending reassembly cap`() {
+        val r = LoRaReassembler(maxPending = 2)
+        // One part of two for each id: no entry can complete and a TCP bridge can emit this
+        // shape at line rate. The third id must replace the oldest rather than grow forever.
+        for (id in 1u..3u) {
+            assertNull(r.accept(LoRaFrame.frame(id, seq = 0, total = 2, chunk = byteArrayOf(0x55)), 0))
+        }
+        assertEquals(2, r.pendingCount)
+    }
+
     /** A frame the parser rejects contributes nothing and does not open an entry. */
     @Test
     fun `a rejected frame does not open a reassembly entry`() {

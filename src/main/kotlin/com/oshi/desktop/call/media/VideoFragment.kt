@@ -4,7 +4,7 @@ package com.oshi.desktop.call.media
  * Application-level fragmentation for video — PARITY.md row 2.1.
  *
  * ```
- * [0x01][frame_id(2 BE)][fragment_index(1)][total_fragments(1)][payload ≤ 1100]
+ * [0x01][frame_id(2 BE)][fragment_index(1)][total_fragments(1)][payload ≤ 1100; we send ≤ 1000]
  * ```
  *
  * `OSHI/VideoCallManager.swift:421-432` specifies it, `:2404-2430` emits it and
@@ -41,8 +41,21 @@ object VideoFragment {
     /** magic(1) + frame_id(2) + idx(1) + total(1). */
     const val HEADER_SIZE = 5
 
-    /** Payload budget per fragment. Header + type + seq + nonce + tag ≈ 1142 B, under a 1200 B MTU. */
-    const val MAX_PAYLOAD = 1100
+    /**
+     * Payload budget per fragment — a SENDER choice only: every receiver (iOS, Android, this
+     * one) concatenates whatever sizes arrive, so lowering it needs no peer upgrade.
+     *
+     * __VIDEO_MTU_2026_09_23__ 1100 → 1000. The old "1142 B, under a 1200 B MTU" counted the
+     * `0xF1` envelope and forgot the carrier: the `:8089` relay adds
+     * `[t][len][recip 43-44][len][sender 43-44][len][callId 36]` = 126-128 B upstream and
+     * 82-84 B downstream, so a full fragment left as a 1270 B UDP payload — 1318 B on IPv6,
+     * above the 1280 B minimum MTU, fragmented (and dropped) by exactly the VPNs and
+     * carriers the audio path lost to (1957 B/pkt). It also broke the server's
+     * `UDP_SAFE_DATAGRAM = 1200` check downstream (1225 B), so one-way video was mirrored
+     * over WS as well. At 1000: 1042 B envelope, ≤ 1170 B relay-up, ≤ 1126 B relay-down,
+     * ≤ 1218 B on IPv6. Cost: ~+9 % datagrams, header overhead 3.8 % → 4.2 %.
+     */
+    const val MAX_PAYLOAD = 1000
 
     /** `total_fragments` is one byte. */
     const val MAX_FRAGMENTS = 255
@@ -95,138 +108,95 @@ object VideoFragment {
 }
 
 /**
- * Reassembles fragments into whole frame packets.
+ * Reassembles fragments into whole frame packets — a thin desktop face on the shared
+ * [com.oshi.messenger.service.VideoReorderReassembler] (the Android file, compiled here).
  *
- * Not thread-safe on its own — one instance per call, driven from the receive loop, the
- * same contract [PlaybackBuffer]'s producer side has.
+ * __VIDEO_REORDER_2026_09_23__ This used to hold ONE frame in flight, like both phones:
+ * the first fragment of frame N+1 abandoned an unfinished N and asked for a keyframe, and
+ * the late fragments of N were then refused. One datagram overtaking another across a
+ * frame boundary cost a frame and an IDR exactly as a loss did (`VideoLossBench`, 5 %
+ * reordering, no loss: 82.6 % complete, 59 % clean). Now:
  *
- * ============================================================ WHAT IT REFUSES, AND WHY
+ * - fragments are kept per `frame_id` and a frame completes in any arrival order;
+ * - whole frames are RELEASED in `frame_id` order (a P-frame decoded before its
+ *   reference is garbage) — [Outcome.released], possibly several per datagram;
+ * - a missing frame is waited for at most 2 newer frames / 100 ms, then skipped as lost
+ *   ([lostFrames]); a keyframe request follows only when the next released frame is not
+ *   itself a keyframe ([Outcome.requestKeyframe]);
+ * - a keyframe behind a hole is released at once;
+ * - anything at or before the last released id is [Reason.LATE] — including a repeat of
+ *   the frame just released, which both phones used to decode twice;
+ * - at most 32 unfinished frames are held, whatever order a hostile stream sends ids in.
  *
- * - **A fragment for a frame older than the last completed one** is dropped, using
- *   circular distance so a `frame_id` wrap at 65536 does not read as 65535 frames of
- *   lateness (`swift:2494-2506`, `kt:666-676`).
- * - **A fragment for the frame we JUST completed** is dropped too, which both phones
- *   allow through: their test is `dist > 32768`, and `dist == 0` is the id they already
- *   finished, so a duplicated single-fragment frame is decoded twice. On the phones the
- *   AES-GCM replay window catches it first ([VideoMediaFrame]); here it is refused at
- *   both layers rather than at one.
- * - **A second `total` for a frame already in flight** discards the whole entry: one of
- *   the two headers is lying and there is no way to tell which.
- * - **Any in-flight frame older than an arriving one** is discarded, because a frame
- *   whose fragments stopped arriving will never complete and holding it only delays the
- *   decoder. That discard sets [Outcome.requestKeyframe]: the peer must be asked for a
- *   fresh IDR, since our reference frame is gone. Android calls this out as a bug it
- *   shipped — the old code poked its OWN encoder instead of sending `0x0B` to the peer,
- *   so the request never reached the wire (`kt:702-712`, audit A-4 / D-7).
+ * Not thread-safe on its own — one instance per call, driven from the receive loop.
  */
-class VideoReassembler {
+class VideoReassembler(
+    clock: () -> Long = System::currentTimeMillis,
+    holdFrames: Int = com.oshi.messenger.service.VideoReorderReassembler.DEFAULT_HOLD_FRAMES,
+    holdMs: Long = com.oshi.messenger.service.VideoReorderReassembler.DEFAULT_HOLD_MS,
+) {
+    private val core = com.oshi.messenger.service.VideoReorderReassembler(holdFrames, holdMs, nowMs = clock)
 
     enum class Reason {
         /** Not a fragment, or a header that contradicts itself. */
         MALFORMED,
 
-        /** For a frame already completed, or older than one. */
+        /** For a frame already released or skipped. */
         LATE,
 
-        /** Stored; the frame is not whole yet. */
+        /** Stored; nothing is released yet. */
         BUFFERED,
 
         /** Two different `total_fragments` for one `frame_id`. The entry is gone. */
         TOTAL_MISMATCH,
 
-        /** [Outcome.frame] is a whole frame packet. */
+        /** [Outcome.frame] (and [Outcome.released]) hold whole frame packets. */
         COMPLETE,
     }
+
+    class Released(val frameId: Int, val frame: ByteArray, val isKeyFrame: Boolean, val lostBefore: Int)
 
     class Outcome(
         val reason: Reason,
         val frameId: Int = -1,
+        /** The FIRST released frame packet, when one was released. */
         val frame: ByteArray? = null,
-        /** True when an in-flight frame was abandoned and the peer should send an IDR. */
+        /** True when a reference frame was lost for good and the peer should send an IDR. */
         val requestKeyframe: Boolean = false,
+        /** Every frame released by this datagram, in decode order. */
+        val released: List<Released> = emptyList(),
     )
 
-    private class Entry(val total: Int) {
-        val parts = arrayOfNulls<ByteArray>(total)
-        var received = 0
-    }
-
-    private val inFlight = LinkedHashMap<Int, Entry>()
-    private var lastCompleted = -1
-
     /** Frames handed out whole. */
-    var completedFrames = 0L
-        private set
+    val completedFrames: Long get() = core.completedFrames
 
-    /**
-     * Frames that were never completed, counted from the gaps between completed ids.
-     *
-     * Fragment loss is the dominant failure on UDP and it is INVISIBLE to a completion
-     * callback — a frame missing one of its fragments simply never fires. iOS added the
-     * same gap counter for that reason and named the hole in its comment: "fragment loss
-     * was NEVER detected" (`swift:467-497`).
-     */
-    var lostFrames = 0L
-        private set
+    /** Frames skipped as lost — a missing frame never fires a completion, so it is counted here. */
+    val lostFrames: Long get() = core.lostFrames
+
+    /** Frames that completed while an older one was still missing (reordering absorbed). */
+    val reorderedFrames: Long get() = core.reorderedFrames
 
     /** Completed ÷ (completed + lost), as a percentage. 100 when nothing has arrived yet. */
-    fun completionRate(): Double {
-        val seen = completedFrames + lostFrames
-        return if (seen == 0L) 100.0 else completedFrames * 100.0 / seen
-    }
+    fun completionRate(): Double = core.completionRate()
 
-    fun offer(data: ByteArray): Outcome {
-        val h = VideoFragment.parse(data) ?: return Outcome(Reason.MALFORMED)
+    fun offer(data: ByteArray): Outcome = map(core.offer(data))
 
-        if (lastCompleted >= 0) {
-            val dist = (h.frameId - lastCompleted) and 0xFFFF
-            if (dist == 0 || dist > 32768) return Outcome(Reason.LATE, h.frameId)
+    /** Release what the clock alone allows (the hold window expired with no new datagram). */
+    fun poll(): Outcome = map(core.poll())
+
+    private fun map(o: com.oshi.messenger.service.VideoReorderReassembler.Outcome): Outcome {
+        val rel = o.released.map { Released(it.frameId, it.packet, it.isKeyFrame, it.lostBefore) }
+        val reason = when (o.reason) {
+            com.oshi.messenger.service.VideoReorderReassembler.Reason.MALFORMED -> Reason.MALFORMED
+            com.oshi.messenger.service.VideoReorderReassembler.Reason.LATE -> Reason.LATE
+            com.oshi.messenger.service.VideoReorderReassembler.Reason.BUFFERED -> Reason.BUFFERED
+            com.oshi.messenger.service.VideoReorderReassembler.Reason.TOTAL_MISMATCH -> Reason.TOTAL_MISMATCH
+            com.oshi.messenger.service.VideoReorderReassembler.Reason.RELEASED -> Reason.COMPLETE
         }
-
-        if (h.total == 1) return complete(h.frameId, h.payload, false)
-
-        // Abandon every in-flight frame this one is newer than.
-        var abandoned = false
-        val it = inFlight.entries.iterator()
-        while (it.hasNext()) {
-            val id = it.next().key
-            if (id == h.frameId) continue
-            val dist = (h.frameId - id) and 0xFFFF
-            if (dist in 1..32768) { it.remove(); abandoned = true }
-        }
-
-        val entry = inFlight.getOrPut(h.frameId) { Entry(h.total) }
-        if (entry.total != h.total) {
-            inFlight.remove(h.frameId)
-            return Outcome(Reason.TOTAL_MISMATCH, h.frameId, requestKeyframe = abandoned)
-        }
-        if (entry.parts[h.index] == null) {
-            entry.parts[h.index] = h.payload
-            entry.received++
-        }
-        if (entry.received < entry.total) {
-            return Outcome(Reason.BUFFERED, h.frameId, requestKeyframe = abandoned)
-        }
-
-        var size = 0
-        for (p in entry.parts) size += p?.size ?: 0
-        val whole = ByteArray(size)
-        var pos = 0
-        for (p in entry.parts) if (p != null) { p.copyInto(whole, pos); pos += p.size }
-        inFlight.remove(h.frameId)
-        return complete(h.frameId, whole, abandoned)
-    }
-
-    private fun complete(frameId: Int, frame: ByteArray, abandoned: Boolean): Outcome {
-        if (lastCompleted >= 0) {
-            val gap = ((frameId - lastCompleted) and 0xFFFF) - 1
-            if (gap in 1..1000) lostFrames += gap.toLong()
-        }
-        lastCompleted = frameId
-        completedFrames++
-        return Outcome(Reason.COMPLETE, frameId, frame, abandoned)
+        val first = rel.firstOrNull()
+        return Outcome(reason, first?.frameId ?: o.frameId, first?.frame, o.requestKeyframe, rel)
     }
 
     /** In-flight entries, for tests and diagnostics. */
-    fun pending(): Int = inFlight.size
+    fun pending(): Int = core.pending()
 }

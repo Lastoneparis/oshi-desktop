@@ -453,6 +453,10 @@ class CallSignalingTest {
             ClientCommands.execute(client, "/calls") { status += it }
             assertTrue(status.any { it.contains("audio devices open") })
             assertTrue(status.any { it.contains("in memory only") })
+            assertTrue(
+                "the call status must distinguish media setup from signalling without exposing addresses: $status",
+                status.any { it.contains("media: audio=configured") && it.contains("candidates sent/received/ignored=") },
+            )
         } finally {
             client.stop()
         }

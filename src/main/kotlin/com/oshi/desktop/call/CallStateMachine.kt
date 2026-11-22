@@ -182,6 +182,10 @@ sealed class CallAction {
         val nonceSalt: ByteArray,
         /** True when WE sent the offer. Decides which nonce salt direction is ours. */
         val isCaller: Boolean,
+        /** __WB_ADPCM_CODEC_2026_09_23__ the peer advertised 0x18: send it instead of 0x15. */
+        val wbAdpcm: Boolean = false,
+        /** __OPUS_CODEC_2026_09_23__ the peer advertised 0x19 (Opus): preferred over 0x18. */
+        val opus: Boolean = false,
     ) : CallAction() {
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
@@ -212,6 +216,16 @@ enum class CallRefusal {
 
     /** The peer is blocked. Nothing was sent back. See [BlockPolicy.incomingCall]. */
     BLOCKED,
+
+    /** __DESKTOP_PRIVACY_PARITY_2027__ "Calls from Contacts Only" and no conversation with the caller. */
+    NOT_A_CONTACT,
+
+    /**
+     * __BLOCKED_BY_PEER_2026_09_24__ outgoing only: the peer told us (🚫BLOCKED🚫) that it
+     * blocks us. Not dialled — no offer, no VoIP push — and shown as "Contact unavailable".
+     * See [com.oshi.desktop.block.BlockedByPeerStore].
+     */
+    UNAVAILABLE,
 
     /** We are already in a call. See GLARE for why this is not always the answer. */
     BUSY,
@@ -370,6 +384,26 @@ class CallStateMachine(
     var state: CallState = CallState.IDLE
         private set
 
+    /**
+     * __BLOCKED_BY_PEER_2026_09_24__ "did this peer tell us it blocks us?" — consulted by
+     * [startCall] only. Default: nobody did.
+     */
+    @Volatile var isBlockedBy: (String) -> Boolean = { false }
+
+    /**
+     * __DESKTOP_PRIVACY_PARITY_2027__ Settings › Privacy › Calls from Contacts Only. Asked
+     * for an incoming OFFER only, after the block check: false = the caller does not ring and
+     * nothing is sent back (iOS `shouldRejectUnknownCaller` just returns). Default: everyone rings.
+     */
+    @Volatile var mayRing: (String) -> Boolean = { true }
+
+    /**
+     * __CALL_LOG_AT_REST_2026_09_23__ Observer for the sealed call log's
+     * `🔄 STATE CHANGE: a → b` line (iOS `callState.didSet`). Called on the driving
+     * thread, after the transition; must not call back into the machine.
+     */
+    var onStateChange: ((from: CallState, to: CallState) -> Unit)? = null
+
     /** The peer of the current call, or null. */
     var peer: String? = null
         private set
@@ -384,6 +418,14 @@ class CallStateMachine(
 
     /** True when the current call is video. */
     var isVideo: Boolean = false
+        private set
+
+    /** __WB_ADPCM_CODEC_2026_09_23__ the peer advertised WB-ADPCM (offer slot 4 / accept index 4). */
+    var peerWbAdpcm: Boolean = false
+        private set
+
+    /** __OPUS_CODEC_2026_09_23__ the peer advertised Opus (offer slot 5 / accept index 5). */
+    var peerOpus: Boolean = false
         private set
 
     /** The media key from the offer, once known. */
@@ -438,6 +480,7 @@ class CallStateMachine(
         if (store != null && BlockPolicy.outgoingCall(store, peerAddress) == BlockPolicy.Outbound.REFUSE_BLOCKED) {
             return CallDecision(state, refusal = CallRefusal.BLOCKED)
         }
+        if (isBlockedBy(peerAddress)) return CallDecision(state, refusal = CallRefusal.UNAVAILABLE)
 
         peer = peerAddress
         callId = newCallId
@@ -450,7 +493,7 @@ class CallStateMachine(
         lastAcceptAtMs = null
 
         val type = if (video) CallPacket.Type.VIDEO_CALL_REQUEST else CallPacket.Type.CALL_REQUEST
-        val offer = CallOffer(newSessionKey, newNonceSalt, newCallId).encode()
+        val offer = CallOffer(newSessionKey, newNonceSalt, newCallId, supportsVideo = true, supportsWbAdpcm = true, supportsOpus = true).encode()
 
         // CONNECTING first, then RINGING — both clients publish the intermediate state and
         // arm a 20 s watchdog on it (`:5744`/`:5766`, `:1375`/`:1377`). Collapsing the two
@@ -485,7 +528,7 @@ class CallStateMachine(
         enter(CallState.CONNECTING, nowMs)
         val actions = mutableListOf<CallAction>(
             CallAction.StopRinging,
-            CallAction.Send(p, type, CallAccept().encode(), CallSignalType.CALL_ACCEPT, id),
+            CallAction.Send(p, type, CallAccept(supportsVideo = true, supportsWbAdpcm = true, supportsOpus = true).encode(), CallSignalType.CALL_ACCEPT, id),
         )
         // The callee connects on sending the accept; the caller connects on receiving it.
         // Both clients do it this way, and the asymmetry is why the accept is
@@ -557,9 +600,17 @@ class CallStateMachine(
             return CallDecision(state, refusal = CallRefusal.BLOCKED)
         }
 
+        // 1b. CONTACTS ONLY — an offer from someone we have no conversation with stays silent.
+        if (packet.type.isOffer && !mayRing(from)) {
+            return CallDecision(state, refusal = CallRefusal.NOT_A_CONTACT)
+        }
+
         // 2. STALE. Off the header inside the AEAD, never off the envelope — see
         //    CallSignalEnvelope's epoch note and the shipped Android bug it describes.
-        if (CallPacket.isStale(packet, nowMs)) {
+        //    __CALL_CLOCK_SKEW_DESKTOP_2026_11_21__ judged on the SERVER's clock when this
+        //    PC is >= 5 s off: a PC running a minute fast used to drop every offer as stale.
+        //    Same windows (30 s offer / 60 s terminal); a healthy clock is unchanged.
+        if (CallPacket.isStale(packet, com.oshi.desktop.net.ServerClock.nowMs(nowMs))) {
             return CallDecision(state, refusal = CallRefusal.STALE)
         }
 
@@ -567,7 +618,7 @@ class CallStateMachine(
         pruneEnded(nowMs)
         val correlated = envelopeCallId?.takeIf { it.isNotEmpty() }
             ?: if (packet.type.isOffer) CallOffer.peekCallId(packet.payload) else null
-        if (correlated != null && endedCalls.containsKey(correlated)) {
+        if (correlated != null && endedCalls.containsKey(normCallId(correlated))) {
             return CallDecision(state, refusal = CallRefusal.RECENTLY_ENDED)
         }
 
@@ -649,6 +700,8 @@ class CallStateMachine(
         isVideo = video
         sessionKey = offer.sessionKey
         nonceSalt = offer.nonceSalt
+        peerWbAdpcm = offer.supportsWbAdpcm
+        peerOpus = offer.supportsOpus
         connectedAtMs = null
         dialedAtMs = null
         enter(CallState.RINGING, nowMs)
@@ -666,7 +719,7 @@ class CallStateMachine(
             return CallDecision(state, refusal = CallRefusal.WRONG_STATE)
         }
         if (!isCurrentPeer(from)) return CallDecision(state, refusal = CallRefusal.FOREIGN_CALL)
-        if (correlated != null && callId != null && correlated != callId) {
+        if (correlated != null && callId != null && !sameCallId(correlated, callId)) {
             return CallDecision(state, refusal = CallRefusal.FOREIGN_CALL)
         }
         val last = lastAcceptAtMs
@@ -678,7 +731,10 @@ class CallStateMachine(
         // offers neither OshiCodec nor AAC-ELD, so no negotiation outcome changes. Parsing
         // it anyway keeps the codec exercised and makes an empty legacy accept a tested
         // case rather than a discovered one.
-        CallAccept.decode(packet.payload)
+        // __WB_ADPCM_CODEC_2026_09_23__ except slot 4: WB-ADPCM is the one codec we share.
+        val acceptCaps = CallAccept.decode(packet.payload)
+        peerWbAdpcm = acceptCaps.supportsWbAdpcm
+        peerOpus = acceptCaps.supportsOpus
 
         val actions = mutableListOf<CallAction>(CallAction.StopRinging)
         connect(nowMs, actions)
@@ -690,7 +746,7 @@ class CallStateMachine(
      */
     private fun onDecline(from: String, nowMs: Long, correlated: String?): CallDecision {
         if (!isCurrentPeer(from)) return CallDecision(state, refusal = CallRefusal.FOREIGN_CALL)
-        if (correlated != null && callId != null && correlated != callId) {
+        if (correlated != null && callId != null && !sameCallId(correlated, callId)) {
             return CallDecision(state, refusal = CallRefusal.FOREIGN_CALL)
         }
         // A decline is only meaningful for a call we are PLACING and that is not yet up.
@@ -701,10 +757,12 @@ class CallStateMachine(
         if (!isOutgoing || (state != CallState.RINGING && state != CallState.CONNECTING)) {
             return CallDecision(state, refusal = CallRefusal.WRONG_STATE)
         }
-        val dialed = dialedAtMs
-        if (dialed != null && nowMs - dialed < CallTimeouts.END_GRACE_AFTER_DIAL_MS) {
-            return CallDecision(state, refusal = CallRefusal.GRACE_PERIOD)
-        }
+        // __DECLINE_NO_DIAL_GRACE_2026_09_23__ NO post-dial grace here. iOS applies its 5 s
+        // window to `callEnd` only; a `callDecline` ends the call at once
+        // (`VoiceCallManager.swift:5603-5605`: `.callDecline` → `endCall(reason: .declined)`).
+        // With the grace, a callee who declined within 5 s — the usual case for a decline —
+        // was ignored, and the caller rang on for the full 45 s no-answer timeout. Found by
+        // `CallScreenModelTest.incomingDecline`, the first test that declined at human speed.
         val actions = mutableListOf<CallAction>(CallAction.StopRinging)
         finish(CallEndReason.DECLINED, nowMs, actions, connected = false)
         return CallDecision(state, actions)
@@ -720,7 +778,7 @@ class CallStateMachine(
             return CallDecision(state, refusal = CallRefusal.WRONG_STATE)
         }
         if (!isCurrentPeer(from)) return CallDecision(state, refusal = CallRefusal.FOREIGN_CALL)
-        if (correlated != null && callId != null && correlated != callId) {
+        if (correlated != null && callId != null && !sameCallId(correlated, callId)) {
             return CallDecision(state, refusal = CallRefusal.FOREIGN_CALL)
         }
 
@@ -759,7 +817,7 @@ class CallStateMachine(
         if (state != CallState.RINGING || isOutgoing) {
             return CallDecision(state, refusal = CallRefusal.WRONG_STATE)
         }
-        if (correlated != null && callId != null && correlated != callId) {
+        if (correlated != null && callId != null && !sameCallId(correlated, callId)) {
             return CallDecision(state, refusal = CallRefusal.FOREIGN_CALL)
         }
         val actions = mutableListOf<CallAction>(CallAction.StopRinging)
@@ -844,7 +902,7 @@ class CallStateMachine(
         val key = sessionKey
         val salt = nonceSalt
         if (key != null && salt != null) {
-            actions.add(CallAction.StartMedia(peer!!, callId!!, key, salt, isOutgoing))
+            actions.add(CallAction.StartMedia(peer!!, callId!!, key, salt, isOutgoing, peerWbAdpcm, peerOpus))
         }
     }
 
@@ -859,14 +917,16 @@ class CallStateMachine(
         if (state == CallState.IN_CALL) actions.add(CallAction.StopMedia)
         if (p != null && id != null) {
             actions.add(CallAction.Log(p, id, reason, connected))
-            endedCalls[id] = nowMs
+            endedCalls[normCallId(id)] = nowMs
         }
         enter(CallState.ENDED, nowMs)
     }
 
     private fun enter(next: CallState, nowMs: Long) {
+        val previous = state
         state = next
         stateSinceMs = nowMs
+        if (previous != next) onStateChange?.invoke(previous, next)
     }
 
     private fun resetCall() {
@@ -876,6 +936,8 @@ class CallStateMachine(
         isVideo = false
         sessionKey = null
         nonceSalt = null
+        peerWbAdpcm = false
+        peerOpus = false
         connectedAtMs = null
         dialedAtMs = null
         lastAcceptAtMs = null
@@ -920,6 +982,18 @@ class CallStateMachine(
     }
 
     companion object {
+        /**
+         * __CROSS_CALL_GUARD_DESKTOP_2026_11_21__ One spelling of a callId for comparison:
+         * NUL- and whitespace-trimmed, lower case. iOS writes `UUID().uuidString` (upper
+         * case), Android lower case, and a fixed-width field may carry NUL padding; the
+         * same call must never read as a foreign one (nor a foreign one as ours).
+         */
+        fun normCallId(id: String): String = id.trim { it == '\u0000' || it.isWhitespace() }.lowercase()
+
+        /** True when [a] and [b] name the same call (see [normCallId]). Null never matches. */
+        fun sameCallId(a: String?, b: String?): Boolean =
+            a != null && b != null && normCallId(a) == normCallId(b)
+
         /** iOS's `seenOfferSignatures` cap (`VoiceCallManager.swift:6172-6182`). */
         const val MAX_SEEN_OFFERS = 32
 

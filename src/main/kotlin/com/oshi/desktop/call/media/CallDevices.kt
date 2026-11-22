@@ -1,0 +1,227 @@
+package com.oshi.desktop.call.media
+
+import java.io.File
+import java.util.prefs.Preferences
+import javax.sound.sampled.AudioFormat
+import javax.sound.sampled.AudioSystem
+import javax.sound.sampled.DataLine
+import javax.sound.sampled.Line
+import javax.sound.sampled.SourceDataLine
+import javax.sound.sampled.TargetDataLine
+
+/**
+ * __CALL_DEVICES_2026_09_23__ Which microphone, speaker and camera a call uses — the desktop
+ * counterpart of the iPhone's speaker/earpiece toggle and camera switch (PARITY.md row 2.1-d).
+ *
+ * A phone has one microphone and routes between a few outputs; a desktop has a list, and
+ * the OS default is often the wrong one (a headset plugged in after the call started, a
+ * virtual device a meeting app left as default). So the choice is the user's, by NAME:
+ *
+ * - **Null means "the system default"**, and is what everyone gets until they pick. A saved
+ *   name that is no longer present (the headset was unplugged) falls back to the default
+ *   rather than failing the call — a call that will not open because a remembered USB
+ *   device is gone would be worse than the wrong microphone.
+ * - **Audio applies when the next audio session opens** (the next call). Java Sound gives
+ *   no hot-swap on an open line; switching mid-call would mean tearing down the capture and
+ *   render threads under a live replay window, and a desktop user changes this in settings,
+ *   not mid-sentence. The UI says so.
+ * - **The camera applies immediately**: the call's camera is restarted on the new device
+ *   (the video session reopens it through [CallDevices.camera]).
+ *
+ * Stored with `java.util.prefs` — the registry on Windows, a plist on macOS, a file under
+ * `~/.java` on Linux — because these are device preferences of THIS machine, not account
+ * data: they must never ride device sync or an export.
+ */
+object CallDevices {
+    private const val ROOT_NODE = "com/oshi/desktop/call-devices"
+
+    /**
+     * __CALL_DEVICES_PER_PROFILE_2026_11_21__ Which preferences node THIS process reads.
+     *
+     * Until 1.6.0 every profile on a machine — the default data directory and every
+     * `--home`/`OSHI_HOME` profile — shared ONE node, so a throwaway or second profile that
+     * picked "Robot" as its default voice effect changed it for the real account too (found
+     * live on 21/11: a QA profile left the user's default effect on Robot).
+     *
+     * The DEFAULT profile keeps the historical node, so nobody's saved choices move on
+     * update; any other profile gets a child node named after a hash of its directory.
+     */
+    @Volatile private var nodePath: String = ROOT_NODE
+
+    /** Called by the launchers BEFORE the first call; [isDefaultProfile] = no `--home`, no `OSHI_HOME`. */
+    fun bindProfile(home: File, isDefaultProfile: Boolean) {
+        nodePath = nodePathFor(home, isDefaultProfile)
+    }
+
+    internal fun nodePathFor(home: File, isDefaultProfile: Boolean): String {
+        if (isDefaultProfile) return ROOT_NODE
+        val canonical = runCatching { home.canonicalPath }.getOrElse { home.absolutePath }
+        val digest = java.security.MessageDigest.getInstance("SHA-256").digest(canonical.toByteArray(Charsets.UTF_8))
+        return ROOT_NODE + "/p-" + digest.take(8).joinToString("") { "%02x".format(it) }
+    }
+
+    internal fun currentNodePath(): String = nodePath
+
+    private fun prefs(): Preferences? = runCatching { Preferences.userRoot().node(nodePath) }.getOrNull()
+
+    var microphone: String?
+        get() = load("microphone")
+        set(value) { save("microphone", value) }
+
+    var speaker: String?
+        get() = load("speaker")
+        set(value) { save("speaker", value) }
+
+    /** Camera device as the platform input takes it (`dshow` name, `/dev/videoN`); null = first. */
+    var camera: String?
+        get() = load("camera")
+        set(value) { save("camera", value) }
+
+    /**
+     * __CALL_VOICE_EFFECTS_2026_10_28__ The voice effect a call STARTS with — iOS's
+     * `@AppStorage("defaultVoiceEffect")`, same idea and the same stored spelling.
+     *
+     * Stored as `CallVoiceEffect.rawValue` ("None", "Chipmunk"…) because iOS says that raw
+     * value is the wire/storage identity and must not change. Lives beside the device
+     * choices rather than in account data for the same reason they do: it is a preference
+     * of this machine and must never ride device sync or an export.
+     *
+     * Unknown or absent reads back as [CallVoiceEffects.Effect.NONE] — an effect this
+     * build does not have must not silently become a different one.
+     */
+    var voiceEffect: String?
+        get() = load("voiceEffect")
+        set(value) { save("voiceEffect", value) }
+
+    /** The stored default, parsed. */
+    fun defaultVoiceEffect(): CallVoiceEffects.Effect = CallVoiceEffects.Effect.ofWire(voiceEffect)
+
+    private fun load(key: String): String? = runCatching { prefs()?.get(key, null) }.getOrNull()?.takeIf { it.isNotBlank() }
+
+    private fun save(key: String, value: String?) {
+        runCatching {
+            val p = prefs()
+            if (value == null) p?.remove(key) else p?.put(key, value)
+            p?.flush()
+        }
+    }
+
+    /** Mixers that can capture [format], by name, in the order Java Sound lists them. */
+    fun microphones(format: AudioFormat = CallAudio.FORMAT): List<String> =
+        mixersSupporting(TargetDataLine::class.java, format)
+
+    /** Mixers that can render [format]. */
+    fun speakers(format: AudioFormat = CallAudio.FORMAT): List<String> =
+        mixersSupporting(SourceDataLine::class.java, format)
+
+    private fun mixersSupporting(kind: Class<out Line>, format: AudioFormat): List<String> =
+        runCatching {
+            AudioSystem.getMixerInfo().filter { info ->
+                runCatching { AudioSystem.getMixer(info).isLineSupported(DataLine.Info(kind, format)) }.getOrDefault(false)
+            }.map { it.name }.distinct()
+        }.getOrDefault(emptyList())
+
+    /**
+     * The capture line to open: the chosen microphone when it is still present and supports
+     * the call format, else the system default. Never throws for a missing preference.
+     */
+    fun captureLine(format: AudioFormat = CallAudio.FORMAT): TargetDataLine =
+        lineFrom(microphone, TargetDataLine::class.java, format) as TargetDataLine?
+            ?: AudioSystem.getLine(DataLine.Info(TargetDataLine::class.java, format)) as TargetDataLine
+
+    /** The render line to open — same rule as [captureLine]. */
+    fun renderLine(format: AudioFormat = CallAudio.FORMAT): SourceDataLine =
+        lineFrom(speaker, SourceDataLine::class.java, format) as SourceDataLine?
+            ?: AudioSystem.getLine(DataLine.Info(SourceDataLine::class.java, format)) as SourceDataLine
+
+    private fun lineFrom(name: String?, kind: Class<out Line>, format: AudioFormat): Line? {
+        if (name == null) return null
+        return runCatching {
+            val info = AudioSystem.getMixerInfo().firstOrNull { it.name == name } ?: return null
+            val mixer = AudioSystem.getMixer(info)
+            val lineInfo = DataLine.Info(kind, format)
+            if (!mixer.isLineSupported(lineInfo)) null else mixer.getLine(lineInfo)
+        }.getOrNull()
+    }
+
+    /**
+     * Cameras this machine can name, as `device → label`. Windows: every DirectShow video
+     * input. Linux: `/dev/video*`. macOS: see [macCameras].
+     *
+     * This doc used to end "macOS: EMPTY … so the Mac uses the system default camera and
+     * the picker says so", and the reason it gave was correct: FFmpeg's avfoundation input
+     * really does not implement `avdevice_list_input_sources` (dshow does, which is why
+     * Windows gets a list from the API). The conclusion did not follow. FFmpeg is not the
+     * only thing on a Mac that knows what cameras exist.
+     */
+    fun cameras(os: String = System.getProperty("os.name").orEmpty()): List<Pair<String, String>> {
+        val o = os.lowercase()
+        return when {
+            o.contains("win") -> com.oshi.desktop.call.video.CameraCapture.dshowCameras()
+            o.contains("mac") -> macCameras()
+            else -> linuxCameras(File("/dev"))
+        }
+    }
+
+    /**
+     * The Mac's cameras, from `system_profiler SPCameraDataType -json`.
+     *
+     * **It does not open a camera to find out.** That matters more than it sounds: the
+     * obvious alternative is to try avfoundation indices 0, 1, 2… and keep the ones that
+     * open, which turns the camera light on several times to populate a menu nobody has
+     * chosen from yet. `system_profiler` reads the device registry and touches nothing.
+     *
+     * The NAME is the key, not an index, because avfoundation accepts either and only the
+     * name survives a device being unplugged and replaced — an index silently becomes a
+     * different camera. A name containing `:` is DROPPED rather than offered: avfoundation
+     * parses its input as `video:audio`, so such a name cannot be addressed unambiguously,
+     * and a menu entry that selects the wrong camera is worse than one that is absent.
+     *
+     * There is precedent for calling a platform tool rather than adding a dependency —
+     * `LoRaSerial` configures a serial port with `stty` for the same reason. A failure here
+     * is an empty list, never an exception: the picker falling back to the default camera
+     * is a working app, and a settings menu is not worth a crash.
+     */
+    internal fun macCameras(
+        run: () -> String? = ::systemProfilerCameras,
+    ): List<Pair<String, String>> = runCatching {
+        parseMacCameras(run() ?: return emptyList())
+    }.getOrDefault(emptyList())
+
+    /** Pure, so the parse is tested without a Mac and without a subprocess. */
+    internal fun parseMacCameras(json: String): List<Pair<String, String>> = runCatching {
+        val items = org.json.JSONObject(json).optJSONArray("SPCameraDataType") ?: return emptyList()
+        (0 until items.length())
+            .mapNotNull { items.optJSONObject(it)?.optString("_name")?.trim()?.takeIf { n -> n.isNotEmpty() } }
+            .filterNot { it.contains(':') }
+            .distinct()
+            .map { it to it }
+    }.getOrDefault(emptyList())
+
+    private fun systemProfilerCameras(): String? = runCatching {
+        val p = ProcessBuilder("/usr/sbin/system_profiler", "SPCameraDataType", "-json")
+            .redirectErrorStream(false)
+            .start()
+        val out = p.inputStream.bufferedReader().use { it.readText() }
+        // Bounded: a hung system_profiler must not hold the menu open forever.
+        if (!p.waitFor(10, java.util.concurrent.TimeUnit.SECONDS)) { p.destroyForcibly(); return null }
+        out.takeIf { p.exitValue() == 0 }
+    }.getOrNull()
+
+    /**
+     * __V4L2_METADATA_NODES_2026_11_21__ Every UVC webcam on a current kernel registers TWO nodes:
+     * `/dev/video0` (the picture) and `/dev/video1` (metadata, which cannot capture). Both were
+     * listed under the same name, so half the menu was a camera that fails to open. sysfs `index`
+     * is 0 for the first node of a device and >0 for its extra ones, so only index-0 nodes are
+     * offered; a node without that file (older kernels, loopback devices) is kept.
+     */
+    internal fun linuxCameras(dev: File, sysfs: File = File("/sys/class/video4linux")): List<Pair<String, String>> =
+        (dev.listFiles { f -> f.name.matches(Regex("video\\d+")) } ?: emptyArray())
+            .filter { node -> readSys(sysfs, node.name, "index")?.toIntOrNull()?.let { it == 0 } ?: true }
+            .sortedBy { it.name.removePrefix("video").toIntOrNull() ?: Int.MAX_VALUE }
+            .map { it.path to (readSys(sysfs, it.name, "name")?.let { n -> "$n (${it.name})" } ?: it.path) }
+
+    private fun readSys(sysfs: File, node: String, attr: String): String? = runCatching {
+        File(sysfs, "$node/$attr").readText().trim().takeIf { it.isNotEmpty() }
+    }.getOrNull()
+}

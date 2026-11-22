@@ -1,0 +1,28 @@
+OSHI call diagnostics — redacted export
+Only call-path lines are included. Message content, contacts and
+conversation data are deliberately NOT in this file.
+
+
+===== call_debug.prev.log =====
+===== OSHI call log — run started 2026-09-20T10:00:00.000Z (previous run: call_debug.prev.log) =====
+DIAG_PATH | route=relay
+🔄 STATE CHANGE: ringing → inCall
+DIAG_V2_GIVEUP | mid=12345678
+DIAG_JITTER | leading spaces and tab
+⚠️ acceptCall: fast path failed
+📹 First captured frame — camera live
+DIAG_CODEC | role=caller | no timestamp at all
+📞 CALL ENDED - hungUp
+DIAG_PATHX | prefix match is a prefix match
+DIAG_SNAP | em-space lead, nbsp tail
+DIAG_AUTH_FAIL | count=3
+
+===== call_debug.log =====
+===== OSHI call log — run started 2026-09-20T11:00:00.000Z (previous run: call_debug.prev.log) =====
+DIAG_TX_PRIMARY | none -> P2P_DIRECT
+[2026-09-20T11:00:01.500Z] DIAG_PATH | crlf-joined
+DIAG_DECRYPT_FAIL | reason=AEADBadTagException:null
+[2026-09-20T11:00:03.000Z] 📞 CallKit answer
+❌ CALL FAILED | reason=timeout
+🧭 P2P: state → CONNECTED
+DIAG_VIDEO_RX_HEALTH | stalled=false | fps=24

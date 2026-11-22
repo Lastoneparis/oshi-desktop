@@ -15,7 +15,7 @@ plugins {
 }
 
 group = "com.oshi.desktop"
-version = "0.0.1"
+version = "1.6.4"
 
 /**
  * Where the two shipped trees live.
@@ -33,6 +33,47 @@ val oshiAndroidRoot: String = providers.gradleProperty("oshiAndroidRoot").orNull
     // the source and not compile it, which is the difference between published and
     // auditable. `shared-sources-match` in CI is what keeps the vendored copy honest.
     ?: rootDir.resolve("shared/OSHI-Android").absolutePath
+
+/*
+ * __SHARED_TREE_SAYS_SO_2026_10_29__ And if neither of those is there, SAY SO.
+ *
+ * Every `srcDir` below points into `oshiAndroidRoot`. Gradle treats a srcDir that does not
+ * exist as an empty one — no warning, no error — so the desktop compiled WITHOUT the shared
+ * crypto and failed on the far side of it. Measured with `-PoshiAndroidRoot=/tmp/not-here`:
+ * **916 errors**, the first being `Unresolved reference 'OSHICryptoV2'` in `DesktopIdentity`,
+ * and not one line naming the missing tree. Someone who clones this project alone — the
+ * "outside reader" the comment above is written for — reads 916 reasons to think the source
+ * is broken.
+ *
+ * This file already refuses in this voice elsewhere (`CatalogExtractor` will not generate an
+ * empty catalog set "because that is indistinguishable from an app with no translations").
+ * Same rule here: an absent dependency must not look like a broken one.
+ *
+ * Checked on the crypto directory rather than the root, because the root existing proves
+ * nothing — a half-checked-out or wrongly-nested tree is the case that produces the most
+ * confusing version of those 916 errors.
+ */
+run {
+    val crypto = file("$oshiAndroidRoot/app/src/main/java/com/oshi/messenger/network/encryption")
+    require(crypto.isDirectory) {
+        """
+        |The shared OSHI-Android sources were not found.
+        |
+        |  looked for : ${crypto.absolutePath}
+        |  resolved   : $oshiAndroidRoot
+        |
+        |This project does NOT re-implement OSHI's crypto — it compiles the same Kotlin the
+        |Android app compiles, straight out of that tree. Without it every shared class is
+        |missing and the build fails with hundreds of "Unresolved reference" errors that say
+        |nothing about the cause, which is why this stops here instead.
+        |
+        |Fix it with ONE of:
+        |  * check OSHI-Android out as a SIBLING of this project (the monorepo layout), or
+        |  * pass -PoshiAndroidRoot=/path/to/OSHI-Android, or
+        |  * vendor the shared files at ${rootDir.resolve("shared/OSHI-Android")}.
+        """.trimMargin()
+    }
+}
 
 /** The iOS tree. Read only by tests, and only to diff wire contracts against Swift. */
 val oshiIosRoot: String = providers.gradleProperty("oshiIosRoot").orNull
@@ -83,21 +124,266 @@ val sharedV2Sources = "$oshiAndroidRoot/app/src/main/java/com/oshi/messenger/net
  */
 val sharedServiceSources = "$oshiAndroidRoot/app/src/main/java/com/oshi/messenger/service"
 
+/**
+ * The EIGHTH and NINTH shared files — the post-quantum layer. Added 14/09.
+ *
+ * WHY. The crypto audit (`ANSSI_CSPN_CRYPTO_AUDIT.md`, Finding 3) found this client
+ * shipping NO post-quantum layer at all, while iOS and Android both ship the X-Wing
+ * hybrid (ML-KEM-768 + X25519). That is worse than a missing feature: two peers that
+ * negotiate a PQ root with a third that cannot is a DOWNGRADE, and a silent downgrade is
+ * precisely what an attacker provokes.
+ *
+ * SHARED, NOT COPIED — and here the TRIPWIRE argument above is at its strongest. X-Wing
+ * interop is byte-exact or it is nothing. Had the desktop carried its own copy and
+ * produced a public key one byte different from the phone's, NOTHING would fail to
+ * compile: both sides would derive different roots and every message would fail to
+ * decrypt, silently, in both directions. One implementation cannot drift from itself.
+ *
+ * `RatchetSecurityMode.kt` carries the negotiation and the fail-closed rule. Like
+ * `LlamaCpp.kt` it has no imports whatsoever, so it shares on the same terms.
+ *
+ * NOT SHARED: `PostQuantumIdentity.kt` — Context + EncryptedSharedPreferences + MasterKey,
+ * i.e. Android key storage. The desktop must provide that seam itself, and until it does,
+ * this build has the PQ primitive but does not yet publish a PQ prekey. See PARITY.md.
+ *
+ * REQUIRES BouncyCastle >= 1.81. `org.bouncycastle.pqc.crypto.xwing` does not exist in
+ * 1.76, which is what this file pinned until today.
+ */
+val sharedEncryptionSources =
+    "$oshiAndroidRoot/app/src/main/java/com/oshi/messenger/network/encryption"
+
+/*
+ * __CASHU_2026_10_24__ The Cashu e-cash reader, shared rather than copied.
+ *
+ * A token pasted into a conversation has to read the SAME on a phone and on a
+ * desktop: the amount, the mint and the bearer warning are what the user acts
+ * on, and two implementations of a money format drift. The three files carry
+ * no `android.*` and no third-party dependency on purpose — the JSON and CBOR
+ * readers are hand-rolled — which is exactly what makes them compile here
+ * unchanged.
+ */
+val sharedCashuSources =
+    "$oshiAndroidRoot/app/src/main/java/com/oshi/messenger/util"
+
+/*
+ * __OHTTP_DESKTOP_2026_11_10__ Oblivious HTTP (RFC 9458) — "Privacy relay (beta)".
+ *
+ * `Bhttp.kt` (RFC 9292 known-length BHTTP), `Ohttp.kt` (HPKE X25519/HKDF-SHA256/AES-128-GCM
+ * via BouncyCastle 1.81) and `OhttpConfig.kt` (relay URL + the PINNED gateway key config,
+ * key_id 1) are pure JVM. Shared rather than copied: the pinned key and the relay URL must be
+ * the phones' constants byte for byte — a copy that drifted would still compile and would
+ * route this client to a different relay, or seal to a key the gateway no longer has.
+ * NOT shared: `OhttpInterceptor.kt` (OkHttp) and `OhttpSettings.kt` (DataStore + Hilt);
+ * the desktop seams are `com.oshi.desktop.net.DesktopOhttp` and `store.PrivacyRelayPreferences`.
+ */
+val sharedOhttpSources =
+    "$oshiAndroidRoot/app/src/main/java/com/oshi/messenger/network/ohttp"
+val sharedOhttpTests =
+    "$oshiAndroidRoot/app/src/test/java/com/oshi/messenger/network/ohttp"
+val sharedStegoTests =
+    "$oshiAndroidRoot/app/src/test/java/com/oshi/messenger/service/stego"
+
+/*
+ * __GIF_PACK_2026_09_23__ The offline GIF + sticker library (1,718 GIFs, 1,454 stickers,
+ * 15 categories, 15 languages) that iOS (`OSHI/GifPack`, `OSHI/StickerPack`) and Android
+ * (`assets/GifPack`, `assets/StickerPack`) both ship — byte-identical, manifests included.
+ * Read from the Android tree like the shared sources, never copied: a second copy is a
+ * second thing to forget to update when a pack grows. Packaged under `gifpacks/` on the
+ * classpath. A checkout without the Android tree simply builds without the pack, and the
+ * picker says so rather than failing.
+ */
+tasks.named<ProcessResources>("processResources") {
+    from("$oshiAndroidRoot/app/src/main/assets") {
+        include("GifPack/**", "StickerPack/**")
+        into("gifpacks")
+    }
+}
+
+/**
+ * __OPUS_CODEC_2026_09_23__ Concentus 1.0.2 — the pure-Java Opus port — vendored as SOURCE at
+ * the monorepo root (`Vendor/concentus`, pinned release, sha256 + PGP verified, see
+ * `Vendor/README-OSHI.md`) and compiled by this build: no prebuilt jar, no native library per
+ * OS, so Windows, Linux and macOS run the same bytecode as Android. Override with
+ * `-PoshiConcentusRoot=...` when the layout differs.
+ */
+val vendoredConcentus: String = providers.gradleProperty("oshiConcentusRoot").orNull
+    ?: rootDir.parentFile.resolve("Vendor/concentus/src/main/java").takeIf { it.isDirectory }?.absolutePath
+    // THE PUBLIC CHECKOUT: the same pinned source, copied to `Vendor/concentus` at the repo root
+    // (source + LICENSE + README-OSHI.md only — still no prebuilt jar). This third branch was
+    // added in the public repo for v1.3.1 and NOT backported, so every sync overwrote the one
+    // path that resolves Concentus there and the copy stopped compiling.
+    ?: rootDir.resolve("Vendor/concentus/src/main/java").absolutePath
+
 sourceSets {
     main {
+        java.srcDir(vendoredConcentus)
         kotlin.srcDir(sharedV2Sources)
         kotlin.srcDir(sharedServiceSources)
+        kotlin.srcDir(sharedEncryptionSources)
+        kotlin.srcDir(sharedCashuSources)
+        kotlin.srcDir(sharedOhttpSources)
         kotlin.include(
+            // __OHTTP_DESKTOP_2026_11_10__ (relative to the shared `network/ohttp/` srcDir)
+            "Bhttp.kt",
+            "Ohttp.kt",
+            "OhttpConfig.kt",
+            // __CASHU_2026_10_24__ e-cash: the reader, its two parsers, the command.
+            "**/CashuTokens.kt",
+            "**/CashuCbor.kt",
+            "**/CashuJson.kt",
+            "**/CashuPayCommand.kt",
             "**/OSHICryptoV2.kt",
             "**/OSHICryptoV2Streaming.kt",
             "**/OSHIRatchetV2.kt",
             "**/V2Session.kt",
             "**/V2FileKeyMessage.kt",
             "**/V2RetryBudget.kt",
+            // __V2_PADDING_2026_11_09__ Relay-path plaintext padding + per-session capability
+            // map. Pure JVM; shared so the phone and the desktop pad and unpad with ONE
+            // implementation (iOS is pinned to it by the shared vector in V2PaddingDesktopTest).
+            "**/V2Padding.kt",
+            // __DESKTOP_RATCHET_HEAL_2026_10_29__ THE REPAIR OF A DEAD 1:1 SESSION — and it
+            // is COMPILED, not ported.
+            //
+            // The bug it answers was reported twice by real users of the phones: *"I get the
+            // notification but not the message"*. Half the cure has existed here for months
+            // (the shared `V2Session` adopts a fresh session from an inbound X3DH header) and
+            // the other half did not: a receiver whose session is dead must tell the peer,
+            // because an X3DH header is attached ONLY by a sender that has no session, and
+            // the peer believes its own is fine.
+            //
+            // This file is the policy and the payload, and it is 203 lines of `org.json` and
+            // `java.util.UUID` — nothing Android about it — so the desktop runs the phones'
+            // rules rather than a third set. That matters more here than almost anywhere:
+            // `isHealInitiator` is a SYMMETRIC TIE-BREAK (`me < peer`), and two
+            // implementations that disagreed about which side waits would produce exactly
+            // the loop it exists to prevent.
+            "**/RatchetHealSignal.kt",
             "**/LlamaCpp.kt",
+            "**/PostQuantumKEM.kt",
+            "**/RatchetSecurityMode.kt",
+            // __RATCHET_IS_SHARED_SOURCE_2026_10_28__ THE LEGACY DOUBLE RATCHET — row 0.16.
+            //
+            // This row was recorded as blocked on the grounds that the file "imports
+            // android.util.Base64, android.util.Log, android.content.Context and
+            // EncryptedSharedPreferences", so that talking to a phone over the mesh or over
+            // LoRa meant "porting a SECOND ratchet — exactly the 'third independent
+            // implementation' PLAN.md §1 argues against, and this time with no vectors
+            // published to check it against."
+            //
+            // That was a true description of the FILE and the wrong conclusion about the
+            // PROTOCOL. None of the coupling was in the cryptography: base64, a logger, and
+            // a persistence shell wrapped around `toJSON`/`fromJSON`, which were already
+            // pure. Those seams now live in `RatchetSeams.kt` (shared, pure) and
+            // `DoubleRatchetAndroidStore.kt` (Android's own, NOT shared) — the same split
+            // `CallRatingPolicy` and `CallRatingManager` already use below.
+            //
+            // So the phone and this client run the SAME ratchet. There is no second
+            // implementation to prove equal to the first, which is the strongest possible
+            // answer to "no vectors published to check it against": the question does not
+            // arise. What this client supplies instead is the five-method collaborator the
+            // file is constructed with — `com.oshi.messenger.network.encryption.CryptoManager`
+            // in THIS tree, pure BouncyCastle, each body copied from Android's.
+            //
+            // NOT shared, deliberately: Android's own `CryptoManager.kt` (Keystore, prefs,
+            // android.util.*) and `DoubleRatchetAndroidStore.kt`.
+            "**/DoubleRatchet.kt",
+            "**/RatchetSeams.kt",
+            // __CALL_RATING_2026_09_22__ The TENTH shared file — PARITY.md, post-call
+            // rating. `service/CallRatingPolicy.kt` decides WHETHER to ask someone about
+            // a finished call: the minimum length, the 1-in-3 sampling of ordinary calls,
+            // the "a call that dropped always asks" override, the cooldowns and the
+            // weekly ceiling. It qualifies on the same terms as the crypto six — it has
+            // no imports at all, let alone `android.*`.
+            //
+            // SHARED, NOT COPIED, for a reason this one has and the crypto files do not:
+            // the policy is not a wire format, so a copy that drifts would NEVER fail to
+            // compile and never fail to decrypt. It would simply mean the desktop asks
+            // four times a week while the phones ask five, and nobody would find out from
+            // the channel, because the channel shows ratings — not the ones never asked
+            // for. A silent divergence in a sampling rule is a poisoned denominator.
+            //
+            // NOT SHARED: `service/CallRatingManager.kt` — Context + SharedPreferences +
+            // android.util.Log, i.e. the storage and logging seams this client owns. See
+            // `com.oshi.desktop.call.CallRatingClient`, which holds the same state in
+            // `DesktopPaths` and calls straight into this policy.
+            "**/CallRatingPolicy.kt",
+            // __VIDEO_REORDER_2026_09_23__ / __VIDEO_ABR_2026_09_23__ The video receive
+            // reorder window and the send-side rate ladder. No imports at all; shared so the
+            // phone and the desktop reassemble, skip, ask for keyframes and step bitrate by the
+            // SAME rules — a drift here would never fail to compile, it would just be a
+            // desktop that freezes where the phone does not.
+            "**/VideoReorderReassembler.kt",
+            "**/VideoRateController.kt",
+            // __CALL_LOG_AT_REST_2026_09_23__ The sealed call diagnostics log (OSHILOG1) and
+            // its allow-list redaction — `service/diag/CallFileLogger.kt`, pure JVM. Shared so
+            // the file format and the redacted export cannot drift between the phone and the
+            // desktop; iOS parity is pinned by fixtures in the Android test resources, which
+            // this build already reads. The Android seams (`CallDiag`, `CallLogKey`) are NOT
+            // included: they are Context + Keystore.
+            "**/CallFileLogger.kt",
+            // __VIDEO_NOTE_2026_09_24__ The round-video-note wire rules (docs/VIDEO_NOTE_SPEC.md):
+            // `service/media/VideoNote.kt` — key names, the true-or-absent emit rule, the tolerant
+            // duration read, the group merge and the 15 s cap. Only `org.json`, no `android.*`.
+            // Shared because the shared `V2FileKeyMessage.kt` now calls it, and because a copy of
+            // a receiver rule that drifted would never fail to compile — it would just draw a
+            // round bubble on one platform and a square one on another.
+            // (relative to the shared `service/` srcDir, hence no `**/` prefix)
+            "media/VideoNote.kt",
+            // __PRIVACY_DISGUISE_2026_11_18__ "Disguise as photo" (docs/stego/STEGO-v1.md) and
+            // the cover transport's wire format, compiled from the SAME files Android ships —
+            // not a desktop copy. StegoV1/StegoPng are pure JVM by design (Android vector-tests
+            // them on the JVM); CoverCodec/CoverPresentation are the padded analytics-style
+            // carrier the relay's `cover_transport.js` decodes. A second implementation would
+            // be a second chance to disagree with the phones about one bit position.
+            "**/StegoV1.kt",
+            "**/StegoPng.kt",
+            "**/CoverCodec.kt",
+            "**/CoverPresentation.kt",
+            // __DEVSYNC_DIRECT_2026_09_22__ The own-device sync core
+            // (docs/OSHI_DEVICE_SYNC_DIRECT.md): Noise XXpsk0, framing, diff/merge, linked-device
+            // registry, sessions, LAN + relay plumbing. The whole `network/v2/devsync/` package is
+            // pure JVM by construction (BouncyCastle + org.json + java.net) — it has to be, because
+            // the phone and the desktop must agree byte for byte with the golden vectors in
+            // docs/fixtures/devsync/. The platform seams (OkHttp / java.net.http WebSocket, NSD /
+            // MdnsService, Room / MessageStore) live OUTSIDE it, in each tree. The TRIPWIRE above
+            // applies: an `import android.*` in there breaks this build.
+            "devsync/*.kt",
             // ...plus everything this project actually owns:
             "com/oshi/desktop/**",
+            // __RATCHET_IS_SHARED_SOURCE_2026_10_28__ …and the collaborator the shared
+            // ratchet is constructed with, which must carry the package name the shared file
+            // expects. Written as a path under THIS source root on purpose: the shared
+            // Android srcDir is the `encryption` DIRECTORY itself, so its files are matched
+            // as bare names (`DoubleRatchet.kt`) and nothing in it can be reached through a
+            // `com/oshi/messenger/...` path. A `**/CryptoManager.kt` pattern WOULD reach it,
+            // and would drag in 701 lines of Keystore and android.util.* — which is the whole
+            // thing this arrangement exists to avoid.
+            "com/oshi/messenger/**",
         )
+    }
+    test {
+        /*
+         * The iOS-generated interop vectors, shared rather than copied for the same reason
+         * the sources are: a second copy is a second thing to forget to regenerate.
+         *
+         * These are produced by `OSHITests/XWingVectorDumpTests.swift` running against
+         * CryptoKit on a real iOS 26 simulator. Checking this implementation against
+         * Apple's ACTUAL OUTPUT is the whole point — a test that compared it to someone's
+         * reading of the X-Wing draft would prove nothing, since both could be wrong in
+         * the same way.
+         */
+        resources.srcDir("$oshiAndroidRoot/app/src/test/resources")
+        // __OHTTP_DESKTOP_2026_11_10__ Android's BHTTP test runs here unchanged (JUnit 4, no
+        // Android API). Its siblings use OkHttp/MockWebServer or the network and are NOT
+        // compiled; the RFC 9458 Appendix A vector is re-run in `DesktopOhttpTest`.
+        kotlin.srcDir(sharedOhttpTests)
+        // __PRIVACY_DISGUISE_2026_11_18__ Android's own STEGO-v1 tests, run UNCHANGED on the
+        // desktop JVM: the cross-platform vectors (docs/fixtures/stego) and the PNGs Android
+        // and iOS wrote must reveal here exactly as they do there.
+        kotlin.srcDir(sharedStegoTests)
+        val ohttpTestDir = file(sharedOhttpTests)
+        kotlin.exclude { it.file.parentFile == ohttpTestDir && it.name != "BhttpTest.kt" }
     }
 }
 
@@ -186,9 +472,9 @@ sourceSets {
 //     `com.oshi.desktop.ui.state`, which is plain Kotlin with zero `androidx.compose`
 //     imports and drives a REAL `OshiClient` over a REAL in-process relay. The
 //     composables are a thin renderer over that state and are NOT covered.
-//   * The 34 localisation catalogs (row 1.5) are NOT wired into this UI yet — its
-//     English strings are literals. Row 1.5's coverage claim is still "the 12 keys the
-//     CLI uses", and adding a window did not change that number.
+//   * The 34 localisation catalogs (row 1.5) now cover the shared strings the window uses;
+//     desktop-only facts remain in an explicitly English overlay. CatalogAuditTest asserts
+//     the 46 shared keys and the overlay's exact source reachability separately.
 //
 // =====================================================================================
 // WEBRTC — PARITY.md row 2.1. OPT-IN, DEFAULT OFF. Read this before turning it on.
@@ -379,11 +665,97 @@ val webrtcNativeClassifier: String? = providers.gradleProperty("webrtcNatives").
     }
 }
 
+// ======================================================================== VIDEO
+//
+// PARITY.md row 2.1-v. The JVM has a microphone (`javax.sound`) and no camera and no
+// H.264, so a video call needs a native library. bytedeco's FFmpeg preset is the one
+// used: ONE library gives all three pieces (the OS camera through libavdevice —
+// avfoundation / dshow / video4linux2 — an H.264 encoder, and the H.264 decoder), it is
+// LGPL (the `-gpl` classifier, which adds libx264, is deliberately NOT used), and it
+// publishes natives for macOS arm64/x86_64, Windows x86_64 and Linux x86_64/arm64.
+//
+// javacv is NOT used: its POM pulls opencv, tesseract, librealsense and eight more
+// presets we would never load. The camera/encoder/decoder code talks to the avcodec
+// API directly (`call/video/Ffmpeg*.kt`).
+//
+// Same rule as [webrtcNativeClassifier]: only the HOST's natives are added (jpackage
+// does not cross-build), and like webrtc-java the plain coordinate carries no native at
+// all — the classifier is declared explicitly. Windows on ARM has no published native.
+val bytedecoJavacppVersion = "1.5.12"
+val bytedecoFfmpegVersion = "7.1.1-1.5.12"
+val bytedecoNativeClassifier: String? = providers.gradleProperty("videoNatives").orNull ?: run {
+    val os = System.getProperty("os.name").orEmpty().lowercase()
+    val arch = System.getProperty("os.arch").orEmpty().lowercase()
+    val cpu = when (arch) {
+        "amd64", "x86_64", "x64" -> "x86_64"
+        "aarch64", "arm64" -> "arm64"
+        else -> null
+    }
+    when {
+        cpu == null -> null
+        os.contains("win") -> if (cpu == "x86_64") "windows-x86_64" else null
+        os.contains("mac") || os.contains("darwin") -> "macosx-$cpu"
+        else -> "linux-$cpu"
+    }
+}
+
+// ======================================================================== TLS LOOK
+//
+// __TLS_LOOK_2026_11_19__ (docs/CENSORSHIP_2026_THREAT_MODEL.md §3). The JDK's own TLS stack
+// sends a ClientHello no home device sends (31 ciphers, `t13d3113h2_1d947a95fc68_…`), so a
+// censor can single the desktop out by JA3/JA4 at zero collateral. Conscrypt is the TLS
+// stack Android apps use (BoringSSL); `net/TlsLook.kt` gives the relay-facing clients its
+// SSLContext with OkHttp's cipher list, i.e. the Android app fingerprint. Same host-only
+// natives rule as [webrtcNativeClassifier]. Published: osx/linux x86_64+aarch_64,
+// windows-x86_64. Absent (Windows on ARM) => TlsLook falls back to the JDK stack.
+val conscryptVersion = "2.8.0"
+val conscryptNativeClassifier: String? = providers.gradleProperty("conscryptNatives").orNull ?: run {
+    val os = System.getProperty("os.name").orEmpty().lowercase()
+    val cpu = when (System.getProperty("os.arch").orEmpty().lowercase()) {
+        "amd64", "x86_64", "x64" -> "x86_64"
+        "aarch64", "arm64" -> "aarch_64"
+        else -> null
+    }
+    when {
+        cpu == null -> null
+        os.contains("win") -> if (cpu == "x86_64") "windows-x86_64" else null
+        os.contains("mac") || os.contains("darwin") -> "osx-$cpu"
+        else -> "linux-$cpu"
+    }
+}
+
 dependencies {
     // Pinned to EXACTLY what OSHI-Android uses (app/build.gradle.kts:218, :296).
     // A different BouncyCastle is a parity risk, not a housekeeping detail.
-    implementation("org.bouncycastle:bcprov-jdk18on:1.76")
-    implementation("org.json:json:20231013")
+    // 1.81, not 1.76: `org.bouncycastle.pqc.crypto.xwing` (X-Wing = ML-KEM-768 + X25519)
+    // first ships in 1.81, and the shared PostQuantumKEM.kt needs it. Android pins the
+    // same 1.81 — the two MUST match, because a difference in the X-Wing implementation
+    // between phone and desktop would surface as undecryptable messages, not as a build
+    // error.
+    implementation("org.bouncycastle:bcprov-jdk18on:1.81")
+    // __DEPENDENCY_AUDIT_2026_11_20__ 20231013 → 20260814: CVE-2026-59171 (GHSA-ghc9-756g-vrcv),
+    // unbounded numeric string DoS in JSONTokener, fixed in 20260719 — and every peer payload is org.json.
+    implementation("org.json:json:20260814")
+    // __TLS_LOOK_2026_11_19__ see the TLS LOOK block above. The classifier jar carries the
+    // classes AND the host native.
+    conscryptNativeClassifier?.let { implementation("org.conscrypt:conscrypt-openjdk:$conscryptVersion:$it") }
+
+    // __RATCHET_IS_SHARED_SOURCE_2026_10_28__ The ANNOTATIONS only (`@Inject`,
+    // `@Singleton`), because the shared `DoubleRatchet.kt` carries Android's Dagger
+    // annotations on its constructor. This is the JSR-330 spec artifact: three interfaces
+    // and three annotations, no transitive dependencies, no injector, no runtime behaviour.
+    // This client constructs the ratchet by hand; the annotations simply have to resolve.
+    //
+    // The alternative was stripping them from the Android file, which would have meant
+    // editing that app's dependency injection to share a crypto file. A 2 KB jar is the
+    // cheaper of the two by a wide margin.
+    implementation("javax.inject:javax.inject:1")
+    // __SCREEN_CAPTURE_PROTECTION_2026_11_20__ JNA for user32 SetWindowDisplayAffinity and
+    // dwmapi DwmSetWindowAttribute (Windows only; never loaded on macOS/Linux). The FFM API
+    // would avoid the dependency but needs JDK 22; this project targets 11 and bundles 17/21.
+    implementation("net.java.dev.jna:jna:5.17.0")
+    implementation("com.google.zxing:core:3.5.3")
+    implementation("com.google.zxing:javase:3.5.3")
 
     // PARITY.md row 1.1 — see the COMPOSE MULTIPLATFORM block above for the whole
     // justification. `currentOs` resolves the skiko native for THIS host only, for the
@@ -410,6 +782,22 @@ dependencies {
                 "PARITY.md row 2.1 still compiles and tests; the MEDIA half will refuse to start " +
                 "at runtime with a named error (see WebRtcAvailability). Override with " +
                 "-PwebrtcNatives=<classifier> if you know better than this check."
+        )
+    }
+
+    // PARITY.md row 2.1-v — the CAMERA and the H.264 codec. See the VIDEO block below.
+    implementation("org.bytedeco:javacpp:$bytedecoJavacppVersion")
+    implementation("org.bytedeco:ffmpeg:$bytedecoFfmpegVersion")
+    val videoNatives = bytedecoNativeClassifier
+    if (videoNatives != null) {
+        implementation("org.bytedeco:javacpp:$bytedecoJavacppVersion:$videoNatives")
+        implementation("org.bytedeco:ffmpeg:$bytedecoFfmpegVersion:$videoNatives")
+    } else {
+        logger.warn(
+            "[video] No bytedeco FFmpeg native for os.name='${System.getProperty("os.name")}' " +
+                "os.arch='${System.getProperty("os.arch")}'. Calls still carry audio; the camera " +
+                "and the video decoder report themselves unavailable at runtime. " +
+                "Override with -PvideoNatives=<classifier>.",
         )
     }
 
@@ -440,7 +828,35 @@ application {
  * without this they can only ever be run non-interactively.
  */
 tasks.named<JavaExec>("run") {
+    // __RUN_FINDS_THE_NATIVE_2026_10_30__ PARITY row 2.5's last clause is "an answer on
+    // screen", and the console cannot give one unless `System.loadLibrary("llama_jni")`
+    // resolves. The test task has honoured `-PllamaLibDir` for a while; `run` never did,
+    // so the one entry point a person actually types could not load the library the build
+    // had just produced. Same property, same reason it must be a JVM ARGUMENT: the JVM
+    // reads `java.library.path` once, at startup.
+    providers.gradleProperty("llamaLibDir").orNull?.let { dir ->
+        jvmArgs("-Djava.library.path=${file(dir).absolutePath}")
+    }
+
     standardInput = System.`in`
+
+    // macOS: the application menu's title, which is NOT settable from inside the process.
+    //
+    // MEASURED with System Events reading the live menu bar of the running JVM. Without
+    // this, the bold menu beside the Apple logo is named after the main class:
+    //
+    //     Apple, MainKt, OSHI, Conversation      ← ./gradlew run --args="--ui"
+    //     Apple, OSHI,   OSHI, Conversation      ← the same, with -Xdock:name=OSHI
+    //
+    // Setting `apple.awt.application.name` from `main` before AWT starts does NOT do this;
+    // that was tried and measured as inert. `-Xdock:name` is a JVM LAUNCH argument, so a
+    // Kotlin file cannot set it at all and this is the only place it can live.
+    //
+    // The packaged .app never needed it — jpackage writes `CFBundleName`, which answers
+    // first — so this is purely for the people who run the window from Gradle, which is
+    // everyone who develops it. See `MacDesktopIntegration` for the two macOS properties
+    // that were tried here and do nothing.
+    if (hostIsMac) jvmArgs("-Xdock:name=OSHI")
 }
 
 /**
@@ -481,6 +897,56 @@ tasks.register<JavaExec>("renderScreens") {
     // Skiko picks a software renderer here; there is no window to composite into and the
     // default GPU path wants a surface it will not get on a headless runner.
     systemProperty("skiko.renderApi", "SOFTWARE")
+}
+
+// __DESKTOP_SETTINGS_2027__ Every Settings page and the first-run screen, in en/fr/ar ×
+// light/dark/OLED (OSHI_RENDER_LANGS / OSHI_RENDER_THEMES narrow it). Same method as above.
+tasks.register<JavaExec>("renderSettingsScreens") {
+    group = "verification"
+    description = "Renders Settings and first run to build/screens-settings as PNG, without opening a window."
+    dependsOn(tasks.named("testClasses"))
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("com.oshi.desktop.ui.SettingsScreens")
+    args(layout.buildDirectory.dir("screens-settings").get().asFile.absolutePath)
+    systemProperty("skiko.renderApi", "SOFTWARE")
+}
+
+// __GROUP_INFO_SETTINGS_2026_11_20__ The group info settings (GROUP_INFO_SETTINGS_SPEC §5) in
+// en/fr × light/OLED (OSHI_RENDER_LANGS / OSHI_RENDER_THEMES narrow or widen it). Same method.
+tasks.register<JavaExec>("renderGroupInfoScreens") {
+    group = "verification"
+    description = "Renders the group info settings to build/screens-group-info as PNG, without opening a window."
+    dependsOn(tasks.named("testClasses"))
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("com.oshi.desktop.ui.GroupInfoScreens")
+    args(layout.buildDirectory.dir("screens-group-info").get().asFile.absolutePath)
+    systemProperty("skiko.renderApi", "SOFTWARE")
+}
+
+// __GROUP_COMMENTS_2026_11_21__ Comments under channel posts (GROUP_INFO_SETTINGS_SPEC §2.12.6) in
+// en/fr × light/OLED; -PcommentsShots=<dir> writes elsewhere. Same method as above.
+tasks.register<JavaExec>("renderCommentsScreens") {
+    group = "verification"
+    description = "Renders the comment bar, thread panel and switch to build/screens-comments as PNG, without opening a window."
+    dependsOn(tasks.named("testClasses"))
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("com.oshi.desktop.ui.CommentsScreens")
+    args(providers.gradleProperty("commentsShots").orNull ?: layout.buildDirectory.dir("screens-comments").get().asFile.absolutePath)
+    systemProperty("skiko.renderApi", "SOFTWARE")
+}
+
+// __PANE_HARNESS_2026_10_29__ One pane in a REAL window, so a REAL mouse can press it.
+// `renderScreens` proves a composition measures and paints; it cannot click, and the two
+// things worth knowing about these screens are click-time transitions. See PaneHarness for
+// why the assembled app is not driven instead.
+tasks.register<JavaExec>("paneHarness") {
+    group = "verification"
+    description = "Opens ONE pane in a window with a fake host: no vault, no keychain, no account."
+    dependsOn(tasks.named("testClasses"))
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("com.oshi.desktop.ui.PaneHarness")
+    args(providers.gradleProperty("harnessPane").orNull ?: "lora")
+    providers.gradleProperty("harnessLog").orNull?.let { systemProperty("oshi.harness.log", it) }
 }
 
 tasks.register<JavaExec>("i18nExtract") {
@@ -639,10 +1105,11 @@ tasks.test {
 //     for the shipped Mac Catalyst app, so it is the only platform where the credential
 //     exists today.
 //
-// UPDATES are likewise NOT implemented: an .msi with a stable --win-upgrade-uuid upgrades
-// in place when a newer version is installed over it, and apt/dnf upgrade from a repo
-// that does not exist yet. There is no in-app updater and this file must not pretend
-// otherwise. That is the honest state of row 1.6's "updates" third.
+// UPDATES: an .msi with a stable --win-upgrade-uuid upgrades in place when a newer version is
+// installed over it, and that is what the in-app updater relies on (__DESKTOP_AUTO_UPDATE_2026_11_21__,
+// `com.oshi.desktop.update`): it reads the Ed25519-signed `downloads/desktop-latest.json`, downloads
+// the MSI (Windows) or the .deb/.rpm that owns the install (Linux), checks size + SHA-256 from the
+// signed manifest, and runs msiexec / pkexec apt-get|dnf. There is still no apt/dnf REPOSITORY.
 
 /** Installed application name. Also the .app / Start Menu / launcher name. */
 val appName = "OSHI"
@@ -654,7 +1121,7 @@ val linuxPackageName = "oshi-desktop"
  * Installer version. Override with `-PappVersion=1.2.3`.
  *
  * THE PROJECT VERSION IS NOT A LEGAL INSTALLER VERSION, and this was OBSERVED, not read
- * in a manual. `version` is `0.0.1`, and jpackage 17 on macOS refuses it outright:
+ * in a manual. `version` used to be `0.0.1`, and jpackage 17 on macOS refused it outright:
  *
  *     Bundler Mac Application Image skipped because of a configuration problem:
  *     The first number in an app-version cannot be zero or negative.
@@ -709,8 +1176,18 @@ fun requireLegalAppVersion(taskName: String, type: String) {
  */
 val windowsUpgradeUuid = "2BE511C0-BF76-4A32-A057-BF20B2FF7496"
 
-/** Public, monitored contact included in the Debian control metadata. */
+/** A monitored OSHI contact, overridable by a downstream package maintainer. */
 val debMaintainer: String = providers.gradleProperty("debMaintainer").orNull ?: "contact@oshi-messenger.com"
+
+/**
+ * Linux package identity is deliberately explicit rather than inherited from a JDK
+ * default.  The Debian maintainer scripts use this path to register the desktop entry;
+ * making both sides name it here prevents a JDK upgrade from leaving a package that
+ * installs correctly but whose menu entry cannot be removed.
+ */
+val linuxInstallDir = "/opt/$linuxPackageName"
+val oshiWebsite = "https://oshi-messenger.com/"
+val licenseFile = layout.projectDirectory.file("LICENSE").asFile
 
 val jpackageInputDir = layout.buildDirectory.dir("jpackage/input")
 val jpackageOutputDir = layout.buildDirectory.dir("jpackage/out")
@@ -816,12 +1293,38 @@ fun org.gradle.api.file.FileCopyDetails.qualifyDuplicateJarName() {
     name = stagedJarName(file)
 }
 
+/**
+ * The llama.cpp JNI library to put INSIDE the installer, when one has been built.
+ *
+ * `-PllamaLibDir=<dir>` already existed for the test JVM; this makes the same directory
+ * reach the packaged app. Without it the native could be built and loaded on a developer's
+ * machine and still be absent from everything a user installs — which was the state row 2.5
+ * was in: the shim had never been compiled anywhere, so nothing downstream of it had ever
+ * been exercised either.
+ *
+ * Optional on purpose. The jpackage tasks must keep working on a machine that has not built
+ * it, because an installer that refuses to build without an offline AI model is worse than
+ * one that ships without it.
+ */
+val llamaNativeDir: File? = providers.gradleProperty("llamaLibDir").orNull
+    ?.let { File(it) }
+    ?.takeIf { it.isDirectory }
+
 /** The flat directory jpackage packages: our jar plus every runtime dependency. */
 val jpackageInput by tasks.registering(Sync::class) {
     group = "distribution"
     description = "Stages the app jar and its runtime dependencies for jpackage."
     from(tasks.jar)
     from(configurations.runtimeClasspath) { eachFile { qualifyDuplicateJarName() } }
+    // The JNI library rides in the SAME flat directory as the jars, because that directory
+    // becomes `$APPDIR` in the installed app and is what the launcher's java.library.path
+    // points at. Only the host's own shared-library extension is taken: a Linux .so staged
+    // into a macOS bundle is dead weight that looks like support.
+    llamaNativeDir?.let { dir ->
+        // `System.mapLibraryName` gives this platform's spelling of the one file the
+        // shared `LlamaCpp.kt` asks for by name: libllama_jni.dylib / .so / llama_jni.dll.
+        from(dir) { include(System.mapLibraryName("llama_jni")) }
+    }
     into(jpackageInputDir)
 }
 
@@ -987,6 +1490,31 @@ fun registerJpackage(
                 // `packageMsi` succeeding only proves an installer was produced. It was
                 // found by asking what a user double-clicking the download would get.
                 "--arguments", "--ui",
+                // THE INSTALLED APP CAN FIND ITS NATIVE LIBRARY.
+                //
+                // `$APPDIR` is jpackage's own runtime substitution for the directory the
+                // `--input` contents land in, so this resolves inside the installed bundle
+                // rather than on the build machine. It is passed unconditionally: an empty
+                // library path entry costs nothing, and making it conditional would mean a
+                // build that staged the native and a build that could load it were two
+                // different builds.
+                //
+                // It has to be `java.library.path`. The shared `LlamaCpp.kt` calls
+                // `System.loadLibrary("llama_jni")`, which loads BY NAME — an absolute path
+                // cannot be substituted for it, which is exactly what `LlamaNative.diagnose`
+                // tells a user who has the file in the right place and the wrong variable.
+                "--java-options", "-Djava.library.path=${'$'}APPDIR",
+                // __NO_CORE_DUMP_2026_11_20__ a JVM crash must not write a core file: it is the whole
+                // heap — decrypted messages, the vault's master key, ratchet state — in the clear,
+                // wherever the OS puts cores. (hs_err_pid*.log, a text summary, is left as is.)
+                "--java-options", "-XX:-CreateCoredumpOnCrash",
+            ) + (
+                // __LINUX_WM_CLASS_2026_11_19__ lets Main set the X11 WM_CLASS to "OSHI" so GNOME/KDE
+                // match the running window to the menu entry (StartupWMClass=OSHI in OSHI.desktop)
+                // instead of showing a second, generic "com-oshi-desktop-MainKt" icon. Linux only:
+                // the package does not exist in the Windows/macOS JDK.
+                if (hostIsLinux) listOf("--java-options", "--add-opens=java.desktop/sun.awt.X11=ALL-UNNAMED") else emptyList()
+            ) + listOf(
                 "--dest", outDir.absolutePath,
                 "--vendor", "OSHI",
                 "--description", "OSHI encrypted messenger — desktop client",
@@ -1018,6 +1546,44 @@ fun resourceDirArgs(platformDir: String): List<String> {
 }
 
 /**
+ * The override directory for the host we are running on — for the installer types that are
+ * not tied to one platform by name.
+ *
+ * `packageAppImage` builds on ANY host and so cannot name its directory at the call site the
+ * way `packageMsi` ("windows") and `packageDeb` ("linux") can. Until this existed it passed
+ * NO `--resource-dir` at all, on every host, which on macOS meant the app image was built
+ * from jpackage's stock `Info-lite.plist.template` — see [macosResourceDirArgs].
+ */
+fun hostResourceDirArgs(): List<String> = when {
+    hostIsWindows -> resourceDirArgs("windows")
+    hostIsLinux -> resourceDirArgs("linux")
+    hostIsMac -> resourceDirArgs("macos")
+    else -> emptyList()
+}
+
+/**
+ * macOS's `--resource-dir`, and the reason it is NOT optional on this platform.
+ *
+ * `platform/macos/packaging/Info.plist` is jpackage's own template plus two keys:
+ * `NSCameraUsageDescription` and a readable `NSMicrophoneUsageDescription`. On macOS a
+ * usage-description string is not cosmetic — TCC terminates a process that touches the
+ * camera or the microphone without one. The file was written for exactly that reason and
+ * says so in its own comment.
+ *
+ * **It was never passed.** `resourceDirArgs` had two call sites, "windows" and "linux";
+ * `packageDmg` passed only `--mac-package-identifier`, and `packageAppImage` passed nothing.
+ * So every macOS bundle this project has ever produced carried the stock plist with NO
+ * camera key and NO microphone key, and the first video call in a packaged app would be
+ * killed by the OS — the precise failure the file exists to prevent. Nothing was red: the
+ * override directory sat in the repository, `BrandingTest` confirmed its contents, and
+ * `packagingOverrides` — the task written so that "silently not passed" could never look
+ * like "passed and ignored" — listed windows and linux and did not mention macOS at all.
+ * An audit of its output on a Mac would have reported the host it was running on as having
+ * no overrides.
+ */
+fun macosResourceDirArgs(): List<String> = resourceDirArgs("macos")
+
+/**
  * What each platform's `packaging/` directory would contribute to jpackage — on ANY host.
  *
  * `resourceDirArgs` is evaluated at CONFIGURATION time and its effect only shows up inside a
@@ -1033,8 +1599,11 @@ tasks.register("packagingOverrides") {
     description = "Prints the jpackage --resource-dir each platform would contribute, and why."
     val windows = resourceDirArgs("windows")
     val linux = resourceDirArgs("linux")
+    // macOS was missing here until 2026-10-28, which made this task blind on the only host
+    // the project actually builds installers on. See [macosResourceDirArgs].
+    val macos = resourceDirArgs("macos")
     doLast {
-        listOf("windows" to windows, "linux" to linux).forEach { (name, args) ->
+        listOf("windows" to windows, "linux" to linux, "macos" to macos).forEach { (name, args) ->
             val dir = layout.projectDirectory.dir("platform/$name/packaging").asFile
             if (args.isEmpty()) {
                 logger.lifecycle("$name: no overrides in ${dir.path} — jpackage uses its own templates")
@@ -1065,6 +1634,9 @@ tasks.register("packagingOverrides") {
  * an IT department deploys. Same app image inside both.
  */
 private val windowsConsoleLauncher: File by lazy {
+    // __CONSOLE_NOT_IN_START_MENU_2026_11_20__ win-menu/win-shortcut=false: the terminal client
+    // stays in the install folder but gets no Start-menu entry or desktop shortcut, where people
+    // opened it by mistake (honoured by jpackage 21+, ignored by 17 — the release builds on 21).
     // jpackage takes a PROPERTIES FILE per extra launcher, not flags. `win-console=true`
     // is the whole point of this one: it is the surface `/send`, `/lora`, `/call` and the
     // rest live on, and it needs a console to read a line from.
@@ -1078,6 +1650,8 @@ private val windowsConsoleLauncher: File by lazy {
     f.writeText(
         """
         win-console=true
+        win-menu=false
+        win-shortcut=false
         arguments=--client
         description=OSHI encrypted messenger — terminal client
         """.trimIndent() + "\n" + icon
@@ -1103,23 +1677,79 @@ val packageMsi = registerJpackage("packageMsi", "msi", "Windows", windowsInstall
 val packageDeb = registerJpackage(
     "packageDeb", "deb", "Linux",
     listOf(
+        "--about-url", oshiWebsite,
+        "--license-file", licenseFile.absolutePath,
+        "--install-dir", linuxInstallDir,
         "--linux-package-name", linuxPackageName,
+        "--linux-app-release", "1",
         "--linux-app-category", "net",
         "--linux-menu-group", "Network",
         "--linux-shortcut",
         "--linux-deb-maintainer", debMaintainer,
+        // __LINUX_SECRET_TOOL_DEPENDENCY_2026_11_21__ The identity key goes to the keyring through
+        // `secret-tool`, which a stock Ubuntu 24.04 desktop does NOT have (libsecret-1-0 yes,
+        // libsecret-tools no — checked against the release manifest). jpackage's own dependency
+        // scan only sees LINKED libraries, never a program we exec, so every Ubuntu user fell to the
+        // passphrase path (until 1.6.1: a failure window asking for an environment variable). The
+        // PC smoke run installed libsecret-tools itself and never saw it.
+        "--linux-package-deps", "libsecret-tools",
     ) + resourceDirArgs("linux"),
 )
+
+/**
+ * __DEB_T64_DEPENDENCY_2026_11_21__ jpackage maps each linked library to the package that owns it
+ * ON THE BUILD HOST. Built on Ubuntu 24.04 that is `libasound2t64` — a name that does not exist on
+ * Ubuntu 22.04, Linux Mint 21, Debian 12 or anything before the 64-bit time_t transition, so apt
+ * refused the .deb there outright ("libasound2t64 is not installable"). The t64 package Provides
+ * `libasound2`, so `libasound2t64 | libasound2` installs on both generations. Rewritten in the
+ * built package's control file; any other `*t64` dependency gets the same alternative.
+ */
+packageDeb.configure {
+    doLast {
+        val deb = jpackageOutputDir.get().asFile.listFiles { f -> f.name.endsWith(".deb") }?.maxByOrNull { it.lastModified() }
+            ?: throw GradleException("packageDeb produced no .deb")
+        val work = layout.buildDirectory.dir("jpackage/deb-rewrite").get().asFile.apply { deleteRecursively(); mkdirs() }
+        fun run(vararg cmd: String) {
+            val p = ProcessBuilder(*cmd).redirectErrorStream(true).start()
+            val out = p.inputStream.bufferedReader().readText()
+            if (p.waitFor() != 0) throw GradleException("${cmd.joinToString(" ")} failed:\n$out")
+        }
+        run("dpkg-deb", "-R", deb.absolutePath, work.absolutePath)
+        val control = File(work, "DEBIAN/control")
+        val before = control.readText()
+        val after = before.lines().joinToString("\n") { line ->
+            if (!line.startsWith("Depends:")) line
+            else "Depends: " + line.removePrefix("Depends:").split(',').map { it.trim() }.filter { it.isNotEmpty() }.joinToString(", ") { dep ->
+                val name = dep.substringBefore(' ')
+                if (name.endsWith("t64") && '|' !in dep) "$dep | ${name.removeSuffix("t64")}" else dep
+            }
+        }
+        if (after != before) {
+            control.writeText(after)
+            run("fakeroot", "dpkg-deb", "-Zxz", "--build", "--root-owner-group", work.absolutePath, deb.absolutePath)
+            logger.lifecycle("[packageDeb] " + after.lines().first { it.startsWith("Depends:") })
+        }
+        work.deleteRecursively()
+    }
+}
 
 val packageRpm = registerJpackage(
     "packageRpm", "rpm", "Linux",
     listOf(
+        "--about-url", oshiWebsite,
+        "--license-file", licenseFile.absolutePath,
+        "--install-dir", linuxInstallDir,
         "--linux-package-name", linuxPackageName,
+        "--linux-app-release", "1",
         "--linux-app-category", "Applications/Internet",
         "--linux-menu-group", "Network",
         "--linux-shortcut",
-        // Keep package metadata truthful: the shipped repository is MIT licensed.
+        // Keep repository, RPM metadata and downstream inventory aligned. LICENSE is MIT.
         "--linux-rpm-license-type", "MIT",
+        // __LINUX_SECRET_TOOL_DEPENDENCY_2026_11_21__ as a FILE dependency: the package that owns
+        // it is `libsecret` on Fedora/RHEL and `secret-tool` on openSUSE, and dnf/zypper both
+        // resolve /usr/bin paths.
+        "--linux-package-deps", "/usr/bin/secret-tool",
     ) + resourceDirArgs("linux"),
 )
 
@@ -1131,7 +1761,7 @@ val packageRpm = registerJpackage(
  */
 val packageDmg = registerJpackage(
     "packageDmg", "dmg", "macOS",
-    listOf("--mac-package-identifier", "com.oshi.desktop"),
+    listOf("--mac-package-identifier", "com.oshi.desktop") + macosResourceDirArgs(),
 )
 
 /**
@@ -1142,7 +1772,66 @@ val packageDmg = registerJpackage(
  * written; launching the app image proves the packaged app can start at all, which is the
  * part the Class-Path manifest gets wrong silently.
  */
-val packageAppImage = registerJpackage("packageAppImage", "app-image", "any")
+val packageAppImage = registerJpackage("packageAppImage", "app-image", "any", hostResourceDirArgs()).apply {
+    configure {
+        doLast { localiseMacBundle(jpackageOutputDir.get().asFile.resolve("$appName.app")) }
+        // __RUNTIME_MODULES_GUARD_2026_11_20__ jpackage picks the runtime's modules itself (no
+        // --add-modules here). Measured 2026-11-20 on Temurin 17.0.21 and 21.0.13 (Linux): the
+        // default set includes all four below. Without jdk.localedata, French/Arabic/… dates fall
+        // back to English; without jdk.crypto.ec, TLS to the relay fails. Fail the build rather than
+        // ship a runtime that lost one of them on a JDK change.
+        doLast {
+            val out = jpackageOutputDir.get().asFile
+            val release = listOf(
+                out.resolve("$appName.app/Contents/runtime/Contents/Home/release"),
+                out.resolve("$appName/lib/runtime/release"),
+                out.resolve("$appName/runtime/release"),
+            ).firstOrNull { it.isFile } ?: throw GradleException("packageAppImage: no runtime 'release' file under $out")
+            val modules = Regex("MODULES=\"([^\"]*)\"").find(release.readText())?.groupValues?.get(1)?.split(' ').orEmpty().toSet()
+            val missing = listOf("jdk.localedata", "jdk.crypto.ec", "jdk.charsets", "jdk.accessibility").filterNot { it in modules }
+            if (missing.isNotEmpty()) throw GradleException("packageAppImage: bundled runtime lacks $missing ($release)")
+            logger.lifecycle("[jpackage] runtime modules OK (${modules.size}): jdk.localedata, jdk.crypto.ec, jdk.charsets, jdk.accessibility present")
+        }
+    }
+}
+
+/**
+ * Install the 33 translated `InfoPlist.strings` into a built macOS bundle.
+ *
+ * **jpackage will not do this and that was measured, not assumed.** Its `--resource-dir`
+ * matches overrides by exact FILENAME — the same rule that makes a renamed icon silently
+ * stock — so a `fr.lproj` directory placed there is ignored entirely. A probe file was put
+ * in `platform/macos/packaging/fr.lproj/InfoPlist.strings`, an app image was built, and
+ * `Contents/Resources` came back holding `OSHI.icns` and nothing else.
+ *
+ * What this buys: macOS shows the TCC permission prompt — the one that asks for the camera
+ * or the microphone — in the user's own language, reading the localised value out of the
+ * bundle. Without it every language gets the English sentence from `Info.plist`, which is
+ * the state the Mac app was in while the phone it is a port of had all 34.
+ *
+ * English is deliberately absent from `lproj/`: macOS falls back to the values in
+ * `Info.plist` itself, and a second English source would drift from the first.
+ *
+ * A no-op off macOS (there is no bundle) and when the directory is missing.
+ */
+fun localiseMacBundle(appDir: File) {
+    if (!hostIsMac) return
+    val src = layout.projectDirectory.dir("platform/macos/packaging/lproj").asFile
+    val resources = File(appDir, "Contents/Resources")
+    if (!src.isDirectory || !resources.isDirectory) {
+        logger.lifecycle("[jpackage] no macOS .lproj to install (${src.path} -> ${resources.path})")
+        return
+    }
+    var n = 0
+    src.listFiles { f -> f.isDirectory && f.name.endsWith(".lproj") }?.sortedBy { it.name }?.forEach { dir ->
+        val strings = File(dir, "InfoPlist.strings")
+        if (!strings.isFile) return@forEach
+        val target = File(resources, dir.name).apply { mkdirs() }
+        strings.copyTo(File(target, "InfoPlist.strings"), overwrite = true)
+        n++
+    }
+    logger.lifecycle("[jpackage] installed $n localised InfoPlist.strings into ${resources.path}")
+}
 
 tasks.register("packageNative") {
     group = "distribution"
@@ -1154,3 +1843,223 @@ tasks.register("packageNative") {
         else -> doLast { throw GradleException("no packaging recipe for $hostOsName") }
     }
 }
+
+// ============================================================================
+// CODE SIGNING — __SIGNING_WIRED_2026_09_22__
+// ============================================================================
+//
+// The long note above says signing is a documented gap. It still is for Windows,
+// because the missing piece is a CERTIFICATE and no amount of build script
+// conjures one. What changed is that the gap is now a WIRED step that refuses
+// loudly instead of a paragraph someone has to remember at release time.
+//
+// Nothing here invents a credential. Every task reads its material from the
+// environment and fails by NAME when it is absent.
+//
+// Linux is handled outside Gradle, by `sign-desktop.sh`, for one reason: the
+// private key must never be on a build host or in CI. It signs on a workstation
+// where the OSHI key already lives (ed25519/025F383CDCCA2600, contact@oshi-
+// messenger.com) and uploads the results.
+
+/**
+ * Authenticode-sign the Windows .exe and .msi.
+ *
+ * WHAT YOU NEED FIRST, and why this cannot be done today:
+ *
+ * An OV or EV code-signing certificate issued to Oshi Lab by a CA. Since June
+ * 2023 the CA/Browser Forum requires the private key to live on FIPS 140-2
+ * Level 2 hardware — a USB token, or a cloud HSM (Azure Trusted Signing,
+ * DigiCert KeyLocker, SSL.com eSigner). It CANNOT be a .pfx on disk or in a CI
+ * secret, so there is no way to hold it here.
+ *
+ *   OV  ~EUR 200-400/yr. SmartScreen still warns until the certificate builds
+ *       reputation across enough installs.
+ *   EV  ~EUR 350-600/yr. SmartScreen trusts it immediately. For a messenger
+ *       downloaded by people who were told it is private, "Windows protected
+ *       your PC" on first run is the worst possible first impression, so EV is
+ *       the one worth paying for.
+ *
+ * THEN, with the token plugged in or the HSM credentials exported:
+ *
+ *   ./gradlew signWindows \
+ *       -PsignExe=build/installers/OSHI-Desktop-Setup.exe \
+ *       -PsignMsi=build/installers/OSHI-Desktop.msi
+ *
+ * On Windows this shells out to signtool; on macOS/Linux it uses osslsigncode
+ * (`brew install osslsigncode`), which produces a byte-identical Authenticode
+ * blob and lets the signing happen on the same workstation as the Linux keys.
+ *
+ * BOTH FILES MUST BE SIGNED. Signing only the .msi leaves the launcher .exe
+ * inside it unsigned, and that is the binary SmartScreen actually judges.
+ */
+tasks.register("signWindows") {
+    group = "distribution"
+    description = "Authenticode-sign the Windows .exe/.msi. Requires a code-signing certificate."
+    doLast {
+        val exe = providers.gradleProperty("signExe").orNull
+        val msi = providers.gradleProperty("signMsi").orNull
+        if (exe == null && msi == null) {
+            throw GradleException(
+                "Nothing to sign. Pass -PsignExe=<path> and/or -PsignMsi=<path>."
+            )
+        }
+        // The timestamp URL is not optional: without it every signature expires
+        // when the certificate does, and already-installed copies start warning.
+        val tsa = providers.gradleProperty("signTimestamp").orNull
+            ?: "http://timestamp.digicert.com"
+
+        val onWindows = hostIsWindows
+        val tool = if (onWindows) "signtool" else "osslsigncode"
+        val available = try {
+            providers.exec {
+                commandLine(if (onWindows) listOf("where", tool) else listOf("which", tool))
+                isIgnoreExitValue = true
+            }.result.get().exitValue == 0
+        } catch (_: Exception) { false }
+        if (!available) {
+            throw GradleException(
+                "$tool is not on PATH. " +
+                    if (onWindows) "Install the Windows SDK."
+                    else "brew install osslsigncode (or apt install osslsigncode)."
+            )
+        }
+
+        val certThumb = System.getenv("WIN_CERT_THUMBPRINT")
+        val certFile = System.getenv("WIN_CERT_FILE")
+        if (certThumb == null && certFile == null) {
+            throw GradleException(
+                "No code-signing certificate. Set WIN_CERT_THUMBPRINT (hardware token / " +
+                    "HSM, the normal case) or WIN_CERT_FILE + WIN_CERT_PASS. " +
+                    "See the note above this task for what to buy."
+            )
+        }
+
+        for (path in listOfNotNull(exe, msi)) {
+            val f = file(path)
+            if (!f.isFile) throw GradleException("not a file: $path")
+            logger.lifecycle("signing $path")
+            providers.exec {
+                commandLine(
+                    if (onWindows) buildList {
+                        addAll(listOf("signtool", "sign", "/fd", "SHA256", "/tr", tsa, "/td", "SHA256"))
+                        if (certThumb != null) addAll(listOf("/sha1", certThumb))
+                        else addAll(listOf("/f", certFile!!, "/p", System.getenv("WIN_CERT_PASS") ?: ""))
+                        add(f.absolutePath)
+                    } else buildList {
+                        addAll(listOf("osslsigncode", "sign", "-h", "sha256", "-ts", tsa))
+                        addAll(listOf("-pkcs12", certFile ?: "", "-pass", System.getenv("WIN_CERT_PASS") ?: ""))
+                        addAll(listOf("-in", f.absolutePath, "-out", f.absolutePath + ".signed"))
+                    }
+                )
+            }.result.get()
+            if (!onWindows) {
+                val signed = file(f.absolutePath + ".signed")
+                if (signed.isFile) { f.delete(); signed.renameTo(f) }
+            }
+        }
+        logger.lifecycle("Signed. Verify with: osslsigncode verify <file>  (or signtool verify /pa <file>)")
+    }
+}
+
+/**
+ * Says whether the installers on disk carry a signature. Read-only, and it is
+ * the check that should gate a release rather than anyone's memory.
+ */
+tasks.register("verifySignatures") {
+    group = "verification"
+    description = "Reports whether the built installers are signed. Never modifies anything."
+    doLast {
+        val dir = file(providers.gradleProperty("installerDir").orNull ?: "build/installers")
+        if (!dir.isDirectory) {
+            logger.lifecycle("no installer directory at ${dir.path} — nothing to check")
+            return@doLast
+        }
+        var unsigned = 0
+        dir.listFiles()?.sortedBy { it.name }?.forEach { f ->
+            val verdict = when (f.extension.lowercase()) {
+                // An .exe is a PE: Authenticode lives in the certificate table,
+                // data directory entry 4, and size 0 means no signature.
+                "exe" -> if (peHasCertificateTable(f)) "signed" else "UNSIGNED"
+                // An .msi is NOT a PE — it is an OLE compound document, and its
+                // signature is a stream named \u0005DigitalSignature, not a
+                // certificate table. Running the PE check over one reads whatever
+                // bytes happen to sit at the PE offsets and reported the live
+                // unsigned installer as "signed". A verifier that errs towards
+                // "fine" is worse than none, so the two formats are checked apart.
+                "msi" -> if (oleHasDigitalSignature(f)) "signed" else "UNSIGNED"
+                "rpm" -> if (headBytes(f, 8192).let { b ->
+                        listOf("RSA", "PGP").any { m -> String(b, Charsets.ISO_8859_1).contains(m) }
+                    }) "signed" else "UNSIGNED"
+                // debsigs puts `_gpgorigin` immediately after `debian-binary`.
+                "deb" -> if (String(headBytes(f, 2048), Charsets.ISO_8859_1).contains("_gpgorigin"))
+                    "signed" else "UNSIGNED (detached .asc is the supported route)"
+                else -> return@forEach
+            }
+            if (verdict.startsWith("UNSIGNED")) unsigned++
+            logger.lifecycle("  %-34s %s".format(f.name, verdict))
+        }
+        // Only signatures OVER an installer count. The exported public key is
+        // also a .asc and counting it would overstate the coverage.
+        val detached = dir.listFiles()?.count { a ->
+            a.name.endsWith(".asc") && File(a.parentFile, a.name.removeSuffix(".asc")).isFile
+        } ?: 0
+        logger.lifecycle("  detached signatures present: $detached")
+        if (unsigned > 0) logger.lifecycle("  $unsigned file(s) carry no embedded signature")
+    }
+}
+
+/**
+ * True when the OLE compound document at [f] carries a `\u0005DigitalSignature`
+ * stream. Stream names are stored UTF-16LE in the directory, which can sit
+ * anywhere in the file, so this scans rather than seeking.
+ */
+fun oleHasDigitalSignature(f: File): Boolean = try {
+    val needle = "DigitalSignature".toByteArray(Charsets.UTF_16LE)
+    f.inputStream().buffered().use { input ->
+        val buf = ByteArray(1 shl 20)
+        var carry = ByteArray(0)
+        var hit = false
+        while (!hit) {
+            val n = input.read(buf)
+            if (n <= 0) break
+            val window = carry + buf.copyOf(n)
+            hit = indexOfBytes(window, needle) >= 0
+            carry = window.copyOfRange(maxOf(0, window.size - needle.size), window.size)
+        }
+        hit
+    }
+} catch (_: Exception) { false }
+
+/** First index of [needle] in [haystack], or -1. */
+fun indexOfBytes(haystack: ByteArray, needle: ByteArray): Int {
+    if (needle.isEmpty() || haystack.size < needle.size) return -1
+    outer@ for (i in 0..haystack.size - needle.size) {
+        for (j in needle.indices) if (haystack[i + j] != needle[j]) continue@outer
+        return i
+    }
+    return -1
+}
+
+/** The first [n] bytes of [f]. `File.readBytes()` has no size form in Kotlin. */
+fun headBytes(f: File, n: Int): ByteArray = f.inputStream().use { input ->
+    val buf = ByteArray(n)
+    var read = 0
+    while (read < n) {
+        val r = input.read(buf, read, n - read)
+        if (r <= 0) break
+        read += r
+    }
+    if (read == n) buf else buf.copyOf(read)
+}
+
+/** True when the PE at [f] has a non-empty certificate table. */
+fun peHasCertificateTable(f: File): Boolean = try {
+    val b = headBytes(f, 4096)
+    fun u32(o: Int) = (b[o].toInt() and 0xff) or ((b[o + 1].toInt() and 0xff) shl 8) or
+        ((b[o + 2].toInt() and 0xff) shl 16) or ((b[o + 3].toInt() and 0xff) shl 24)
+    fun u16(o: Int) = (b[o].toInt() and 0xff) or ((b[o + 1].toInt() and 0xff) shl 8)
+    val pe = u32(0x3c)
+    val magic = u16(pe + 24)
+    val dirOff = pe + 24 + (if (magic == 0x20b) 112 else 96) + 4 * 8
+    u32(dirOff + 4) > 0
+} catch (_: Exception) { false }
