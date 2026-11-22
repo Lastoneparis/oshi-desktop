@@ -25,10 +25,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PUBLISHED_PREVIOUS: '1.6.2'
+  PUBLISHED_PREVIOUS: '1.6.3'
   # A ci/desktop-* branch is a release CANDIDATE: its installers are built from the branch.
   # Anything else smokes the PUBLISHED files (oshi-messenger.com, checked against SHA256SUMS).
-  TEST_VERSION: '1.6.3'
+  TEST_VERSION: '1.6.4'
   SMOKE_SOURCE: ${{ startsWith(github.ref_name, 'ci/desktop-') && 'build' || 'published' }}
   PYTHONIOENCODING: utf-8
   PYTHONUTF8: '1'
