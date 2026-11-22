@@ -25,12 +25,18 @@ import androidx.compose.ui.graphics.painter.BitmapPainter
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyShortcut
+import androidx.compose.ui.input.key.isAltPressed
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isMetaPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.window.MenuBar
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import com.oshi.desktop.app.OshiClient
-import com.oshi.desktop.i18n.dt
 import com.oshi.desktop.i18n.t
 import com.oshi.desktop.ui.components.AiPane
 import com.oshi.desktop.ui.components.ConversationFilter
@@ -54,10 +60,15 @@ import com.oshi.desktop.ui.state.Destination
 import com.oshi.desktop.ui.state.Pane
 import com.oshi.desktop.ui.state.PlacesModel
 import com.oshi.desktop.ui.state.ShellState
+import com.oshi.desktop.ui.state.CallScreenModel
+import com.oshi.desktop.ui.components.CallOverlay
+import com.oshi.desktop.ui.components.CallVideoFrames
+import com.oshi.desktop.ui.components.CallRatingPrompt
 import java.awt.Toolkit
 import java.awt.datatransfer.StringSelection
 import java.io.File
 import java.time.LocalDate
+import kotlinx.coroutines.delay
 import org.jetbrains.skia.Image as SkiaImage
 
 /**
@@ -124,8 +135,28 @@ import org.jetbrains.skia.Image as SkiaImage
  * And this window has only ever been OPENED on macOS aarch64: skiko publishes windows-x64,
  * linux-x64 and linux-arm64 natives and this build has loaded none of them.
  */
-fun runDesktopUi(client: OshiClient) {
-    val model = ChatShellModel(client)
+fun runDesktopUi(client: OshiClient, startHidden: Boolean = false) {
+    val notifier = DesktopNotifier()
+    val sleepInhibitor = SleepInhibitor()
+    // __DESKTOP_PREVIEW_PARITY_2026_10_27__ Read from disk at every notification, so
+    // the switch takes effect on the next message rather than the next launch.
+    val notificationPrefs = com.oshi.desktop.store.NotificationPreferences(
+        java.io.File(com.oshi.desktop.store.DesktopPaths.dataDir, com.oshi.desktop.store.NotificationPreferences.FILE_NAME)
+    )
+    // __HIDDEN_WINDOW_NOTIFY_2026_10_29__ The model is built here, outside composition, so
+    // it cannot read the window's `remember`ed visibility directly. This holder is the
+    // bridge: the composable writes it, `onInbound` reads it on the poll thread.
+    val windowShowing = java.util.concurrent.atomic.AtomicBoolean(!startHidden)
+    val model = ChatShellModel(
+        client,
+        // __NOTIFICATION_OPTIONS_2027__ read at each message, like the preview switch.
+        onIncomingNotification = { sender, preview ->
+            val prefs = notificationPrefs.load()
+            if (prefs.enabled) notifier.notifyIncomingMessage(sender, preview, sound = prefs.sound)
+        },
+        notificationPreviewEnabled = { notificationPrefs.load().preview },
+        windowVisible = windowShowing::get,
+    )
     model.attach()
 
     // The two sibling models. They are constructed here rather than inside a composable so
@@ -133,31 +164,183 @@ fun runDesktopUi(client: OshiClient) {
     // AI manager is the SAME singleton the REPL's `/ai` drives — one model file, one engine,
     // one history, whichever door the user came in through.
     val ai = AiConsoleModel(com.oshi.desktop.ai.DesktopAi.manager())
+    val mail = com.oshi.desktop.ui.state.MailModel(client)
+    val mailArrivals = com.oshi.desktop.ui.state.MailArrivalTracker()
     val places = PlacesModel(PlacesModel.defaultDir(client.mediaDir.parentFile))
 
     // `OshiClient.home` is private; `mediaDir` is `File(home, "media")` and public, so this is
     // the client's real home even under `--home`, not `DesktopPaths.dataDir` guessed at again.
     val wallpapers = WallpaperStore(File(client.mediaDir.parentFile, WallpaperStore.FILE_NAME))
 
+    // __DESKTOP_CALL_UI_2026_09_23__ Voice calls in the window (PARITY.md row 2.1). The lane
+    // polls from `client.start` (UiLauncher turns it on for the window); this model turns its
+    // events into a screen, a ring and a history row. `mutableStateOf` outside composition is
+    // snapshot state like any other, so the poll thread can write it.
+    val callTones = CallTones()
+    val callScreen = mutableStateOf<CallScreenModel.CallScreen?>(null)
+    val ratingAsk = mutableStateOf<com.oshi.desktop.call.CallRatingClient.Pending?>(null)
+    val calls = CallScreenModel(
+        lane = client.calls,
+        labelFor = { addr -> client.contacts.get(addr)?.label(com.oshi.desktop.app.short(addr)) ?: com.oshi.desktop.app.short(addr) },
+        ringer = callTones,
+        recordSummary = { peer, content, outgoing ->
+            // The phones' own call-history row, written locally (see CallSummary), then shown.
+            runCatching {
+                client.messages.append(
+                    com.oshi.desktop.store.Message(
+                        id = java.util.UUID.randomUUID().toString(),
+                        conversationId = peer,
+                        senderAddress = if (outgoing) client.address else peer,
+                        recipientAddress = if (outgoing) peer else client.address,
+                        fromMe = outgoing,
+                        content = content,
+                        sentAtMs = System.currentTimeMillis(),
+                        sentAtSource = com.oshi.desktop.store.TimestampSource.LOCAL_CLOCK,
+                        deliveryStatus = com.oshi.desktop.store.DeliveryStatus.DELIVERED,
+                        transport = "local",
+                    )
+                )
+            }
+            model.refresh()
+        },
+        afterCall = { callId, peer, seconds, normally ->
+            client.callRating.callDidEnd(callId, peer, seconds, normally)?.let { ratingAsk.value = it }
+        },
+        // __CALL_PARITY_2026_09_23__ missed-call notification when no OSHI window is active,
+        // and the machine held awake for exactly as long as a call is connected.
+        onMissedCall = { _, _ ->
+            if (java.awt.KeyboardFocusManager.getCurrentKeyboardFocusManager().activeWindow == null) {
+                notifier.notifyMissedCall(t("call.missed"))
+            }
+        },
+        onCallLive = { live -> if (live) sleepInhibitor.hold() else sleepInhibitor.release() },
+    )
+    calls.onChange = { callScreen.value = it }
+    run {
+        val previous = client.onCall
+        client.onCall = { event -> previous(event); calls.onEvent(event) }
+    }
+
     application {
         val quit: () -> Unit = { exitApplication() }
+        // __DESKTOP_BACKGROUND_2026_09_23__ Closing the window HIDES it while a tray/menu-bar
+        // icon (or the macOS Dock) can bring it back, so calls and messages keep arriving —
+        // there is no push to wake a process that is not running (PARITY.md row 2.3).
+        var windowVisible by remember { mutableStateOf(!startHidden) }
+        var keepsRunning by remember { mutableStateOf(false) }
+        // __SECOND_LAUNCH_DID_NOTHING_2026_11_19__ bumped when another launch asks for the window.
+        var activations by remember { mutableStateOf(0) }
         var state by remember { mutableStateOf(model.state) }
         var aiState by remember { mutableStateOf(ai.state) }
+        var mailState by remember { mutableStateOf(mail.state) }
         var placesState by remember { mutableStateOf(places.state) }
+        // __PRIVACY_DISGUISE_2026_11_18__ "Disguise as photo" / reveal: one host for the pane,
+        // the composer button, the menu and the window-wide drop target.
+        val disguise = remember(client) {
+            com.oshi.desktop.ui.components.PhotoDisguiseHost(client.identity.identity.priv, client.identity.identity.pub) { state.contacts }
+        }
 
-        DisposableEffect(model) {
+        DisposableEffect(model, mail) {
             // The poll thread writes this; Compose snapshot state is safe to write from any
             // thread and schedules its own recomposition, so there is no invokeLater here.
             model.onChange = { state = it }
             ai.onChange = { aiState = it }
             places.onChange = { placesState = it }
+            val stopObservingMail = mail.observe {
+                if (mailArrivals.onSnapshot(it)) notifier.notifyIncomingMessage()
+                mailState = it
+            }
+            keepsRunning = notifier.install(
+                openLabel = t("share.open_oshi"),
+                quitLabel = t("desktop.background.quit"),
+                onOpen = { windowVisible = true },
+                onQuit = quit,
+            ) || LoginItem.os() == LoginItem.Os.MAC
+            if (!keepsRunning) windowVisible = true
+            // __LINUX_NOTIFICATION_CLICK_2026_11_21__ clicking a Linux notification opens its chat.
+            LinuxDesktopNotification.onClick = {
+                javax.swing.SwingUtilities.invokeLater {
+                    model.lastNotifiedConversationId?.let { id -> model.go(Destination.MESSAGES); model.select(id) }
+                    com.oshi.desktop.store.InstanceActivation.request(null)
+                }
+            }
+            // __SECOND_LAUNCH_DID_NOTHING_2026_11_19__ Start menu / shortcut while hidden in the tray.
+            // __OSHI_LINKS_ON_PC_2026_11_20__ …and an oshi:// link clicked in a browser or mail
+            // client, routed here by the second launch Windows/Linux start for it.
+            com.oshi.desktop.store.InstanceActivation.onActivate { link ->
+                windowVisible = true; activations++
+                // __DEEP_LINK_DRIVE_BY_2026_11_20__ confirmed first (ExternalLinkPrompt).
+                if (link != null) com.oshi.desktop.pairing.ExternalLinkGate.offer(link)
+            }
+            // macOS: clicking the Dock icon of a hidden OSHI brings the window back.
+            runCatching {
+                java.awt.Desktop.getDesktop().addAppEventListener(java.awt.desktop.AppReopenedListener { windowVisible = true })
+            }
+            // __MAC_DEEP_LINK_2026_10_29__ An `oshi://` link CLICKED in Mail or Safari.
+            //
+            // The parsing has been here since pairing landed — `ContactQr.parse` reads
+            // `oshi://add?key=…` and `GroupInvite.parse` reads `oshi://group/join?gid=…` —
+            // but only for a string the user PASTED into the New pane. Nothing claimed the
+            // scheme in the bundle and nothing listened for it at runtime, so clicking the
+            // same link did nothing at all while the phones open the app on it. The plist
+            // half is `CFBundleURLTypes` in `platform/macos/packaging/Info.plist`.
+            //
+            // It goes through `startConversation`, the SAME entry the paste uses, so a
+            // clicked link and a pasted one cannot drift apart: one parser, one set of
+            // refusals, one notice. The window is shown first — a link that silently added
+            // a contact to a hidden app would be the worse behaviour of the two.
+            runCatching {
+                java.awt.Desktop.getDesktop().setOpenURIHandler { event ->
+                    val uri = event.uri?.toString().orEmpty()
+                    if (uri.isNotBlank()) {
+                        windowVisible = true
+                        com.oshi.desktop.pairing.ExternalLinkGate.offer(uri)
+                    }
+                }
+            }
+            // __DESKTOP_AUTO_UPDATE_2026_11_21__ first check 30 s after start, then every 12 h.
+            // Inert on macOS (Mac App Store). "Update now" quits for real, not to the tray.
+            com.oshi.desktop.update.DesktopUpdates.controller.let { u ->
+                u.onQuit = quit
+                u.openUrl = { url -> openInBrowser(url) }
+                u.start(com.oshi.desktop.update.DesktopUpdates.firstDelayMs())
+            }
             model.refresh()
-            onDispose { model.onChange = {}; ai.onChange = {}; places.onChange = {}; model.close() }
+            // Match iOS's ChatsTabView launch task: warm the sealed mailbox before the
+            // user opens Mail. MailModel performs its blocking account/inbox requests on
+            // its own worker, and MailPane observes the resulting snapshot when mounted.
+            mail.refresh()
+            onDispose {
+                com.oshi.desktop.store.InstanceActivation.onActivate(null)
+                com.oshi.desktop.update.DesktopUpdates.controller.let { it.stop(); it.onQuit = null }
+                model.onChange = {}
+                ai.onChange = {}
+                places.onChange = {}
+                stopObservingMail()
+                notifier.close()
+                LinuxDesktopNotification.close()
+                model.close()
+            }
+        }
+
+        // Desktop has no APNs/FCM mail wake. Once the initial account + inbox snapshot
+        // proves this identity owns a mailbox, poll it while the process is alive so the
+        // menu's unread count can change without opening Mail. A no-mailbox identity is
+        // never retried in a loop: only this client can claim that address.
+        LaunchedEffect(mail, mailState.hasMailbox, mailState.loading) {
+            if (!mailState.hasMailbox || mailState.loading) return@LaunchedEffect
+            while (true) {
+                delay(MAIL_POLL_INTERVAL_MS)
+                mail.refresh()
+            }
         }
 
         Window(
-            onCloseRequest = quit,
-            title = "${t("identity.app_name")} — ${client.displayName}",
+            onCloseRequest = { if (keepsRunning) windowVisible = false else quit() },
+            visible = windowVisible,
+            // __WINDOW_TITLE_LEAK_2026_11_20__ just the app name: monitoring tools and keyloggers
+            // record window titles, and "OSHI — <your name>" put the account's name in their log.
+            title = t("identity.app_name"),
             // The shipped app icon, off the CLASSPATH — so the packaged .exe shows OSHI in
             // the Windows taskbar and in alt-tab rather than the JVM's default coffee cup.
             // This is the RUNNING window's icon and is a separate thing from jpackage's
@@ -165,25 +348,170 @@ fun runDesktopUi(client: OshiClient) {
             // setting only one of the two leaves the other stock, which is how an app ends
             // up branded in the Start menu and generic once it is open.
             icon = oshiWindowIcon(),
-            state = rememberWindowState(width = 1180.dp, height = 780.dp),
+            state = rememberWindowState(size = ScreenFit.fitToScreen(androidx.compose.ui.unit.DpSize(1180.dp, 780.dp))),
+            // __DESKTOP_1_6_PARITY__ Alt+↑ / Alt+↓ move through the conversation list, in the
+            // order it is drawn (pinned first), from anywhere in the window — the chord Slack,
+            // Telegram Desktop and Signal Desktop use. Never consumed while nothing is listed.
+            onPreviewKeyEvent = { e ->
+                if (e.type != androidx.compose.ui.input.key.KeyEventType.KeyDown || !e.isAltPressed || e.isCtrlPressed || e.isMetaPressed) false
+                else {
+                    val step = when (e.key) { Key.DirectionUp -> -1; Key.DirectionDown -> 1; else -> 0 }
+                    val ids = state.conversations.map { it.id }
+                    if (step == 0 || ids.isEmpty() || state.destination != Destination.MESSAGES) false
+                    else {
+                        val at = ids.indexOf(state.selectedId)
+                        val next = if (at < 0) (if (step > 0) 0 else ids.lastIndex) else (at + step).coerceIn(0, ids.lastIndex)
+                        model.select(ids[next])
+                        true
+                    }
+                }
+            },
         ) {
+            // __DESKTOP_1_6_PARITY__ Below this the list and the thread no longer both fit:
+            // the filter chips wrap, the header's buttons collide. 1.5.1 let the window shrink
+            // to a sliver. AWT units are already scaled for HiDPI, so this is in "points".
+            DisposableEffect(window) {
+                window.minimumSize = java.awt.Dimension(760, 520)
+                onDispose { }
+            }
+            MacTitleBarAppearance(window)
+            LinuxTitleBarAppearance(window)
+            DisposableEffect(window) {
+                DialogOwner.current = window
+                onDispose { if (DialogOwner.current === window) DialogOwner.current = null }
+            }
+            LaunchedEffect(activations) {
+                if (activations > 0) {
+                    if (window.extendedState and java.awt.Frame.ICONIFIED != 0) {
+                        window.extendedState = window.extendedState and java.awt.Frame.ICONIFIED.inv()
+                    }
+                    window.toFront()
+                    window.requestFocus()
+                }
+            }
             MenuBar {
+                // THE MENU ITEMS CARRY THEIR SHORTCUTS, and the modifier is the host's own.
+                // `meta` is Command on macOS and the Windows key everywhere else, so binding
+                // it unconditionally would put a menu item on Win+R, a chord the OS owns.
+                // [menuShortcut] picks Command on a Mac and Control elsewhere.
+                //
+                // QUIT IS BOUND ONLY OFF macOS, and that is measured rather than stylistic.
+                // On macOS the application menu belongs to the system, not to this window,
+                // and it already holds `About OSHI, Services, Hide OSHI, Hide Others, Show
+                // All, Quit OSHI, Quit and Keep Windows` — with Command-Q on its Quit.
+                // Clicking it through System Events ended the process, so that path works.
+                // Binding Command-Q here as well would put the same chord on two different
+                // shutdown paths in one process. Off macOS there is no such menu and the
+                // app's own Quit is the only one, so it takes Control-Q.
+                //
+                // Cmd+W is deliberately NOT used for "close conversation": on macOS it closes
+                // the WINDOW, and this window's close button hides to the tray, so taking that
+                // chord would make the one key people press to put an app away do something
+                // they did not ask for.
                 // `identity.app_name` rather than the literal "OSHI": the brand is the same
                 // word in all 34 catalogs today, and reading it from the catalog is what makes
                 // a future script-specific spelling (it is a key the phones already own) reach
                 // this menu without anyone remembering this line exists.
                 Menu(t("identity.app_name")) {
-                    Item(dt("desktop.nav.account"), onClick = { model.show(Pane.ACCOUNT) })
-                    Item(dt("desktop.nav.limits"), onClick = { model.show(Pane.LIMITS) })
+                    val unreadMail = mailState.badgeCount(com.oshi.desktop.ui.state.MailModel.FOLDER_INBOX)
+                    val mailLabel = if (unreadMail == 0) t("mail.title") else "${t("mail.title")} ($unreadMail)"
+                    Item(mailLabel, onClick = { model.show(Pane.MAIL); model.go(Destination.MESSAGES) })
+                    // __DESKTOP_SETTINGS_2027__ Cmd/Ctrl+, opens Settings, as in every desktop app.
+                    Item(t("settings.title") + "…", shortcut = menuShortcut(Key.Comma), onClick = {
+                        model.go(Destination.MORE)
+                    })
+                    Item(t("desktop.nav.account"), onClick = { model.show(Pane.ACCOUNT) })
+                    // __DESKTOP_HELP_2027__ / __DESKTOP_APP_LOCK_2027__
+                    Item(t("settings.help.title"), onClick = {
+                        com.oshi.desktop.ui.components.SettingsNavigation.section = com.oshi.desktop.ui.components.SettingsSection.HELP
+                        model.go(Destination.MORE)
+                    })
+                    if (com.oshi.desktop.store.AppLock.config.hasPasscode) {
+                        Item(t("pc.lock.now"), shortcut = menuShortcut(Key.L, shift = true), onClick = { com.oshi.desktop.store.AppLock.lockNow() })
+                    }
                     Separator()
-                    Item(dt("desktop.menu.quit"), onClick = quit)
+                    Item(t("desktop.menu.quit"), shortcut = quitShortcut(), onClick = quit)
                 }
-                Menu(dt("desktop.menu.conversation")) {
-                    Item(dt("desktop.menu.refreshFromDisk"), onClick = { model.refresh() })
-                    Item(dt("desktop.menu.closeConversation"), onClick = { model.select(null) })
+                Menu(t("desktop.menu.conversation")) {
+                    // __DESKTOP_1_6_PARITY__ Cmd/Ctrl+N: a new chat, as in every messenger.
+                    Item(t("chats.merged.new_chat") + "…", shortcut = menuShortcut(Key.N), onClick = { model.go(Destination.NEW) })
+                    Item(t("desktop.menu.refreshFromDisk"), shortcut = menuShortcut(Key.R), onClick = { model.refresh() })
+                    Item(t("desktop.menu.closeConversation"), onClick = { model.select(null) })
+                }
+                // __PRIVACY_DISGUISE_2026_11_18__ The phones put these behind "+" in a chat and in
+                // Settings; a desktop puts them in the menu bar, with chords. Shift-modified so
+                // they cannot collide with Cmd/Ctrl+R (refresh) above.
+                Menu(t("disguise.title")) {
+                    Item(t("disguise.photo.title") + "…", shortcut = menuShortcut(Key.D, shift = true), onClick = {
+                        val open = state.thread?.takeIf { it.kind == com.oshi.desktop.ui.state.ConversationKind.DIRECT }
+                        val peer = open?.let { th -> state.contacts.firstOrNull { it.address == th.conversationId } }
+                        if (peer != null) disguise.open(peer) else { model.show(Pane.DISGUISE); model.go(Destination.MESSAGES) }
+                    })
+                    Item(t("disguise.reveal.button") + "…", shortcut = menuShortcut(Key.R, shift = true), onClick = { disguise.chooseAndReveal() })
+                    Separator()
+                    Item(t("disguise.title"), onClick = {
+                        com.oshi.desktop.ui.components.SettingsNavigation.section = com.oshi.desktop.ui.components.SettingsSection.DISGUISE
+                        model.go(Destination.MORE)
+                    })
                 }
             }
-            MaterialTheme(colorScheme = OshiTheme.colors, typography = OshiTheme.typography) {
+            // An incoming call raises the window and — when it is not the focused one — posts
+            // the metadata-free notification, once per call.
+            val incomingCallId = callScreen.value?.takeIf { it.phase == CallScreenModel.Phase.INCOMING }?.callId
+            LaunchedEffect(incomingCallId) {
+                if (incomingCallId == null) return@LaunchedEffect
+                if (!window.isFocused || !windowVisible) notifier.notifyIncomingCall(t("call.incoming.voice"))
+                // Hidden in the tray: the small ringing card below answers for it.
+                if (!windowVisible) return@LaunchedEffect
+                window.isMinimized = false
+                window.toFront()
+                window.requestFocus()
+            }
+            LaunchedEffect(calls) {
+                while (true) { calls.tick(); delay(1_000) }
+            }
+            // __HIDDEN_WINDOW_NOTIFY_2026_10_29__ Keep the model's view of the window in
+            // step, and clear the open conversation's badge when the window comes back.
+            LaunchedEffect(windowVisible) {
+                windowShowing.set(windowVisible)
+                if (windowVisible) model.onWindowShown()
+            }
+            // Row 1.2-b: real-window frame times, off unless OSHI_FRAME_BENCH=1.
+            FrameSampler.Install()
+            // __WALLPAPER_BLUR_2026_11_21__ the chat bars' backdrop blur: solid on a software
+            // renderer, and turned off for the session if the window cannot keep 30 fps with it.
+            LaunchedEffect(Unit) { com.oshi.desktop.ui.components.BackdropBlur.noteRenderer(window.renderApi) }
+            com.oshi.desktop.ui.components.BackdropBlur.Govern()
+            // __DESKTOP_APP_LOCK_2027__ any key or mouse input in this process counts as use;
+            // the clock below locks the window once the chosen time passes without any.
+            DisposableEffect(Unit) {
+                val listener = java.awt.event.AWTEventListener { com.oshi.desktop.store.AppLock.noteActivity() }
+                val mask = java.awt.AWTEvent.KEY_EVENT_MASK or java.awt.AWTEvent.MOUSE_EVENT_MASK or
+                    java.awt.AWTEvent.MOUSE_MOTION_EVENT_MASK or java.awt.AWTEvent.MOUSE_WHEEL_EVENT_MASK
+                java.awt.Toolkit.getDefaultToolkit().addAWTEventListener(listener, mask)
+                onDispose { java.awt.Toolkit.getDefaultToolkit().removeAWTEventListener(listener) }
+            }
+            LaunchedEffect(Unit) {
+                while (true) { delay(5_000); com.oshi.desktop.store.AppLock.tick() }
+            }
+            // __PRIVACY_DISGUISE_2026_11_18__ Drop an image anywhere on the window to look for a
+            // hidden message. AWT's own DropTarget rather than Compose's experimental DnD: it is
+            // what Finder, Explorer and the Linux file managers speak, and nothing else in this
+            // window accepts drops, so there is nothing to arbitrate with.
+            DisposableEffect(window, disguise) {
+                window.dropTarget = installDisguiseDropTarget(disguise)
+                onDispose { window.dropTarget = null }
+            }
+            OshiMaterialTheme {
+                Box(Modifier.fillMaxSize()) {
+                // __MERGE_AB_LOCK_HIDES_POPUPS__ Material dialogs and menus are popups, drawn ABOVE
+                // every sibling — so a forward sheet (contact names + profile photos), the who-reacted
+                // list or a context menu left open would float over the lock screen. Everything
+                // composed inside this provider hides its popups while locked (Glass.kt); the call
+                // overlay below is outside it on purpose.
+                androidx.compose.runtime.CompositionLocalProvider(
+                    com.oshi.desktop.ui.components.LocalHiddenByLock provides com.oshi.desktop.store.AppLock.locked,
+                ) {
                 Surface(Modifier.fillMaxSize(), color = OshiTheme.background) {
                     Shell(
                         state = state,
@@ -192,6 +520,7 @@ fun runDesktopUi(client: OshiClient) {
                         wallpapers = wallpapers,
                         ai = ai,
                         aiState = aiState,
+                        mail = mail,
                         places = places,
                         placesState = placesState,
                         // AWT's chooser, not a hand-rolled one: it is the dialog the user's
@@ -200,12 +529,75 @@ fun runDesktopUi(client: OshiClient) {
                         // BLOCKS the AWT thread, which is correct — a modal file dialog is
                         // supposed to.
                         onPickFile = { pickFile(window) },
+                        onCall = { peer, video -> calls.call(peer, video) },
+                        disguise = disguise,
                     )
+                }
+                com.oshi.desktop.ui.components.PhotoDisguiseOverlays(disguise)
+                com.oshi.desktop.ui.components.ExternalLinkPrompt(onAccept = { model.startConversation(it) })
+                // __DESKTOP_AUTO_UPDATE_2026_11_21__ "OSHI X.Y.Z is available" (Windows/Linux).
+                com.oshi.desktop.ui.components.UpdatePrompt(com.oshi.desktop.update.DesktopUpdates.controller, onCopy = { copyToClipboard(it) })
+                // __GROUP_INFO_SETTINGS_2026_11_20__ a public group link (clicked or pasted): its confirmation.
+                state.publicJoin?.let { pj ->
+                    com.oshi.desktop.ui.components.PublicJoinDialog(pj, onJoin = model::confirmPublicJoin, onDismiss = model::dismissPublicJoin)
+                }
+                }
+                // __DESKTOP_APP_LOCK_2027__ over everything but a call: a ringing call is
+                // answered from the lock screen, as on a locked phone.
+                if (com.oshi.desktop.store.AppLock.locked) {
+                    com.oshi.desktop.ui.components.AppLockScreen(recoveryKeyMatches = { key ->
+                        val restored = com.oshi.desktop.store.IdentityStore.parseRecoveryKey(key)
+                        com.oshi.desktop.mesh.MeshProtocol.normalizeKey(restored.userKey) ==
+                            com.oshi.desktop.mesh.MeshProtocol.normalizeKey(client.address)
+                    })
+                }
+                callScreen.value?.let { screen ->
+                    if (screen.minimized) {
+                        com.oshi.desktop.ui.components.CallMiniBar(
+                            screen, onRestore = { calls.setMinimized(false) }, onHangUp = calls::hangUp,
+                            modifier = Modifier.align(androidx.compose.ui.Alignment.TopCenter),
+                        )
+                    } else CallOverlay(
+                        screen = screen,
+                        onAnswer = calls::answer,
+                        onDecline = calls::decline,
+                        onHangUp = calls::hangUp,
+                        onToggleMute = calls::toggleMute,
+                        onDismiss = calls::dismiss,
+                        video = { client.calls.video()?.let(::CallVideoFrames) },
+                        onToggleCamera = calls::toggleCamera,
+                        onAnswerVideoRequest = calls::answerVideoRequest,
+                        onMinimize = { calls.setMinimized(true) },
+                        onSwitchCamera = calls::switchCamera,
+                        onPickVoiceEffect = calls::setVoiceEffect,
+                    )
+                }
+                if (callScreen.value == null) ratingAsk.value?.let { pending ->
+                    CallRatingPrompt(
+                        onSubmit = { stars ->
+                            Thread({ runCatching { client.callRating.submit(stars) } }, "oshi-call-rating").apply { isDaemon = true }.start()
+                            ratingAsk.value = null
+                        },
+                        onNotNow = { client.callRating.dismiss(); ratingAsk.value = null },
+                    )
+                }
                 }
             }
         }
+
+        // __DESKTOP_BACKGROUND_2026_09_23__ The window is closed to the tray: ring in a small card.
+        callScreen.value?.takeIf { it.phase == CallScreenModel.Phase.INCOMING && !windowVisible }?.let { ringing ->
+            IncomingCallWindow(
+                screen = ringing,
+                onAnswer = { calls.answer(); windowVisible = true },
+                onDecline = calls::decline,
+            )
+        }
     }
 }
+
+/** Mail's polling equivalent of iOS's push wake; bounded by the process lifetime above. */
+private const val MAIL_POLL_INTERVAL_MS = 30_000L
 
 @Composable
 private fun Shell(
@@ -215,9 +607,12 @@ private fun Shell(
     wallpapers: WallpaperStore,
     ai: AiConsoleModel,
     aiState: AiConsoleModel.AiState,
+    mail: com.oshi.desktop.ui.state.MailModel,
     places: PlacesModel,
     placesState: PlacesModel.PlacesState,
     onPickFile: () -> File?,
+    onCall: ((String, Boolean) -> Unit)? = null,
+    disguise: com.oshi.desktop.ui.components.PhotoDisguiseHost? = null,
 ) {
     // See DRAFTS above. Keyed by conversation so a switch does not lose what was typed.
     val drafts: SnapshotStateMap<String, String> = remember { mutableStateMapOf() }
@@ -226,9 +621,23 @@ private fun Shell(
     // records it (`viewOnceOpened` is written by nobody) and inventing a persisted "opened"
     // would claim bookkeeping this client does not do.
     val revealed = remember { mutableStateMapOf<String, Unit>() }
-    // `LocalDate.now()` once per composition pass rather than per row; a window left open
-    // across midnight will relabel on its next recomposition, which any message causes.
-    val today = remember(state) { LocalDate.now() }
+    // `LocalDate.now()` once per composition pass rather than per row.
+    //
+    // __RELATIVE_TIMES_FROZE_2026_11_09__ The comment here used to accept "a window left
+    // open across midnight will relabel on its next recomposition, which any message
+    // causes" — i.e. a quiet window kept saying "23:50" for what had become yesterday,
+    // the desktop form of Android's frozen "Just now". The list labels are day-bucketed
+    // (`DayBreaks.compactStamp`), so a minute tick is plenty; `today` only CHANGES at
+    // midnight, so the tick recomposes nothing on the other 1 439 minutes.
+    var dayTick by remember { mutableStateOf(LocalDate.now()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(60_000L)
+            val d = LocalDate.now()
+            if (d != dayTick) dayTick = d
+        }
+    }
+    val today = remember(state, dayTick) { LocalDate.now() }
 
     var half by remember { mutableStateOf(ConversationFilter.Half.MESSAGES) }
 
@@ -252,6 +661,7 @@ private fun Shell(
                 state = state,
                 onStartConversation = { model.startConversation(it) },
                 onCopy = { copyToClipboard(it) },
+                onPickQrImage = onPickFile,
             )
             Destination.AI -> AiPane(
                 state = aiState,
@@ -264,6 +674,25 @@ private fun Shell(
                 onKind = { places.setKind(it) },
                 onQuery = { places.setQuery(it) },
                 onSearch = { places.search() },
+                onCategory = { cat, near -> places.searchCategory(cat, near) },
+                onCenter = { places.near = it },
+                // __DESKTOP_TOOLS_2027__ radio nodes that announced a position, and the
+                // position this machine's owner pinned for the radio beacon.
+                extraMarkers = remember {
+                    val nodes = runCatching { client.loraOnlineNodeList() }.getOrDefault(emptyList())
+                        .filter { it.latitude != null && it.longitude != null }
+                        .map { n ->
+                            com.oshi.desktop.ui.components.MapMarker(
+                                "node-${n.num}", n.latitude!!, n.longitude!!,
+                                n.name.ifBlank { "!" + n.num.toString(16) }, OshiTheme.success,
+                                com.oshi.desktop.lora.LoRaCoverage.radiusMeters(n.rssi, n.hopsAway),
+                            )
+                        }
+                    val pinned = com.oshi.desktop.lora.LoRaFixedPosition.position?.let { (la, lo) ->
+                        com.oshi.desktop.ui.components.MapMarker(com.oshi.desktop.ui.components.PINNED_MARKER_ID, la, lo, t("pc.map.pinned"))
+                    }
+                    listOfNotNull(pinned) + nodes
+                },
             )
             Destination.MORE -> MorePane(
                 state = state,
@@ -271,13 +700,52 @@ private fun Shell(
                 onSelect = { model.select(it); model.go(Destination.MESSAGES) },
                 onSetBlocked = { address, blocked -> model.setBlocked(address, blocked) },
                 onRename = { address, name -> model.renameContact(address, name) },
+                onVerifySafetyNumber = { address, payload -> model.verifySafetyNumber(address, payload) },
+                onSetVerified = { address, on -> model.setContactVerified(address, on) },
+                onNewChat = { model.go(Destination.NEW) },
                 onCopy = { copyToClipboard(it) },
+                // __ENCRYPTED_MESSAGE_EXPORT_2026_09_22__ the dialog blocks the AWT thread, as a
+                // modal should; the export/import itself runs on the model's worker.
+                onExportMessages = {
+                    com.oshi.desktop.ui.components.pickMessageExportTarget()?.let { model.exportMessages(it) }
+                },
+                onImportMessages = {
+                    com.oshi.desktop.ui.components.pickMessageExportSource()?.let { model.importMessages(it) }
+                },
+                // __SHARED_NICKNAME_2026_09_22__ all three run on the model's worker.
+                onSetNickname = { model.setOwnNickname(it) },
+                // __PROFILE_PHOTOS_DESKTOP_2027__
+                onSetPhoto = { onPickFile()?.let { model.setOwnPhoto(it) } },
+                onRemovePhoto = { model.setOwnPhoto(null) },
+                onPullNickname = { model.pullNicknameFromPhone() },
+                onPushNickname = { model.pushNicknameToPhone() },
+                // __CALL_LOG_AT_REST_2026_09_23__ modal dialog on the AWT thread, work on the worker.
+                onExportCallDiagnostics = {
+                    com.oshi.desktop.ui.components.pickCallDiagnosticsTarget()?.let { model.exportCallDiagnostics(it) }
+                },
+                // __DESKTOP_SETTINGS_2027__ More is the two-column Settings now; these are the
+                // pages that need the live client.
+                onDeliveryReceipts = { model.setReceiptPrivacy(delivery = it) },
+                onReadReceipts = { model.setReceiptPrivacy(read = it) },
+                onTypingIndicators = { model.setReceiptPrivacy(typing = it) },
+                onSyncPush = model::syncPushContacts,
+                onSyncPull = model::syncPull,
+                onOpenUrl = { url -> openInBrowser(url) },
+                slots = com.oshi.desktop.ui.components.SettingsSlots(
+                    linkedDevices = { com.oshi.desktop.ui.components.LinkedDevicesSection(client.devSync, client.deviceMailbox) },
+                    disguise = { DisguisePage(disguise, state) },
+                    deleteAccount = { DeleteAccountPage(client) },
+                    recoveryKey = { runCatching { com.oshi.desktop.store.IdentityStore.exportRecoveryKey(client.identity) }.getOrNull() },
+                    version = appVersionLabel(),
+                    updates = { com.oshi.desktop.ui.components.UpdatesSettingsCard(com.oshi.desktop.update.DesktopUpdates.controller) },
+                ),
             )
             Destination.MESSAGES -> MessagesDestination(
                 state = state,
                 model = model,
                 client = client,
                 wallpapers = wallpapers,
+                mail = mail,
                 drafts = drafts,
                 query = query,
                 onQuery = { query = it },
@@ -286,6 +754,8 @@ private fun Shell(
                 revealed = revealed,
                 today = today,
                 onPickFile = onPickFile,
+                onCall = onCall,
+                disguise = disguise,
             )
         }
     }
@@ -308,7 +778,7 @@ private val DESTINATIONS = listOf(
  */
 internal fun destinationLabels(): List<String> = listOf(
     t("tab.messages"),
-    dt("desktop.destination.ai"),
+    t("desktop.destination.ai"),
     t("tab.new"),
     t("map.search.section.places"),
     t("tab_more"),
@@ -320,6 +790,7 @@ private fun MessagesDestination(
     model: ChatShellModel,
     client: OshiClient,
     wallpapers: WallpaperStore,
+    mail: com.oshi.desktop.ui.state.MailModel,
     drafts: SnapshotStateMap<String, String>,
     query: String,
     onQuery: (String) -> Unit,
@@ -328,7 +799,28 @@ private fun MessagesDestination(
     revealed: SnapshotStateMap<String, Unit>,
     today: LocalDate,
     onPickFile: () -> File?,
+    onCall: ((String, Boolean) -> Unit)? = null,
+    disguise: com.oshi.desktop.ui.components.PhotoDisguiseHost? = null,
 ) {
+    // The header's reach badge and incoming-share counter depend on the CLOCK as well as on
+    // events (a peer drop outlasts its grace, a LoRa node ages out, a share ends), so they are
+    // sampled on a tick rather than pushed. One second is the badge's resolution; the read is
+    // two map scans and a ConcurrentHashMap size.
+    var badge by remember { mutableStateOf(com.oshi.desktop.ui.state.NetworkBadge.OFFLINE) }
+    var incomingShares by remember { mutableStateOf(emptyList<com.oshi.desktop.ui.state.IncomingShare>()) }
+    LaunchedEffect(model) {
+        while (true) {
+            val now = System.currentTimeMillis()
+            val (b, shares) = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                model.networkBadge(now) to model.incomingLiveShares(now)
+            }
+            // Assigning an EQUAL value is a no-op for a state read, so an unchanged header
+            // does not recompose once a second.
+            badge = b
+            incomingShares = shares
+            kotlinx.coroutines.delay(1_000)
+        }
+    }
     Row(Modifier.fillMaxSize().background(OshiTheme.background)) {
         ConversationListPane(
             state = state,
@@ -338,13 +830,76 @@ private fun MessagesDestination(
             onHalf = onHalf,
             onSelect = { model.select(it) },
             onShow = { model.show(it) },
+            onCreateGroup = { name, members -> model.createGroup(name, members) },
             today = today,
+            badge = badge,
+            incomingShares = incomingShares,
+            onReach = { model.meshReach() },
+            onNewChat = { model.go(com.oshi.desktop.ui.state.Destination.NEW) },
+            // __CONVERSATION_PIN_MUTE_2027__ the row menu.
+            onSetPinned = { id, on -> model.setConversationPinned(id, on) },
+            onSetMuted = { id, on -> model.setConversationMuted(id, on) },
+            onMarkRead = { model.markConversationRead(it) },
+            onDeleteConversation = { model.deleteConversation(it) },
+            textMatches = { model.conversationsContaining(it) },
         )
         Box(Modifier.width(Metrics.hairline).fillMaxHeight().background(OshiTheme.separator))
         Box(Modifier.weight(1f).fillMaxHeight()) {
             when (state.pane) {
-                Pane.ACCOUNT -> AccountPane(state) { copyToClipboard(it) }
+                Pane.MAIL -> com.oshi.desktop.ui.components.MailPane(mail, onPickFile)
+                Pane.ACCOUNT -> AccountPane(
+                    state = state,
+                    onCopyAddress = { copyToClipboard(it) },
+                    onDeliveryReceipts = { model.setReceiptPrivacy(delivery = it) },
+                    onReadReceipts = { model.setReceiptPrivacy(read = it) },
+                onTypingIndicators = { model.setReceiptPrivacy(typing = it) },
+                    onSyncPush = model::syncPushContacts,
+                    onSyncPull = model::syncPull,
+                )
                 Pane.LIMITS -> LimitsPane()
+                Pane.DISGUISE -> DisguisePage(disguise, state)
+                // __DESKTOP_DELETE_ACCOUNT_UI_2026_10_29__ Takes a one-call host rather than
+                // the client, so the screen renders and is looked at without an account.
+                Pane.DELETE_ACCOUNT -> DeleteAccountPage(client)
+                // __DESKTOP_LORA_UI_2026_10_28__ The radio, with a mouse. Takes the client
+                // directly, as LinkedDevicesPane does: the roster is folded on the radio's
+                // read thread, so there is no shell state to thread through.
+                // __PEERS_ARE_A_SCREEN_2026_10_28__ PARITY row 1.3.
+                Pane.PEERS -> com.oshi.desktop.ui.components.PeersPane(
+                    peers = client.meshPeerRows(),
+                    onConnect = { h, p -> client.meshConnectByHand(h, p) },
+                    onCopy = { copyToClipboard(it) },
+                    refresh = { client.meshPeerRows() },
+                    onDisconnect = { client.meshDisconnect(it) },
+                    discovering = { client.meshIsDiscovering },
+                    onSetDiscovery = { client.meshSetDiscovery(it) },
+                    meshRunning = { client.meshRunning },
+                )
+                // __DESKTOP_GROUP_DISCOVERY_2027__
+                Pane.DISCOVER_GROUPS -> {
+                    val host = remember(client) {
+                        object : com.oshi.desktop.ui.components.DiscoverGroupsHost {
+                            override fun heard() = client.publicGroups.list(System.currentTimeMillis())
+                            override fun meshRunning() = client.meshRunning
+                            override fun startMesh() = client.startLocalMesh() && client.meshRunning
+                            override fun isMember(groupId: String) = client.groups.get(groupId)?.isMember(client.address) == true
+                            override fun join(groupId: String) { model.joinPublicGroup(groupId) }
+                            override fun openInvite() { model.go(Destination.NEW) }
+                        }
+                    }
+                    com.oshi.desktop.ui.components.DiscoverGroupsPane(host)
+                }
+                Pane.LORA -> com.oshi.desktop.ui.components.LoRaPane(
+                    radio = remember(client) { com.oshi.desktop.ui.components.loRaPaneHost(client) },
+                    contacts = state.contacts,
+                    onCopy = { copyToClipboard(it) },
+                    // __MESSAGE_THE_NODE_FROM_THE_MAP_2026_11_07__ Same two steps the
+                    // conversation list and More pane use, so a node opens exactly the way
+                    // any other thread does.
+                    onMessage = { key -> model.select(key); model.go(Destination.MESSAGES) },
+                )
+                // __DEVSYNC_DIRECT_2026_09_22__
+                Pane.DEVICES -> com.oshi.desktop.ui.components.LinkedDevicesPane(client.devSync, client.deviceMailbox)
                 // `remember(client)` and not a fresh instance per recomposition: CovertText
                 // holds the identity private key, and a composable is re-entered freely.
                 Pane.COVERT -> {
@@ -353,36 +908,155 @@ private fun MessagesDestination(
                     }
                     CovertPane(covert, state.contacts, onCopy = { text -> copyToClipboard(text) })
                 }
+                Pane.SCHEDULED -> com.oshi.desktop.ui.components.ScheduledPane(
+                    rows = state.scheduled,
+                    contacts = state.contacts,
+                    groups = state.conversations.filter { it.kind == com.oshi.desktop.ui.state.ConversationKind.GROUP },
+                    busy = state.busy,
+                    onSchedule = model::scheduleMessage,
+                    onEdit = model::editScheduled,
+                    onCancel = model::cancelScheduled,
+                )
                 Pane.CONVERSATION -> {
                     val thread = state.thread
                     if (thread == null) {
-                        NoConversationPane(state)
+                        NoConversationPane(state, onNewChat = { model.go(com.oshi.desktop.ui.state.Destination.NEW) })
                     } else {
                         val facts = rememberViewOnceFacts(client, thread.conversationId, thread.messages.size)
                         var wallpaper by remember(thread.conversationId) {
                             mutableStateOf(wallpapers.get(thread.conversationId))
                         }
+                        // __DESKTOP_SETTINGS_2027__ a conversation with no wallpaper of its own
+                        // shows the default chosen in Settings › Appearance.
+                        val shownWallpaper = wallpaper.takeIf { it != com.oshi.desktop.ui.components.WallpaperId.NONE }
+                            ?: DisplaySettings.defaultWallpaper
                         ThreadPane(
                             thread = thread,
                             notice = state.notice,
                             busy = state.busy,
-                            wallpaper = wallpaper,
+                            wallpaper = shownWallpaper,
                             onPickWallpaper = {
                                 wallpaper = it
                                 wallpapers.set(thread.conversationId, it)
                             },
                             draft = drafts[thread.conversationId].orEmpty(),
-                            onDraft = { drafts[thread.conversationId] = it },
+                            onDraft = {
+                                drafts[thread.conversationId] = it
+                                model.typingChanged(thread.conversationId, it.isNotBlank())
+                            },
                             onSend = {
                                 // The ONLY place the model hears about the draft.
+                                model.typingChanged(thread.conversationId, false)
                                 model.draft(drafts[thread.conversationId].orEmpty())
                                 model.send()
                             },
                             onAttach = { onPickFile()?.let { model.attach(it) } },
+                            onVoiceNote = { model.attach(it.file, it.mediaType, discardAfterSend = true, viewOnce = it.viewOnce) },
+                            // __VIEW_ONCE_DESKTOP_2027__ the "+" panel's View Once switch, armed
+                            // (fallback when the markup picker below is not wired).
+                            onAttachViewOnce = { onPickFile()?.let { model.attach(it, viewOnce = true) } },
+                            // __PHOTO_MARKUP_DESKTOP_2027__ / __DESKTOP_CAMERA_2027__ — view-once rides
+                            // through markup as on iOS (__MERGE_AB_VIEW_ONCE_MARKUP__).
+                            onPickImage = { onPickFile() },
+                            onAttachFile = { f, discard, once ->
+                                val type = when (f.extension.lowercase()) {
+                                    "jpg", "jpeg", "png", "gif", "webp", "heic" -> com.oshi.desktop.store.MediaType.IMAGE
+                                    "mp4", "mov", "m4v" -> com.oshi.desktop.store.MediaType.VIDEO
+                                    else -> null
+                                }
+                                model.attach(f, type, discardAfterSend = discard, viewOnce = once)
+                            },
+                            onGif = { model.attach(it, com.oshi.desktop.store.MediaType.IMAGE) },   // __GIF_PACK_2026_09_23__
+                            // __VIDEO_NOTE_2026_09_24__ the sealed MP4 stays as our own bubble (not discarded).
+                            onVideoNote = { file, meta -> model.attach(file, com.oshi.desktop.store.MediaType.VIDEO, videoNote = meta) },
+                            onRenameGroup = { model.renameGroup(thread.conversationId, it) },
+                            onReact = model::react,
+                            onEditMessage = model::editMessage,
+                            onDeleteMessage = model::deleteMessage,
+                            onAddGroupMember = { model.addGroupMember(thread.conversationId, it) },
+                            onRemoveGroupMember = { model.removeGroupMember(thread.conversationId, it) },
+                            onSetGroupMemberAdmin = { member, admin -> model.setGroupMemberAdmin(thread.conversationId, member, admin) },
                             viewOnce = facts,
                             revealed = revealed.keys,
-                            onReveal = { revealed[it] = Unit },
+                            // __VIEW_ONCE_DESKTOP_2027__ opening is recorded; the bytes go when the chat is left.
+                            onReveal = { revealed[it] = Unit; model.openViewOnce(it) },
                             today = today,
+                            onCall = onCall?.let { call -> { video -> call(thread.conversationId, video) } },
+                            onLeaveGroup = { model.leaveGroup(thread.conversationId) },
+                            onReply = model::beginReply,
+                            replyingTo = state.replyingTo,
+                            onCancelReply = model::cancelReply,
+                            onSetGroupPicture = { onPickFile()?.let { model.setGroupPicture(thread.conversationId, it) } },
+                            onRemoveGroupPicture = { model.removeGroupPicture(thread.conversationId) },
+                            onSetGroupMuted = { model.setGroupMuted(thread.conversationId, it) },
+                            onSetGroupDescription = { model.setGroupDescription(thread.conversationId, it) },
+                            // __GROUP_INFO_SETTINGS_2026_11_20__ GROUP_INFO_SETTINGS_SPEC §5.
+                            groupSettingsActions = com.oshi.desktop.ui.components.GroupSettingsActions(
+                                onSetType = { model.setGroupType(thread.conversationId, it) },
+                                onSetPublic = { h, p -> model.setGroupPublic(thread.conversationId, h, p) },
+                                onSetPrivate = { model.setGroupPrivate(thread.conversationId) },
+                                onResetLink = { model.resetGroupInviteLink(thread.conversationId) },
+                                onSetPostPolicy = { model.setGroupPostPolicy(thread.conversationId, it) },
+                                onSetReactions = { m, l -> model.setGroupReactions(thread.conversationId, m, l) },
+                                onSetWelcome = { model.setGroupWelcome(thread.conversationId, it) },
+                                onSetAdminDMs = { model.setGroupAdminDMs(thread.conversationId, it) },
+                                onSetComments = { model.setGroupComments(thread.conversationId, it) },
+                                onUnban = { model.unbanGroupMember(thread.conversationId, it) },
+                                onMessageAdmin = model::replyPrivatelyToMember,
+                                onDissolve = { model.dissolveGroup(thread.conversationId) },
+                                onDeleteForMe = { model.deleteGroupForMe(thread.conversationId) },
+                                onLinkEditorClosed = model::clearGroupLinkResult,
+                                onCopy = { copyToClipboard(it) },
+                            ),
+                            // __GROUP_COMMENTS_2026_11_21__ GROUP_INFO_SETTINGS_SPEC §2.12.6.
+                            commentActions = com.oshi.desktop.ui.components.CommentActions(
+                                onOpen = model::openComments,
+                                onClose = model::closeComments,
+                                onDraft = model::setCommentDraft,
+                                onSend = model::sendComment,
+                                onReply = model::beginCommentReply,
+                                onCancelReply = model::cancelCommentReply,
+                            ),
+                            onSetGroupBlocked = { model.setGroupBlocked(thread.conversationId, it) },
+                            onDeleteGroup = { model.deleteGroup(thread.conversationId) },
+                            onPin = model::pinMessage,
+                            onDeleteForMe = model::deleteMessageForMe,
+                            onForward = model::forwardMessageToMany,   // __FORWARD_MANY_DESKTOP_2027__
+                            onReplyPrivately = model::beginPrivateReply,   // __REPLY_PRIVATELY_DESKTOP_2027__
+                            onVote = model::votePoll,   // __DESKTOP_POLLS_2026_10_29__
+                            onCreatePoll = { q, opts, multi, anon, closes -> model.createPoll(q, opts, multi, anon, closes) },
+                            onSendLocation = { la, lo, label -> model.sendLocationPing(la, lo, label) },
+                            onAliveCheckIn = { k, iv -> model.sendAliveCheckIn(k, iv) },
+                            // __DESKTOP_CONTACT_CARD_COMPOSER_2026_10_29__
+                            onSendContact = model::sendContactCard,
+                            contacts = state.contacts,
+                            onDisguise = disguise?.let { host ->
+                                { state.contacts.firstOrNull { it.address == thread.conversationId }?.let(host::open) }
+                            },
+                            onSetOfflineOnly = model::setOfflineOnly,
+                            onCopy = { copyToClipboard(it) },
+                            onPickMention = model::pickMention,   // __MENTIONS_2026_09_23__
+                            // __DESKTOP_REPORT_2026_09_23__ contacts and groups only (not bots / radio).
+                            onReport = { reason, details, alsoBlock ->
+                                model.report(thread.conversationId, thread.kind == com.oshi.desktop.ui.state.ConversationKind.GROUP, reason, details, alsoBlock)
+                            },
+                            // __CONVERSATION_PIN_MUTE_2027__ / BLOCK / VERIFY / EXPORT
+                            onSetMuted = { model.setConversationMuted(thread.conversationId, it) },
+                            onSetChatPinned = { model.setConversationPinned(thread.conversationId, it) },
+                            onSetContactBlocked = { model.setBlocked(thread.conversationId, it, keepOpen = true) },
+                            // __GROUP_MEMBER_MODERATION_2027__ a member is reported as a CONTACT
+                            // (their key), and blocked through the same contact block.
+                            onReportMember = { member, reason, details, alsoBlock ->
+                                model.report(member, false, reason, details, alsoBlock)
+                            },
+                            onSetMemberBlocked = { member, on -> model.setBlocked(member, on, keepOpen = true) },
+                            onReplyPrivatelyToMember = model::replyPrivatelyToMember,   // __MERGE_AB_MEMBER_MENU__
+                            onSetContactVerified = { model.setContactVerified(thread.conversationId, it) },
+                            onVerifyPayload = { model.verifySafetyNumber(thread.conversationId, it) },
+                            onExport = {
+                                com.oshi.desktop.ui.components.pickConversationExportTarget(thread.title)
+                                    ?.let { model.exportConversation(thread.conversationId, it) }
+                            },
                         )
                     }
                 }
@@ -408,6 +1082,12 @@ private fun BusyWatcher(state: ShellState, drafts: SnapshotStateMap<String, Stri
         val id = state.selectedId
         if (wasBusy && !state.busy && id != null) drafts[id] = state.draft
         wasBusy = state.busy
+    }
+    // __DRAFT_CLEAR_RACE_2026_11_18__ the settle can be faster than one frame: key on the
+    // serial too, so a send that never showed `busy` still empties the box.
+    LaunchedEffect(state.sendSerial) {
+        val id = state.selectedId
+        if (state.sendSerial != 0 && !state.busy && id != null) drafts[id] = state.draft
     }
 }
 
@@ -437,7 +1117,25 @@ private fun rememberViewOnceFacts(client: OshiClient, conversationId: String, co
  */
 private fun copyToClipboard(text: String) {
     runCatching {
-        Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(text), null)
+        // __CLIPBOARD_HISTORY_LEAK_2026_11_20__ excluded from Windows history/cloud, cleared after 60 s.
+        SensitiveClipboard.copy(text)
+    }
+}
+
+/**
+ * __MAC_TITLE_BAR_FOLLOWS_THEME_2026_11_21__ The macOS title bar (traffic lights, title) drawn in
+ * the app's theme, not the system's. Seen in the running app: Dark / Extra dark chosen in
+ * Settings on a Mac in light mode left a white system title bar over a black window. See
+ * [MacAppearance]. No-op elsewhere (Windows/Linux decorations are the window manager's).
+ */
+@Composable
+internal fun MacTitleBarAppearance(@Suppress("UNUSED_PARAMETER") window: java.awt.Window) {
+    if (!com.oshi.desktop.store.DesktopPaths.isMac) return
+    val mode = OshiTheme.appearance.mode
+    val dark = OshiTheme.palette.isDark
+    LaunchedEffect(mode, dark) {
+        // "System": no override, the bar follows macOS as before.
+        MacAppearance.apply(if (mode == ThemeMode.SYSTEM) null else dark)
     }
 }
 
@@ -455,7 +1153,7 @@ private fun copyToClipboard(text: String) {
  * reason a messenger fails to open.
  */
 @Composable
-private fun oshiWindowIcon(): Painter? = remember {
+internal fun oshiWindowIcon(): Painter? = remember {
     runCatching {
         val bytes = ChatShellModel::class.java.getResourceAsStream("/branding/oshi-256.png")
             ?.use { it.readBytes() } ?: return@runCatching null
@@ -483,4 +1181,124 @@ private fun pickFile(owner: java.awt.Frame): File? {
     val name = dialog.file ?: return null
     val dir = dialog.directory ?: return null
     return File(dir, name).takeIf { it.isFile }
+}
+
+/**
+ * A menu shortcut on the modifier this platform actually uses.
+ *
+ * `meta` is Command on macOS; on Windows it is the Windows key and on most Linux desktops
+ * the Super key, both of which belong to the window manager. `ctrl` is the menu modifier
+ * there. Getting this wrong is not a compile error and not a crash — it is a menu item
+ * with a chord printed beside it that either does nothing or fights the OS.
+ */
+internal fun menuShortcut(key: Key, isMac: Boolean = MacDesktopIntegration.isMac, shift: Boolean = false): KeyShortcut =
+    if (isMac) KeyShortcut(key, meta = true, shift = shift)
+    else KeyShortcut(key, ctrl = true, shift = shift)
+
+/**
+ * __PRIVACY_DISGUISE_2026_11_18__ The window-wide drop target: an image file → reveal; while a
+ * file is dragged over the window the host shows its "drop to look" overlay.
+ */
+internal fun installDisguiseDropTarget(host: com.oshi.desktop.ui.components.PhotoDisguiseHost): java.awt.dnd.DropTarget =
+    object : java.awt.dnd.DropTarget() {
+        override fun dragEnter(e: java.awt.dnd.DropTargetDragEvent) {
+            if (e.isDataFlavorSupported(java.awt.datatransfer.DataFlavor.javaFileListFlavor)) {
+                host.dragging = true
+                e.acceptDrag(java.awt.dnd.DnDConstants.ACTION_COPY)
+            } else e.rejectDrag()
+        }
+        override fun dragExit(e: java.awt.dnd.DropTargetEvent) { host.dragging = false }
+        override fun drop(e: java.awt.dnd.DropTargetDropEvent) {
+            host.dragging = false
+            try {
+                e.acceptDrop(java.awt.dnd.DnDConstants.ACTION_COPY)
+                @Suppress("UNCHECKED_CAST")
+                val files = e.transferable.getTransferData(java.awt.datatransfer.DataFlavor.javaFileListFlavor) as? List<File>
+                val image = files.orEmpty().firstOrNull { com.oshi.desktop.stego.DesktopPhotoDisguise.looksLikeImageFile(it) }
+                if (image != null) host.revealFile(image)
+                e.dropComplete(image != null)
+            } catch (_: Exception) {
+                e.dropComplete(false)
+            }
+        }
+    }
+
+/**
+ * The Quit item's shortcut, or NONE on macOS.
+ *
+ * macOS puts `Quit OSHI` in the system application menu with Command-Q already bound, and
+ * that path was measured ending this process. A second Command-Q inside the same app is a
+ * duplicate binding on a chord that already works. Off macOS nothing provides a Quit but
+ * this menu, so it takes Control-Q. See [MacDesktopIntegration].
+ */
+internal fun quitShortcut(isMac: Boolean = MacDesktopIntegration.isMac): KeyShortcut? =
+    if (isMac) null else KeyShortcut(Key.Q, ctrl = true)
+
+
+// __DESKTOP_SETTINGS_2027__ Shared by the Settings section and the stand-alone pane routes.
+@Composable
+private fun DisguisePage(disguise: com.oshi.desktop.ui.components.PhotoDisguiseHost?, state: ShellState) {
+    if (disguise == null) { LimitsPane(); return }
+    var coverOn by remember { mutableStateOf(com.oshi.desktop.net.DesktopCover.isEnabled()) }
+    var hintOn by remember { mutableStateOf(com.oshi.desktop.net.DesktopCover.isHintEnabled()) }
+    com.oshi.desktop.ui.components.PrivacyDisguisePane(
+        host = disguise,
+        contacts = state.contacts,
+        coverOn = coverOn,
+        onCoverChange = {
+            com.oshi.desktop.net.DesktopCover.setEnabled(it)
+            coverOn = com.oshi.desktop.net.DesktopCover.isEnabled()
+        },
+        hintOn = hintOn,
+        onHintChange = {
+            com.oshi.desktop.net.DesktopCover.setHintEnabled(it)
+            hintOn = com.oshi.desktop.net.DesktopCover.isHintEnabled()
+        },
+    )
+}
+
+@Composable
+private fun DeleteAccountPage(client: OshiClient) {
+    com.oshi.desktop.ui.components.DeleteAccountPane(
+        remember(client) {
+            object : com.oshi.desktop.ui.components.DeleteAccountHost {
+                override fun delete() = client.deleteAccount()
+            }
+        },
+    )
+}
+
+/** The packaged version (jpackage sets `jpackage.app-version`), or the jar's, or "dev". */
+internal fun appVersionLabel(): String =
+    System.getProperty("jpackage.app-version")
+        ?: OshiClient::class.java.`package`?.implementationVersion
+        ?: "dev"
+
+/** Opens [url] in the person's browser; silently does nothing where the OS offers no browser. */
+internal fun openInBrowser(url: String) {
+    Thread({ browseUrl(url) }, "oshi-open-url").apply { isDaemon = true }.start()
+}
+
+/**
+ * __LINUX_BROWSE_FALLBACK_2026_11_21__ `java.awt.Desktop` on Linux works only through GTK, which
+ * the JDK loads at run time and the package cannot declare: on a desktop without GTK 3 (some KDE,
+ * LXQt and tiling-WM installs) `isDesktopSupported()` is false, or `browse` throws, and every link,
+ * the "download page" button and the help links did NOTHING. Linux then falls back to `xdg-open`
+ * (http/https only, the URL as one argument, never through a shell). Returns whether something
+ * was launched. Blocking: call it off the UI thread.
+ */
+internal fun browseUrl(
+    url: String,
+    linux: Boolean = com.oshi.desktop.store.DesktopPaths.isLinux,
+    awt: (java.net.URI) -> Boolean = { uri ->
+        java.awt.Desktop.isDesktopSupported() && java.awt.Desktop.getDesktop().isSupported(java.awt.Desktop.Action.BROWSE) &&
+            runCatching { java.awt.Desktop.getDesktop().browse(uri); true }.getOrDefault(false)
+    },
+    spawn: (List<String>) -> Boolean = { cmd -> runCatching { ProcessBuilder(cmd).redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD).start(); true }.getOrDefault(false) },
+): Boolean {
+    val uri = runCatching { java.net.URI(url) }.getOrNull() ?: return false
+    if (runCatching { awt(uri) }.getOrDefault(false)) return true
+    if (!linux || uri.scheme?.lowercase() !in setOf("http", "https")) return false
+    val xdgOpen = com.oshi.desktop.store.ExecutableLookup.which("xdg-open") ?: return false
+    return spawn(listOf(xdgOpen, uri.toASCIIString()))
 }

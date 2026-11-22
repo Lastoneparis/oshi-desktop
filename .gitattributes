@@ -1,0 +1,6 @@
+# __SIGNED_FIXTURES_CRLF_2026_11_21__ This file travels to the PUBLIC repo root (sync_public_repo.sh
+# copies OSHI-Desktop/ as the repo root), where the monorepo's own root .gitattributes does not
+# exist. Without it, windows-latest checked out the signed update fixtures with CRLF and the two
+# Ed25519 signature tests failed there only (the bytes signed are LF).
+src/test/resources/update/** -text
+src/main/resources/i18n/** text eol=lf

@@ -92,16 +92,20 @@ each platform has a launcher that finds a JDK and forwards to Gradle:
 ./oshi.sh test                        the parity suite
 ./oshi.sh run --args="--client"       the client: account, relay, stores, mesh
 ./oshi.sh run --args="--ui"           the window (Compose desktop) — PARITY.md row 1.1
+./oshi.sh run --args="--ui --restore-identity"
+                                        restore an iOS/Android recovery key into an empty profile
 ./oshi.sh run --args="--mesh"         a live mesh node: mDNS discovery + TCP
 ./oshi.sh run --args="--probe"        adds one read-only GET against the live server
 ```
 
 `--ui` is an **additional** entry point, not a replacement. `--client` is still the fuller
-surface. The window now does 1:1 and group messaging, file attachments, pairing (its own QR
-and a paste box), contacts, renaming, safety numbers, blocking and unblocking, the offline
-places reader and the local AI console. Reachable only from the REPL: creating and
-administering groups, reactions, edits and deletes, voice notes, scheduled messages, sync,
-LoRa, calls, bot posts and account deletion. The window says so itself, in its own "What
+surface. The window now does 1:1 and group messaging, file attachments, pairing (its own QR,
+a pasted key, or a QR image), contacts, renaming, safety numbers, blocking and unblocking, the offline
+places reader and the local AI console. Group admins can create groups, rename them, and add
+known unblocked contacts or remove other members. Direct-message reactions, edits, deletes and
+voice notes work in the window; Account can push or pull the encrypted contact archive without
+ever checkpointing it. Reachable only from the REPL: sync checkpointing, LoRa, calls, bot posts
+and account deletion. The window says so itself, in its own "What
 this client will not do" pane, which names every gap with the PARITY.md row behind it. Both
 entry points share one account and one message store, so anything sent from one shows up in
 the other.
@@ -130,11 +134,12 @@ Each of these is a real limitation, not a gap that is about to close quietly.
   `/v2/messages`. That is not the same thing: there is no wake-from-sleep delivery.
 - **No screenshot blocking.** iOS has an OS affordance for it; Windows and Linux do not.
   Claiming it in the UI would be a lie.
-- **It cannot sync with your phone.** Messaging a phone works — text crosses the live relay in
-  both directions, verified against a shipped Android handset. *Multi-device* sync does not, and
-  it is blocked twice: no shipped phone writes the `/v2/sync` archive this client reads (they use
-  the legacy `/api/sync` blob), and this client has no way to adopt an existing identity, so it is
-  always a different OSHI account with a different archive key. PARITY.md row 0.24 has the detail.
+- **It cannot yet sync its history with your phone.** An empty desktop profile can restore the
+  same iOS/Android identity using `--ui --restore-identity`; the recovery key is validated locally
+  and never uploaded. This removes the identity barrier, but not the protocol barrier: no shipped
+  phone writes the owner-authenticated `/v2/sync` archive for messages and groups (they use the
+  legacy `/api/sync` blob). That legacy endpoint is not authenticated and is deliberately not
+  enabled here. PARITY.md row 0.24 has the detail.
 - **Against an Android peer, only the text arrives.** Delivery and read receipts, typing,
   reactions, edits, deletes, pins and profile updates are emitted by the Android app on the legacy
   IPFS lane only — the lane row 0.23 is deliberately ⛔ against — so none of them reach this

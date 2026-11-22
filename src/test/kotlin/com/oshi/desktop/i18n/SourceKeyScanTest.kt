@@ -53,6 +53,16 @@ class SourceKeyScanTest {
     }
 
     @Test
+    fun `the scanner sees keys held as data through catalogKey`() {
+        src("K.kt", """
+            val summary = prefix + catalogKey("call.missed")
+            val ended = if (x) catalogKey("call.ended.hungup") else other
+            val nope = foo.catalogKey("not.a.key")
+        """.trimIndent())
+        assertEquals(setOf("call.missed", "call.ended.hungup"), SourceKeys.used(tmp.root))
+    }
+
+    @Test
     fun `the scanner is not fooled by a method called t on something else`() {
         src("C.kt", """
             val x = foo.t("not.a.key")
@@ -113,6 +123,7 @@ class SourceKeyScanTest {
             """val a = t("k.one")""",
             """val b = Strings.get("k.two")""",
             """val c = Row(textKey = "k.three")""",
+            """val d = catalogKey("k.four")""",
         )
         SourceKeys.ACCESSORS.forEachIndexed { i, re ->
             assertTrue(

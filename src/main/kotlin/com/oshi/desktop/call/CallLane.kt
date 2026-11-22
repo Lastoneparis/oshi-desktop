@@ -49,7 +49,7 @@ import java.util.concurrent.TimeUnit
  *
  *  - **No TURN.** `GET /turn-creds` is a live route on this very server and is still not
  *    called. Behind a symmetric NAT on both ends there is no media path at all — see
- *    [com.oshi.desktop.call.transport.MediaSocket]'s TURN IS NOT HERE.
+ *    (TURN and the `:8089` relay now exist — PARITY.md row 2.1-t.)
  *  - **No push, so no wake.** PARITY.md row 2.3: a desktop client POLLS. If this process is
  *    not running, an incoming call is not missed politely — it is not seen at all, and the
  *    caller gets their own 45 s no-answer.
@@ -187,6 +187,69 @@ class CallLane(
         val atMs: Long,
     )
 
+    /**
+     * Privacy-preserving state of the desktop media lane.
+     *
+     * This deliberately contains counts and booleans only: candidate addresses and ports
+     * are sensitive network metadata and belong neither in a UI nor in a support log.
+     * `pathSelected` means that the local ICE probe received a valid response; it does
+     * not prove that a remote person heard audio.
+     */
+    data class MediaDiagnostics(
+        val audioConfigured: Boolean,
+        /**
+         * A truthful lifecycle status for a surface such as the Windows diagnostics pane.
+         * This is intentionally not a call-quality claim: `WAITING_FOR_PATH` means that
+         * local devices and UDP opened, but no bidirectional media path has been proven.
+         */
+        val status: MediaStatus,
+        val mediaFailures: Int,
+        val candidatesSent: Int,
+        val candidatesReceived: Int,
+        val candidatesIgnored: Int,
+        val pathSelected: Boolean,
+        val framesAccepted: Long,
+        val framesRefused: Long,
+        /** Sealed frames our microphone put on the socket (silence while muted). */
+        val framesSent: Long = 0,
+        /**
+         * The microphone has delivered only digital zero for ~3 s while unmuted — what
+         * Windows (and macOS) give a process whose microphone access is off. See
+         * [com.oshi.desktop.call.media.CallAudioSession.consecutiveSilentFrames].
+         */
+        val micLooksBlocked: Boolean = false,
+        /**
+         * __CALL_QUALITY_TIERS_2026_10_28__ The three figures the quality badge is built
+         * from. Cumulative counters and a smoothed round trip; the UI takes per-second
+         * deltas of the first two, because a rough opening second must not mark a long
+         * call. See [com.oshi.desktop.ui.state.CallQualityStats].
+         *
+         * Note what is NOT here: a jitter figure. The playback queue is a fixed 60 ms
+         * de-jitter buffer with no measured arrival spread to report, and inventing one
+         * would be worse than admitting it — iOS's own measurement says raw jitter was
+         * what made a perfect call read "poor".
+         */
+        val framesRendered: Long = 0,
+        val framesSilenced: Long = 0,
+        /** Round trip on the path actually carrying the call; null before the first pong. */
+        val rttMs: Int? = null,
+    )
+
+    /**
+     * The only media states a UI may present. In particular, no state means "audio is
+     * audible": even [ACTIVE] records only that ICE selected a path locally.
+     */
+    enum class MediaStatus {
+        /** This build was deliberately started without a media opener. */
+        DISABLED,
+        /** A media opener is configured, but no connected call currently owns it. */
+        READY,
+        /** Devices and UDP opened; ICE has not selected a usable peer path yet. */
+        WAITING_FOR_PATH,
+        /** A local ICE probe selected a path; remote audibility still needs a real call test. */
+        ACTIVE,
+    }
+
     /** What [call] did. */
     sealed class Dialled {
         data class Ringing(val callId: String, val delivery: String) : Dialled()
@@ -194,6 +257,15 @@ class CallLane(
     }
 
     var onEvent: (CallEvent) -> Unit = {}
+
+    init {
+        // __CALL_LOG_AT_REST_2026_09_23__ iOS-shaped diagnostic lines, so the redacted
+        // export (same allow-list on every platform) carries the desktop's side of a call.
+        machine.onStateChange = { from, to -> log("🔄 STATE CHANGE: $from → $to") }
+    }
+
+    /** Last time [mediaTick] wrote its DIAG_PATH snapshot. */
+    @Volatile private var lastPathDiagMs = 0L
 
     /**
      * Whether this lane was built with a media opener — i.e. whether a connected call will
@@ -222,6 +294,33 @@ class CallLane(
     private val callLog = ArrayList<CallLogEntry>()
 
     fun calls(): List<CallLogEntry> = synchronized(callLog) { callLog.toList() }
+
+    /** A support-safe snapshot for `/calls`; see [MediaDiagnostics]. */
+    fun mediaDiagnostics(): MediaDiagnostics {
+        val live = leg
+        val status = when {
+            !carriesAudio -> MediaStatus.DISABLED
+            live == null -> MediaStatus.READY
+            live.selected == null -> MediaStatus.WAITING_FOR_PATH
+            else -> MediaStatus.ACTIVE
+        }
+        return MediaDiagnostics(
+            audioConfigured = carriesAudio,
+            status = status,
+            mediaFailures = mediaFailures,
+            candidatesSent = candidatesSent,
+            candidatesReceived = candidatesReceived,
+            candidatesIgnored = candidatesIgnored,
+            pathSelected = live?.selected != null,
+            framesAccepted = live?.framesAccepted?.get() ?: 0,
+            framesRefused = live?.framesRefused?.get() ?: 0,
+            framesSent = live?.audio?.framesSent?.get() ?: 0,
+            micLooksBlocked = live?.audio?.micLooksBlocked ?: false,
+            framesRendered = live?.audio?.framesRendered?.get() ?: 0,
+            framesSilenced = live?.audio?.framesSilenced?.get() ?: 0,
+            rttMs = live?.socket?.selectedRttMs,
+        )
+    }
 
     /** Sealed signals that did not open. See WHO SENT IT — never zero silently. */
     @Volatile var unopenable: Int = 0
@@ -263,6 +362,15 @@ class CallLane(
         private set
 
     /**
+     * The phones' in-band hang-up (`0x0D` on the media path, [com.oshi.desktop.call.media.InBandCallEnd]):
+     * how many ended a call here, and how many copies we sent when WE hung up.
+     */
+    @Volatile var inBandEndsApplied: Int = 0
+        private set
+    @Volatile var inBandEndsSent: Int = 0
+        private set
+
+    /**
      * The media leg of the call that is up, or null.
      *
      * Guarded by [mediaLock] on every write, because it is written from the signalling
@@ -271,6 +379,15 @@ class CallLane(
     @Volatile private var leg: CallMediaLeg? = null
 
     private val mediaLock = Any()
+
+    /**
+     * __DESKTOP_CALL_UI_2026_09_23__ ONE thread drives the machine at a time. The window
+     * answers on a click while the poll thread applies a remote cancel and the media timer
+     * may end a silent call — three threads, one unsynchronized [CallStateMachine]. The REPL
+     * always had the same race (stdin + poll) and got away with it because a human typing
+     * `/answer` rarely lands inside a poll. Reentrant: `call` → `perform` → `apply` nests.
+     */
+    private val drive = Any()
 
     private var mediaTimer: ScheduledExecutorService? = null
 
@@ -290,7 +407,8 @@ class CallLane(
     // ------------------------------------------------------------------ outbound
 
     /**
-     * Ring [peerAddress]. **Signalling only — see [NO_AUDIO_WILL_FLOW].**
+     * Ring [peerAddress]. The media leg is enabled only when this lane has an opener;
+     * see [carriesAudio] and [NO_AUDIO_WILL_FLOW].
      *
      * The offer carries the call's media session key, so it is minted by [CallStateMachine]
      * and never by a caller (a caller that could supply it could reuse one across calls).
@@ -307,10 +425,17 @@ class CallLane(
         video: Boolean = false,
         newCallId: String = UUID.randomUUID().toString().uppercase(java.util.Locale.US),
     ): Dialled {
+        return synchronized(drive) { callLocked(peerAddress, nowMs, video, newCallId) }
+    }
+
+    private fun callLocked(peerAddress: String, nowMs: Long, video: Boolean, newCallId: String): Dialled {
         val canonical = ContactQr.canonicalAddress(peerAddress)
             ?: return Dialled.Refused("'$peerAddress' is not an OSHI address")
 
         val decision = machine.startCall(canonical, nowMs, video, newCallId)
+        if (decision.refusal == CallRefusal.UNAVAILABLE) {
+            log("call: not dialling ${canonical.take(12)}… — it told us it blocks us (unavailable)")
+        }
         if (decision.refusal != CallRefusal.NONE) {
             return Dialled.Refused(refusalText(decision.refusal), decision.refusal)
         }
@@ -341,19 +466,122 @@ class CallLane(
         return Dialled.Ringing(newCallId, delivery)
     }
 
-    /** Answer the ringing call. Signalling only — the peer will hear nothing. */
+    /** Answer the ringing call; a configured media leg opens only after acceptance. */
     fun answer(nowMs: Long = System.currentTimeMillis()): CallRefusal =
-        apply(machine.accept(nowMs), nowMs)
+        siblingsDrop(nowMs) { apply(machine.accept(nowMs), nowMs) }
 
     /** Decline the ringing call. */
     fun decline(nowMs: Long = System.currentTimeMillis()): CallRefusal =
-        apply(machine.decline(nowMs), nowMs)
+        siblingsDrop(nowMs) { apply(machine.decline(nowMs), nowMs) }
+
+    /**
+     * __DESKTOP_BACKGROUND_2026_09_23__ MULTI-DEVICE: when this computer holds the same account
+     * as a phone (restored with its recovery key), one incoming call rings BOTH. Answering,
+     * declining or hanging up here must stop the phone ringing, exactly as a sibling iPhone does:
+     * `VoiceCallManager.notifyOtherDevicesCallAnswered` / `notifyOtherDevicesCallEnded`
+     * (`swift:7922-8080`) seal a `callAnsweredElsewhere` (0x0A) packet to OUR OWN key, payload
+     * `[len(1)][deviceId utf8][callId utf8]`, POST it to `/signal` with `senderDeviceId` so the
+     * server never echoes it to us (`call_server.js:752, :943`), and hit push_service
+     * `/signal-answered` so a SUSPENDED iPhone/Android gets a push that dismisses CallKit /
+     * the ringing notification. The receive half already existed (`onAnsweredElsewhere`);
+     * this client just never sent it, so a desktop answer left the phone ringing to timeout.
+     * Only an INCOMING call is announced — an outgoing call never rang a sibling. Best effort
+     * on a daemon thread: a failure here must never delay or change the call itself.
+     */
+    private fun siblingsDrop(nowMs: Long, body: () -> CallRefusal): CallRefusal = synchronized(drive) {
+        val incomingCallId = machine.callId.takeIf { !machine.isOutgoing }
+        val refusal = body()
+        if (refusal == CallRefusal.NONE && incomingCallId != null) {
+            Thread({ runCatching { announceToSiblings(incomingCallId, nowMs) } }, "oshi-call-siblings")
+                .apply { isDaemon = true }.start()
+        }
+        refusal
+    }
+
+    private fun announceToSiblings(callId: String, nowMs: Long) {
+        val canonical = ContactQr.canonicalAddress(myAddress) ?: return
+        val self = Base64.getDecoder().decode(canonical)
+        val dev = deviceId.toByteArray(Charsets.UTF_8)
+        val payload = byteArrayOf(dev.size.coerceAtMost(255).toByte()) + dev.copyOf(dev.size.coerceAtMost(255)) +
+            callId.toByteArray(Charsets.UTF_8)
+        val stampMs = com.oshi.desktop.net.ServerClock.nowMs(nowMs)
+        val packet = CallPacket.encode(CallPacket.Type.CALL_ANSWERED_ELSEWHERE, stampMs, payload)
+        val me = CallSignalClient.base64Url(myAddress)
+        transport.sendSignal(
+            CallSignalEnvelope(
+                sender = me,
+                recipient = me,
+                signalBase64 = Base64.getEncoder().encodeToString(CallSignalCrypto.seal(myPrivateKey, self, packet)),
+                callId = callId,
+                type = "callAnsweredElsewhere",
+                isVideoCall = false,
+                senderDeviceId = deviceId,
+            ),
+            stampMs,
+        )
+        siblingPush(canonical, callId)
+    }
+
+    /**
+     * Where [siblingPush] posts; null turns it off.
+     *
+     * __CALL_PUSH_AUTH_DESKTOP_2026_09_23__ DERIVED from the transport's base URL (same
+     * origin, nginx `/push/`) instead of a hard-coded production URL: a lane built on a
+     * local test server used to POST every test answer/decline to production push.
+     */
+    @Volatile internal var siblingPushUrl: String? = transport.signalAnsweredUrl
+
+    /** push_service `/signal-answered`, SIGNED by our bound key (contract §3 row 6). */
+    private fun siblingPush(identity: String, callId: String) {
+        val url = siblingPushUrl ?: return
+        val status = transport.signalAnswered(identity, callId, deviceId, url)
+        log("call: sibling devices told to stop ringing $callId (push $status)")
+    }
+
+    /**
+     * __DESKTOP_CALL_UI_2026_09_23__ Mute the microphone of the call that is up — or of
+     * the one about to be: the choice is remembered and applied when the leg opens, so a
+     * user who mutes while "connecting" is not live the moment audio starts.
+     */
+    @Volatile var muted: Boolean = false
+        private set
+
+    fun setMuted(value: Boolean) {
+        muted = value
+        leg?.audio?.muted = value
+    }
+
+    /**
+     * __CALL_VOICE_EFFECTS_2026_10_28__ The live voice effect on what we send — PARITY
+     * row 2.1-d's last unported item.
+     *
+     * Remembered on the lane as well as handed to the leg, for the same reason [muted] is:
+     * a choice made before a call connects (or between two calls) has no leg to land on,
+     * and an effect that silently reverted to None when the call started would look like
+     * the picker not working. The persisted default in `CallDevices.voiceEffect` is what a
+     * NEW session starts from; this is what the current one is using.
+     */
+    @Volatile
+    var voiceEffect: com.oshi.desktop.call.media.CallVoiceEffects.Effect =
+        com.oshi.desktop.call.media.CallDevices.defaultVoiceEffect()
+        private set
+
+    fun setVoiceEffect(effect: com.oshi.desktop.call.media.CallVoiceEffects.Effect) {
+        voiceEffect = effect
+        leg?.audio?.setVoiceEffect(effect)
+        // Persisted so the next call, and the next launch, start where the person left off
+        // — iOS's `defaultVoiceEffect` does exactly this.
+        com.oshi.desktop.call.media.CallDevices.voiceEffect = effect.wire
+    }
+
+    /** The live call's video half — PARITY.md row 2.1-v. Null outside a connected call. */
+    fun video(): com.oshi.desktop.call.video.CallVideoSession? = leg?.video
 
     /** Hang up from any live state. */
     fun hangUp(
         reason: CallEndReason = CallEndReason.HUNG_UP,
         nowMs: Long = System.currentTimeMillis(),
-    ): CallRefusal = apply(machine.hangUp(reason, nowMs), nowMs)
+    ): CallRefusal = siblingsDrop(nowMs) { apply(machine.hangUp(reason, nowMs), nowMs) }
 
     // ------------------------------------------------------------------ inbound
 
@@ -381,7 +609,9 @@ class CallLane(
      *
      * @return true when the packet reached the state machine.
      */
-    internal fun accept(envelope: CallSignalEnvelope, nowMs: Long): Boolean {
+    internal fun accept(envelope: CallSignalEnvelope, nowMs: Long): Boolean = synchronized(drive) { acceptLocked(envelope, nowMs) }
+
+    private fun acceptLocked(envelope: CallSignalEnvelope, nowMs: Long): Boolean {
         pruneSeen(nowMs)
         if (seenSignals.containsKey(envelope.signalBase64)) return false
 
@@ -443,6 +673,24 @@ class CallLane(
         if (packet.type == CallPacket.Type.ICE_CANDIDATE_EXCHANGE) {
             onIceCandidates(senderAddress, packet, envelope.callId.takeIf { it.isNotEmpty() })
         }
+        // __VIDEO_PLI_SIGNAL_2026_09_23__ iOS sends keyframe requests and camera pause/resume
+        // ONLY on this channel (`VoiceCallManager.sendKeyframeRequest`, `createCallPacket` →
+        // `/signal`), and Android sends a copy here as well. The machine returns no action for
+        // them, so until now every iPhone PLI reached a desktop and was dropped: the desktop
+        // encoder waited for its own 1 s GOP. Same gates as the candidates (authenticated
+        // peer of THIS call); handed to the video half exactly as its media-channel twin.
+        if (packet.type == CallPacket.Type.REQUEST_KEYFRAME ||
+            packet.type == CallPacket.Type.VIDEO_PAUSED ||
+            packet.type == CallPacket.Type.VIDEO_RESUMED
+        ) {
+            val current = machine.peer
+            val video = leg?.takeIf { !it.isClosed }?.video
+            if (video != null && current != null &&
+                BlockPolicy.normalizeKey(current) == BlockPolicy.normalizeKey(senderAddress)
+            ) {
+                video.onMedia(com.oshi.desktop.call.media.VideoControl.encodeToggle(packet.type.code, nowMs))
+            }
+        }
         return true
     }
 
@@ -472,7 +720,7 @@ class CallLane(
             log("call: candidates from ${from.take(12)}… are not from the peer on this call")
             return
         }
-        if (envelopeCallId != null && envelopeCallId != machine.callId) {
+        if (envelopeCallId != null && !CallStateMachine.sameCallId(envelopeCallId, machine.callId)) {
             candidatesIgnored++
             log("call: candidates for $envelopeCallId arrived during ${machine.callId}")
             return
@@ -488,6 +736,7 @@ class CallLane(
         val added = live.addRemoteCandidates(candidates)
         candidatesReceived += added
         log("call: ${machine.callId} learned $added of ${candidates.size} remote candidates")
+        log("DIAG_ICE_RX | count=${candidates.size} | typesCsv=${diagTypes(candidates)} | added=$added")
     }
 
     /**
@@ -497,7 +746,7 @@ class CallLane(
      * [CallStateMachine.tick], which is the only place a timeout is evaluated.
      */
     fun tick(nowMs: Long = System.currentTimeMillis()) {
-        apply(machine.tick(nowMs), nowMs)
+        synchronized(drive) { apply(machine.tick(nowMs), nowMs) }
     }
 
     /**
@@ -513,7 +762,13 @@ class CallLane(
     fun mediaTick(nowMs: Long = System.currentTimeMillis()): IceCandidate? {
         val live = leg ?: return null
         val selected = live.tick(nowMs)
-        if (selected != null || live.isClosed) return selected
+        // DIAG_PATH / DIAG_JITTER — the periodic snapshot iOS and Android write, ~every 2 s.
+        if (nowMs - lastPathDiagMs >= PATH_DIAG_INTERVAL_MS) {
+            lastPathDiagMs = nowMs
+            runCatching { live.diagSnapshot(nowMs).forEach(log) }
+        }
+        // A call carried by the :8089 relay alone has a media path too (row 2.1-t).
+        if (selected != null || live.isClosed || live.relayCarrying(nowMs)) return selected
 
         // THE MEDIA-PATH WATCHDOG. See MEDIA_PATH_TIMEOUT_MS — a connected call whose
         // hole punch never lands is the silent call this whole lane exists to avoid, and
@@ -533,9 +788,37 @@ class CallLane(
                         "rather than left connected in silence",
                 ),
             )
-            apply(machine.hangUp(CallEndReason.CONNECTION_LOST, nowMs), nowMs)
+            synchronized(drive) { apply(machine.hangUp(CallEndReason.CONNECTION_LOST, nowMs), nowMs) }
         }
         return null
+    }
+
+    /**
+     * The peer hung up ON THE MEDIA PATH — an authenticated in-band `0x0D` opened under this
+     * call's session key (only the peer holds it), so it is fed to the state machine exactly
+     * as the peer's signalled `callEnd` would be: same current-peer and callId gates, same
+     * iOS grace windows, same `Ended` event and the same call-history row. Idempotent: once
+     * the call has ended the machine refuses it as WRONG_STATE.
+     */
+    internal fun onInBandCallEnd(callId: String, reason: CallEndReason, nowMs: Long = System.currentTimeMillis()) {
+        synchronized(drive) {
+            val peer = machine.peer ?: return
+            if (!CallStateMachine.sameCallId(machine.callId, callId) || machine.state != CallState.IN_CALL) return
+            // Stamped on the clock the machine judges freshness with (ServerClock), so a
+            // skewed PC never reads its own authenticated in-band hang-up as stale.
+            val packet = CallPacket.Decoded(
+                CallPacket.Type.CALL_END, com.oshi.desktop.net.ServerClock.nowMs(nowMs),
+                reason.wire.toByteArray(Charsets.UTF_8),
+            )
+            val decision = machine.onPacket(from = peer, packet = packet, nowMs = nowMs, envelopeCallId = callId)
+            val refusal = apply(decision, nowMs)
+            if (refusal == CallRefusal.NONE) {
+                inBandEndsApplied++
+                log("call: $callId ended by the peer's in-band hang-up (${reason.wire})")
+            } else {
+                log("call: $callId in-band hang-up not applied — $refusal")
+            }
+        }
     }
 
     /**
@@ -546,6 +829,7 @@ class CallLane(
      * without going through the state machine.
      */
     fun closeMedia() {
+        muted = false
         val (old, timer) = synchronized(mediaLock) {
             val pair = leg to mediaTimer
             leg = null
@@ -594,12 +878,27 @@ class CallLane(
         // IN_CALL, and `leg` is assigned nowhere else. Left in, it would be a line no
         // fixture can exercise — the same thing `IceCandidateCodec.encode`'s removed
         // length check was, found the same way.
-        val spec = CallMediaSpec(action.callId, action.sessionKey, action.nonceSalt, action.isCaller)
+        val spec = CallMediaSpec(
+            action.callId, action.sessionKey, action.nonceSalt, action.isCaller, video = machine.isVideo,
+            wbAdpcm = action.wbAdpcm,
+            opus = action.opus,
+            selfKey = myAddress, peerKey = action.peer,
+            wsUpgradeHeaders = transport::webSocketUpgradeHeaders,
+            // __CALL_MEDIA_AUTH_DESKTOP_2026_09_23__ contract §2: this call's relay token.
+            relayToken = {
+                val r = transport.relayToken(myAddress, action.peer, action.callId)
+                if (r.token == null) log("call: ${action.callId} relay token not issued (${r.code} ${r.reason})")
+                else log("call: ${action.callId} relay token issued (mode ${r.token.mode})")
+                r.token
+            },
+            signedGet = transport::signedGetHeaders,
+        )
         val opened = try {
             opener.open(spec, log).also { fresh ->
                 fresh.onLocalCandidates = { candidates ->
                     sendCandidates(action.peer, action.callId, candidates)
                 }
+                fresh.onInBandCallEnd = { reason -> onInBandCallEnd(action.callId, reason) }
                 // May throw; `CallMediaLeg.start` releases both halves before it does.
                 // The machine's clock, not the wall clock: in production they are the same
                 // value and in a test they must not be two different ones, or the watchdog
@@ -623,6 +922,46 @@ class CallLane(
             return
         }
 
+        log(
+            "DIAG_CODEC | role=${if (action.isCaller) "caller" else "callee"} | useOpus=${action.opus} | " +
+                "useWbAdpcm=${action.wbAdpcm} | isVideo=${machine.isVideo}",
+        )
+        opened.audio?.muted = muted
+        // __VIDEO_PLI_SIGNAL_2026_09_23__ Every keyframe request the video half puts on the
+        // media channel also goes out as a sealed call signal (≤ 1/s): iOS up to b145 reads
+        // `0x0B` ONLY there. Typed `keyframeRequest` so the call server budgets it as one
+        // (__CALL_VIDEO_SIGNAL_2026_09_23__). Posted off the socket thread, never blocking
+        // media, and a refusal (a 429 during a storm) is logged, never shown as a problem.
+        opened.video?.signalKeyframeRequest = {
+            val send = CallAction.Send(
+                peer = action.peer,
+                type = CallPacket.Type.REQUEST_KEYFRAME,
+                payload = ByteArray(0),
+                envelopeType = KEYFRAME_REQUEST_ENVELOPE_TYPE,
+                callId = action.callId,
+            )
+            Thread({ runCatching { deliver(send, System.currentTimeMillis(), quiet = true) } }, "oshi-pli-signal")
+                .apply { isDaemon = true; start() }
+        }
+        // __VIDEO_TOGGLE_SIGNAL_2026_10_29__ The camera on/off announcement goes out as a
+        // sealed call signal too. The desktop has READ this copy since 2026-09-23 and never
+        // sent one, which row 2.1-c half-recorded: a released iPhone reads pause/resume
+        // ONLY here, so our media-channel `0x0C`/`0x0D` reached it and was dropped. The
+        // sealed `0x0E`+`0x06`/`0x07` both phones read meant the indicator still arrived,
+        // so this closes an asymmetry rather than a silence. 9 B sealed = 37 B, under the
+        // server's 48-byte `control` ceiling, so it is budgeted and coalesced exactly like
+        // the keyframe copy above. Off the socket thread; a refusal is logged, never shown.
+        opened.video?.signalCameraToggle = { on ->
+            val send = CallAction.Send(
+                peer = action.peer,
+                type = if (on) CallPacket.Type.VIDEO_RESUMED else CallPacket.Type.VIDEO_PAUSED,
+                payload = ByteArray(0),
+                envelopeType = VIDEO_TOGGLE_ENVELOPE_TYPE,
+                callId = action.callId,
+            )
+            Thread({ runCatching { deliver(send, System.currentTimeMillis(), quiet = true) } }, "oshi-vtoggle-signal")
+                .apply { isDaemon = true; start() }
+        }
         synchronized(mediaLock) {
             leg = opened
             if (mediaProbeIntervalMs > 0) mediaTimer = startProbeTimer()
@@ -668,12 +1007,16 @@ class CallLane(
         if (post is CallSignalClient.Post.Queued) {
             candidatesSent++
             log("call: $callId signalled ${candidates.size} candidates")
+            log("DIAG_ICE_TX | count=${candidates.size} | typesCsv=${diagTypes(candidates)} | sentVia=call_signal")
         }
         // A refusal is already counted and announced by deliver(). It is NOT fatal the way
         // a refused offer is: the peer may still reach us from its own candidates, and
         // ending a live call because one of two candidate signals bounced would be worse
         // than the degraded path it is trying to avoid.
     }
+
+    private fun diagTypes(candidates: List<IceCandidate>): String =
+        candidates.joinToString(",") { it.type.name.lowercase() }
 
     private fun apply(decision: CallDecision, nowMs: Long): CallRefusal {
         for (action in decision.actions) perform(action, nowMs)
@@ -682,7 +1025,20 @@ class CallLane(
 
     private fun perform(action: CallAction, nowMs: Long) {
         when (action) {
-            is CallAction.Send -> deliver(action, nowMs)
+            is CallAction.Send -> {
+                // WE are ending a live call: tell the peer on the media path too, as both
+                // phones do, BEFORE StopMedia closes the leg. A remote-driven end emits no
+                // Send, so this never echoes a hang-up back to the peer that sent it.
+                if (action.type == CallPacket.Type.CALL_END) {
+                    val live = leg
+                    if (live != null && !live.isClosed) {
+                        val reason = CallEndReason.fromWire(String(action.payload, Charsets.UTF_8))
+                            ?: CallEndReason.HUNG_UP
+                        inBandEndsSent += runCatching { live.sendInBandCallEnd(reason) }.getOrDefault(0)
+                    }
+                }
+                deliver(action, nowMs)
+            }
 
             is CallAction.StartRinging -> onEvent(
                 CallEvent.Ringing(
@@ -724,20 +1080,26 @@ class CallLane(
                     callLog += entry
                     while (callLog.size > MAX_CALL_LOG) callLog.removeAt(0)
                 }
+                // Same line as iOS `📞 CALL ENDED - <reason>` (call-end reason in the export).
+                log("📞 CALL ENDED - ${action.reason.wire} | connected=${action.connected} | incoming=${entry.incoming}")
                 // Best effort, and never load-bearing — see CallSignalClient.endCall.
-                transport.endCall(action.callId)
+                transport.endCall(action.callId, myAddress)
                 onEvent(CallEvent.Ended(action.peer, action.callId, action.reason, action.connected))
             }
         }
     }
 
-    private fun deliver(send: CallAction.Send, nowMs: Long): CallSignalClient.Post {
+    private fun deliver(send: CallAction.Send, nowMs: Long, quiet: Boolean = false): CallSignalClient.Post {
         val peerKey = ContactQr.canonicalAddress(send.peer)?.let { Base64.getDecoder().decode(it) }
         if (peerKey == null) {
             sendFailures++
             return CallSignalClient.Post.Refused(-1, "'${send.peer}' is not an OSHI address")
         }
-        val packet = CallPacket.encode(send.type, nowMs, send.payload)
+        // __CALL_CLOCK_SKEW_DESKTOP_2026_11_21__ the header instant is judged by the PEER
+        // (iOS: >5 s in the future or >30 s old is dropped), so it is stamped on the server's
+        // clock when this PC is >= 5 s off. A healthy clock stamps exactly nowMs, as before.
+        val stampMs = com.oshi.desktop.net.ServerClock.nowMs(nowMs)
+        val packet = CallPacket.encode(send.type, stampMs, send.payload)
         val sealed = CallSignalCrypto.seal(myPrivateKey, peerKey, packet)
         val envelope = CallSignalEnvelope(
             // base64url on BOTH sides of the envelope, because that is what the server keys
@@ -753,7 +1115,11 @@ class CallLane(
             isVideoCall = machine.isVideo,
             senderDeviceId = deviceId,
         )
-        val post = transport.sendSignal(envelope, nowMs)
+        val post = transport.sendSignal(envelope, stampMs)
+        if (post is CallSignalClient.Post.Refused && quiet) {
+            log("call: ${send.type} for ${send.callId} not delivered — ${post.code}: ${post.reason}")
+            return post
+        }
         if (post is CallSignalClient.Post.Refused) {
             sendFailures++
             log("call: could not send ${send.type} for ${send.callId} — ${post.code}: ${post.reason}")
@@ -776,11 +1142,26 @@ class CallLane(
 
     private fun refusalText(refusal: CallRefusal): String = when (refusal) {
         CallRefusal.BLOCKED -> "that contact is blocked"
+        CallRefusal.UNAVAILABLE -> "unavailable"
         CallRefusal.BUSY -> "this client is already on a call"
         else -> refusal.name.lowercase().replace('_', ' ')
     }
 
     companion object {
+        /** __CALL_VIDEO_SIGNAL_2026_09_23__ the envelope `type` of an in-call keyframe request. */
+        const val KEYFRAME_REQUEST_ENVELOPE_TYPE = "keyframeRequest"
+
+        /**
+         * __VIDEO_TOGGLE_SIGNAL_2026_10_29__ The outer JSON hint on a camera on/off copy.
+         *
+         * Deliberately NOT one of the server's `CRITICAL_SIGNAL_TYPES` or
+         * `OFFER_SIGNAL_TYPES`: at 37 sealed bytes it falls under `CONTROL_MAX_SEALED_BYTES`
+         * (48) and is budgeted as `control` — burst 4, refill 2/s, coalesced per
+         * (sender, callId) — which is what a rare, idempotent announcement wants. The media
+         * channel carries the same toggle unbudgeted, so a coalesced copy costs nothing.
+         */
+        const val VIDEO_TOGGLE_ENVELOPE_TYPE = "videoToggle"
+
 
         /**
          * The sentence every surface that starts a call **on the media-less path** is
@@ -820,10 +1201,9 @@ class CallLane(
          *
          * It exists because [CallStateMachine] has watchdogs on RINGING and CONNECTING and
          * none on IN_CALL — correctly, because before this lane had media an IN_CALL state
-         * could not be wrong. Now it can: the hole punch can simply fail, and with no TURN
-         * under this package (see
-         * [com.oshi.desktop.call.transport.MediaSocket]'s TURN IS NOT HERE) there is
-         * nowhere else for the audio to go. Without this, that call stays "connected" and
+         * could not be wrong. Now it can: the hole punch, the TURN allocation and the
+         * `:8089` relay can all fail (row 2.1-t), and then there is nowhere for the audio
+         * to go. Without this, that call stays "connected" and
          * silent until a person gives up — the exact failure this whole row is about.
          *
          * It also covers a case the state machine cannot: a peer whose own media failed
@@ -833,6 +1213,9 @@ class CallLane(
          * touched; this watchdog is what makes the outcome survivable anyway.
          */
         const val MEDIA_PATH_TIMEOUT_MS = 20_000L
+
+        /** DIAG_PATH / DIAG_JITTER cadence — the phones' 2 s snapshot. */
+        const val PATH_DIAG_INTERVAL_MS = 2_000L
 
         /**
          * How long a processed signal stays remembered.

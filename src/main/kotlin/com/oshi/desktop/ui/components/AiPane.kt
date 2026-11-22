@@ -1,43 +1,45 @@
 package com.oshi.desktop.ui.components
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.oshi.desktop.i18n.t
 import com.oshi.desktop.ui.OshiTheme
 import com.oshi.desktop.ui.state.AiConsoleModel
+import java.awt.FileDialog
+import java.awt.Frame
+import java.io.File
 
 /**
- * The AI destination — PARITY.md row 2.5.
+ * The AI destination — PARITY.md row 2.5, redrawn as the phones' AI tab: a chat with the
+ * local model, suggestion chips, and the model chosen with a file picker instead of a
+ * typed path.
  *
- * The screen is built around the row's own honesty: the plumbing is shared with the Android
- * app (`service/LlamaCpp.kt`, compiled out of that tree so both load a shim built from one
- * header) and **no inference has ever run on this client**. So the first thing this draws is
- * not a chat box, it is the state of the two things that have to be true first — a native
- * library and a model file — and the composer appears only when they are.
- *
- * The one claim it makes on screen is the one that is structurally true: nothing leaves the
- * machine. There is no HTTP client anywhere in this path. A local model is the only kind
- * OSHI has ever had, on any platform.
+ * The honesty of the old screen is kept, just shorter: when the llama.cpp library or the
+ * model file is missing, the setup card says so before anything else, and the composer
+ * appears only when a question could actually be answered. Nothing leaves the machine —
+ * there is no HTTP client anywhere in this path.
  */
 @Composable
 fun AiPane(
@@ -46,203 +48,162 @@ fun AiPane(
     onAsk: (String) -> Unit,
     onForget: () -> Unit,
     modifier: Modifier = Modifier,
-) {
-    var modelPath by remember { mutableStateOf("") }
+    /** Injectable so a render does not open a native dialog. */
+    pickModel: () -> String? = ::pickGgufFile,
+) = ProvideLocaleDirection {
     var question by remember { mutableStateOf("") }
-
-    Column(
-        modifier
-            .fillMaxSize()
-            .background(OshiTheme.surface)
-            .verticalScroll(rememberScrollState())
-            .padding(OshiTheme.xl),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Column(Modifier.widthIn(max = 720.dp)) {
-
-            PaneHeading("AI", "A model that runs here. Nothing is uploaded, to OSHI or to anyone else.")
-
-            // SAID BEFORE ANYTHING ELSE, because both prerequisites are missing for almost
-            // everyone who will ever open this screen and neither is something they did
-            // wrong. The installer ships no weights — a messenger download is not where
-            // gigabytes of model belong — and it ships no llama.cpp native either, so a
-            // plain install can generate nothing whatever is typed here. A screen that let
-            // someone configure a model and then failed on the first question would have
-            // wasted their time to tell them something it knew at the start.
-            if (state.modelPath == null) {
-                NoticeCard(
-                    "This needs two things OSHI does not install: a llama.cpp native library on " +
-                        "java.library.path, and a .gguf model file. Without both, nothing on this " +
-                        "screen can answer — and everything else in the app works regardless.",
-                    error = false,
-                )
-                Spacer(Modifier.height(OshiTheme.lg))
+    var setupOpen by remember { mutableStateOf(false) }
+    val ready = state.modelPath != null && state.nativeProblem == null
+    Column(modifier.fillMaxSize().background(OshiTheme.paneGround)) {
+        ToolHeader(t("ai_assistant"), t("ai_on_device_footer"), ToolGlyph.SPARKLE) {
+            state.modelPath?.let { path ->
+                ToolPill(File(path).name, modifier = Modifier.widthIn(max = 260.dp))
             }
-
-            state.notice?.let {
-                NoticeCard(it.text, it.severity == com.oshi.desktop.ui.state.Severity.ERROR)
-                Spacer(Modifier.height(OshiTheme.lg))
-            }
-
-            // ---------------------------------------------------------------- prerequisites
-            PaneCard {
-                Text("Model", style = OshiTheme.typography.titleMedium, color = Ink.strong)
-                Spacer(Modifier.height(OshiTheme.xs))
-                if (state.modelPath == null) {
-                    Text(
-                        "No model is configured. OSHI ships no weights — a messenger installer is " +
-                            "not where gigabytes of model belong — so point this at a .gguf file you " +
-                            "already have.",
-                        style = OshiTheme.typography.bodySmall,
-                        color = Ink.soft,
-                    )
-                } else {
-                    LabelledValue("In use", state.modelPath, mono = true)
-                }
-                Spacer(Modifier.height(OshiTheme.md))
-                PasteField(modelPath, { modelPath = it }, "/path/to/model.gguf")
-                Spacer(Modifier.height(OshiTheme.md))
-                PrimaryButton("Use this model", enabled = modelPath.isNotBlank()) {
-                    onUseModel(modelPath)
-                    modelPath = ""
-                }
-
-                if (state.nativeProblem != null) {
-                    Spacer(Modifier.height(OshiTheme.lg))
-                    NoticeCard(
-                        "The llama.cpp native library did not load: ${state.nativeProblem}. " +
-                            "Until it does, no answer can be generated here whatever model is set.",
-                        error = true,
-                    )
-                }
-            }
-
-            Spacer(Modifier.height(OshiTheme.lg))
-
-            // ---------------------------------------------------------------- the exchange
-            PaneCard {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Ask", style = OshiTheme.typography.titleMedium, color = Ink.strong, modifier = Modifier.weight(1f))
-                    if (state.turns.isNotEmpty()) TextAction("Clear", onForget)
-                }
-                Spacer(Modifier.height(OshiTheme.xs))
-                Text(
-                    if (state.canAsk) "Runs on this CPU. The window will not respond while it generates."
-                    else "Configure a model first — there is nothing to ask yet.",
-                    style = OshiTheme.typography.bodySmall,
-                    color = Ink.soft,
-                )
-                Spacer(Modifier.height(OshiTheme.md))
-
-                PasteField(question, { question = it }, "Ask anything…")
-                Spacer(Modifier.height(OshiTheme.md))
-                PrimaryButton(
-                    if (state.busy) "Generating…" else "Ask",
-                    enabled = state.canAsk && question.isNotBlank(),
+            if (state.turns.isNotEmpty()) ToolIconButton(ToolGlyph.COMPOSE, t("ai_new_chat")) { onForget() }
+            ToolIconButton(ToolGlyph.SETTINGS, t("pc.ai.model.title"), active = setupOpen) { setupOpen = !setupOpen }
+        }
+        Hairline()
+        Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
+            if (!ready || setupOpen) {
+                Column(
+                    Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(OshiTheme.xl),
+                    horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    onAsk(question)
-                    question = ""
-                }
-
-                if (state.turns.isNotEmpty()) {
-                    Spacer(Modifier.height(OshiTheme.lg))
-                    for (t in state.turns.asReversed()) {
-                        TurnCard(t)
-                        Spacer(Modifier.height(OshiTheme.md))
+                    Column(Modifier.widthIn(max = 640.dp), verticalArrangement = Arrangement.spacedBy(OshiTheme.lg)) {
+                        if (!ready) ToolEmptyState(t("ai_offline_assistant"), t("pc.ai.setup.body"), mascot = "thinking")
+                        state.notice?.let { ToolNotice(it.text, if (it.severity == com.oshi.desktop.ui.state.Severity.ERROR) ToolTone.ERROR else ToolTone.SUCCESS) }
+                        ModelCard(state, onUseModel, pickModel)
+                        ToolCard {
+                            for ((g, k) in listOf(ToolGlyph.SHIELD to t("ai_feature_privacy"), ToolGlyph.WIFI to t("ai_feature_offline"), ToolGlyph.TEXT to t("ai_feature_text"), ToolGlyph.EYE_OFF to t("ai_feature_no_image"))) {
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(OshiTheme.md)) {
+                                    ToolIcon(g, OshiTheme.brand, 18.dp)
+                                    Text(k, style = ToolType.body, color = Ink.strong)
+                                }
+                            }
+                        }
                     }
                 }
+            } else {
+                Conversation(state, onAsk = onAsk, modifier = Modifier.fillMaxSize())
             }
-
-            Spacer(Modifier.height(OshiTheme.xl))
+        }
+        if (ready && !setupOpen) {
+            Hairline()
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = OshiTheme.xl, vertical = OshiTheme.md),
+                verticalAlignment = Alignment.Bottom,
+                horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm),
+            ) {
+                ToolField(
+                    question, { question = it }, t("ai_ask_anything"),
+                    Modifier.weight(1f).onEnter { if (state.canAsk && question.isNotBlank()) { onAsk(question); question = "" } },
+                    enabled = !state.busy,
+                    container = OshiTheme.surfaceElevated,
+                )
+                Box(
+                    Modifier.size(40.dp).clip(CircleShape)
+                        .background(if (state.canAsk && question.isNotBlank()) OshiTheme.brandGradient else androidx.compose.ui.graphics.SolidColor(OshiTheme.separator))
+                        .clickable(enabled = state.canAsk && question.isNotBlank(), role = Role.Button) { onAsk(question); question = "" }
+                        .semantics { contentDescription = t("ai.a11y_send_message") },
+                    contentAlignment = Alignment.Center,
+                ) { ToolIcon(ToolGlyph.SEND, Color.White, 18.dp) }
+            }
         }
     }
 }
 
 @Composable
-private fun TurnCard(turn: AiConsoleModel.Turn) {
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .clip(OshiTheme.radiusMd)
-            .background(OshiTheme.surface)
-            .padding(OshiTheme.md),
-    ) {
-        Text(turn.question, style = OshiTheme.typography.labelLarge, color = Ink.soft)
-        Spacer(Modifier.height(OshiTheme.sm))
-        if (turn.ok) {
-            Text(turn.answer, style = OshiTheme.typography.bodyMedium, color = Ink.strong)
-        } else {
-            // A refusal is rendered as a refusal. An empty bubble where an answer should be
-            // is how a user concludes the model is "thinking" forever.
-            Row(verticalAlignment = Alignment.Top) {
-                GlyphIcon(Glyph.ALERT, OshiTheme.danger, 16.dp)
-                Spacer(Modifier.widthIn(min = OshiTheme.sm))
-                Text(turn.detail.orEmpty(), style = OshiTheme.typography.bodySmall, color = Ink.strong)
+private fun ModelCard(state: AiConsoleModel.AiState, onUseModel: (String) -> Unit, pickModel: () -> String?) {
+    var path by remember { mutableStateOf("") }
+    ToolCard(title = t("pc.ai.model.title"), icon = ToolGlyph.CHIP) {
+        if (state.modelPath != null) ToolValue(t("pc.ai.model.inUse"), state.modelPath, mono = true)
+        else ToolHint(t("pc.ai.model.none"))
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm)) {
+            ToolButton(t("pc.ai.model.choose"), icon = ToolGlyph.FOLDER, style = ToolButtonStyle.PRIMARY) { pickModel()?.let(onUseModel) }
+        }
+        ToolField(path, { path = it }, "/path/to/model.gguf", Modifier.fillMaxWidth(), mono = true) {
+            if (path.isNotBlank()) ToolIconButton(ToolGlyph.CHECK, t("pc.ai.model.use"), size = 28.dp) { onUseModel(path); path = "" }
+        }
+        state.nativeProblem?.let { ToolNotice(t("pc.ai.nativeMissing", it), ToolTone.WARNING) }
+    }
+}
+
+@Composable
+private fun Conversation(state: AiConsoleModel.AiState, onAsk: (String) -> Unit, modifier: Modifier) {
+    val list = rememberLazyListState()
+    LaunchedEffect(state.turns.size, state.busy) { if (state.turns.isNotEmpty()) list.animateScrollToItem(state.turns.size + (if (state.busy) 1 else 0)) }
+    if (state.turns.isEmpty() && !state.busy) {
+        Column(modifier.padding(OshiTheme.xl), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+            ToolEmptyState(t("ai_offline_assistant"), t("ai_powered_local"), mascot = "wave")
+            Column(Modifier.widthIn(max = 520.dp), verticalArrangement = Arrangement.spacedBy(OshiTheme.sm)) {
+                for (s in listOf(t("ai_suggest_email"), t("ai_suggest_poem"), t("ai_suggest_quantum"), t("ai_suggest_capitals"))) {
+                    ToolRow(s, icon = ToolGlyph.SPARKLE, onClick = { onAsk(s) }, modifier = Modifier.clip(OshiTheme.radiusMd).background(OshiTheme.surfaceElevated))
+                }
             }
         }
-        if (turn.ok && turn.detail != null) {
-            Spacer(Modifier.height(OshiTheme.sm))
-            Text(turn.detail, style = OshiTheme.typography.labelSmall, color = Ink.soft)
+        return
+    }
+    LazyColumn(modifier, state = list, contentPadding = PaddingValues(horizontal = OshiTheme.xl, vertical = OshiTheme.lg), verticalArrangement = Arrangement.spacedBy(OshiTheme.md)) {
+        items(state.turns) { turn ->
+            Column(verticalArrangement = Arrangement.spacedBy(OshiTheme.sm)) {
+                Bubble(turn.question, mine = true)
+                if (turn.ok) Bubble(turn.answer, mine = false, footnote = turn.detail)
+                else Bubble(turn.detail.orEmpty(), mine = false, error = true)
+            }
+        }
+        if (state.busy) item {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm)) {
+                AssistantAvatar()
+                CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = OshiTheme.brand)
+                Text(t("ai.a11y_thinking"), style = ToolType.caption, color = Ink.soft)
+            }
         }
     }
 }
 
-/** A one-line banner inside a scrolling pane — the same shape the thread's notice bar uses. */
 @Composable
-fun NoticeCard(text: String, error: Boolean) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .clip(OshiTheme.radiusMd)
-            .background((if (error) OshiTheme.danger else OshiTheme.success).copy(alpha = 0.10f))
-            .padding(OshiTheme.md),
-        verticalAlignment = Alignment.Top,
-        horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm),
-    ) {
-        GlyphIcon(
-            if (error) Glyph.ALERT else Glyph.CHECK,
-            if (error) OshiTheme.danger else OshiTheme.success,
-            16.dp,
-        )
-        Text(text, style = OshiTheme.typography.bodySmall, color = Ink.strong)
+private fun AssistantAvatar() {
+    Box(Modifier.size(30.dp).clip(CircleShape).background(OshiTheme.brandGradient), contentAlignment = Alignment.Center) {
+        ToolIcon(ToolGlyph.SPARKLE, Color.White, 16.dp)
     }
 }
 
-/** A search field with a magnifier — shared by Places and anywhere else that searches. */
 @Composable
-fun SearchBox(
-    value: String,
-    onValue: (String) -> Unit,
-    placeholder: String,
-    onSubmit: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Row(
-        modifier
-            .fillMaxWidth()
-            .clip(OshiTheme.pill)
-            .background(OshiTheme.surface)
-            .padding(horizontal = OshiTheme.md, vertical = OshiTheme.sm),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        GlyphIcon(Glyph.SEARCH, Ink.soft, 16.dp)
-        Spacer(Modifier.widthIn(min = OshiTheme.sm))
-        Box(Modifier.weight(1f)) {
-            if (value.isEmpty()) {
-                Text(placeholder, style = OshiTheme.typography.bodyMedium, color = Ink.soft)
+private fun Bubble(text: String, mine: Boolean, footnote: String? = null, error: Boolean = false) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start, verticalAlignment = Alignment.Top) {
+        if (!mine) { AssistantAvatar(); Spacer(Modifier.width(OshiTheme.sm)) }
+        Column(
+            Modifier.widthIn(max = 620.dp)
+                .clip(RoundedCornerShape(18.dp))
+                .then(
+                    when {
+                        mine -> Modifier.background(OshiTheme.brandGradient)
+                        error -> Modifier.background(OshiTheme.danger.copy(alpha = 0.12f))
+                        else -> Modifier.background(OshiTheme.surfaceElevated)
+                    },
+                )
+                .padding(horizontal = OshiTheme.lg, vertical = OshiTheme.md),
+            verticalArrangement = Arrangement.spacedBy(OshiTheme.xs),
+        ) {
+            if (error) Row(horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm)) {
+                ToolIcon(ToolGlyph.ALERT, OshiTheme.danger, 16.dp)
+                Text(text, style = ToolType.body, color = Ink.strong)
+            } else SelectionContainer {
+                Text(text, style = ToolType.natural.copy(fontSize = 14.sp), color = if (mine) Ink.onBrandStrong else Ink.strong)
             }
-            androidx.compose.foundation.text.BasicTextField(
-                value = value,
-                onValueChange = onValue,
-                singleLine = true,
-                textStyle = OshiTheme.typography.bodyMedium.copy(color = Ink.strong),
-                cursorBrush = androidx.compose.ui.graphics.SolidColor(OshiTheme.brand),
-                keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSearch = { onSubmit() }),
-                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
-                    imeAction = androidx.compose.ui.text.input.ImeAction.Search,
-                ),
-                modifier = Modifier.fillMaxWidth(),
-            )
+            if (footnote != null) Text(footnote, style = ToolType.caption, color = if (mine) Ink.onBrandSoft else Ink.soft, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
+}
+
+private fun pickGgufFile(): String? {
+    val dialog = com.oshi.desktop.ui.DialogOwner.fileDialog(t("pc.ai.model.choose"), FileDialog.LOAD)
+    return try {
+        dialog.setFilenameFilter { _, name -> name.endsWith(".gguf", ignoreCase = true) }
+        // __FILEDIALOG_FILTER_IS_A_NOOP_ON_WINDOWS_2026_11_19__ setFilenameFilter does nothing in
+        // the Windows native dialog; a "*.gguf" file name is what that dialog filters on.
+        if (com.oshi.desktop.store.DesktopPaths.isWindows) dialog.file = "*.gguf"
+        dialog.isVisible = true
+        dialog.file?.takeIf { it.endsWith(".gguf", ignoreCase = true) }?.let { File(dialog.directory, it).absolutePath }
+    } finally { dialog.dispose() }
 }
