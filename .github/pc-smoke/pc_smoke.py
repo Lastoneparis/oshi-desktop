@@ -578,6 +578,16 @@ def count_app_processes():
     return len(r.stdout.split())
 
 
+def concurrent_start_supported():
+    """Built from the branch: always (that IS the test). Published files: 1.6.4 and later."""
+    if os.environ.get("SMOKE_SOURCE", "build") != "published":
+        return True
+    try:
+        return tuple(int(x) for x in os.environ.get("TEST_VERSION", "").split(".")[:3]) >= (1, 6, 4)
+    except ValueError:
+        return True
+
+
 def run_all(gui_exe, console_exe, homes, app):
     # 1 ------------------------------------------------------------------ probe
     try:
@@ -590,7 +600,16 @@ def run_all(gui_exe, console_exe, homes, app):
 
     # 2 ------------------------------------------------------------------ REPL flows, production relay
     alice_home, bob_home = homes / "Alice", homes / "Bob"
+    # __CONCURRENT_KEYRING_PROBE_2026_11_22__ ALICE and BOB start in the SAME instant: two
+    # OSHI processes probing the keyring at once is a real user's case (window + console, two
+    # profiles), and up to 1.6.3 every probe shared ONE keyring item, so ~1 run in 3 one process
+    # cleared the other's before it was read back and ALICE's fresh profile was told "no OS key
+    # store is available". Fixed in the app after 1.6.3; the PUBLISHED 1.6.3 and older still race,
+    # so for them BOB waits until ALICE has opened (her check itself is unchanged).
     alice = Repl(console_exe, alice_home, "Alice PC", tag="alice")
+    if not concurrent_start_supported():
+        print("[info] the version under test predates the concurrent keyring-probe fix: BOB starts after ALICE", flush=True)
+        alice.address()
     bob = Repl(console_exe, bob_home, "Bob PC", passphrase="ci-bob-throwaway", tag="bob")
     a_addr, b_addr = alice.address(), bob.address()
     record("ALICE opens on the real OS key store (no passphrase)", bool(a_addr), alice.text_since(0)[-1500:])
