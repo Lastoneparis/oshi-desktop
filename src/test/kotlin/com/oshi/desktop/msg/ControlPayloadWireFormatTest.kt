@@ -433,7 +433,13 @@ class ControlPayloadWireFormatTest {
         assumeTrue("iOS tree not present on this machine", f.isFile)
         val text = f.readText()
         val block = text.substring(text.indexOf("enum ReactionEmoji"), text.indexOf("var displayEmoji"))
-        val shipped = Regex("""case\s+\w+\s*=\s*"([^"]+)"""").findAll(block).map { it.groupValues[1] }.toList()
+        // __OSHI_SMILE_REACTION_2026_11_09__ iOS's `oshiSmile` is written with Swift
+        // `\u{2B55}\u{1F60A}` escapes (so the exact code points are reviewable); a raw
+        // value is compared as the STRING Swift builds, not as its source spelling.
+        val swiftEscape = Regex("""\\u\{([0-9A-Fa-f]{1,6})\}""")
+        val shipped = Regex("""case\s+\w+\s*=\s*"([^"]+)"""").findAll(block).map { m ->
+            swiftEscape.replace(m.groupValues[1]) { String(Character.toChars(it.groupValues[1].toInt(16))) }
+        }.toList()
         assertEquals(
             "iOS's ReactionEmoji has changed. A whitelist that disagrees with it either " +
                 "refuses an emoji iPhones render, or emits one they silently rewrite to 👍.",
@@ -517,6 +523,26 @@ class ControlPayloadWireFormatTest {
         val block = text.substring(text.indexOf("static let catalog"), text.indexOf("Named accessors"))
         val shipped = Regex("""Entry\("([^"]+)",\s*\.(\w+)\)""").findAll(block)
             .map { it.groupValues[1] to it.groupValues[2].uppercase() }.toList()
+        // __A_SCANNER_THAT_SKIPS_WHAT_IT_CANNOT_READ_REPORTS_SUCCESS_2026_11_04__
+        //
+        // The regex above only matches an entry whose prefix is a quoted LITERAL.
+        // `💓ALIVE💓` was added to iOS as `Entry(OSHIControlPayload.aliveCheckInPrefix,
+        // .rendered)` — a constant reference — and this test went green on a
+        // 29-entry iOS catalog against a 28-entry desktop one, because the entry
+        // it could not read simply was not counted.
+        //
+        // That is the failure mode of every source scanner: silence from "nothing
+        // is wrong" is indistinguishable from silence from "I could not look".
+        // Counting the `Entry(` occurrences and insisting the regex accounted for
+        // all of them is what makes the difference audible.
+        val declared = Regex("""Entry\(""").findAll(block).count()
+        assertEquals(
+            "iOS declares $declared catalog entries but only ${shipped.size} are written as " +
+                "quoted literals, so the rest are invisible to this comparison and the " +
+                "drift it exists to catch would pass unnoticed. Write the entry as a " +
+                "literal, the way every other one is.",
+            declared, shipped.size,
+        )
         val mine = ControlPrefix.catalog.map { it.prefix to it.kind.name }
         assertEquals(
             "The desktop control-payload catalog has drifted from iOS's. A partial catalog is " +

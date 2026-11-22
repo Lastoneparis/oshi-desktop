@@ -60,6 +60,11 @@ package com.oshi.desktop.group
  */
 object GroupUpdateAuthorizer {
 
+    const val REASON_ADMIN = "admin"
+
+    /** __GROUP_VERSION_FREEZE_2026_11_20__ the largest forward jump one update may make. */
+    const val MAX_VERSION_STEP = 1024
+
     /** iOS `authorizeGroupUpdate` (`OSHI/GroupMessaging.swift:863-905`). */
     fun authorize(
         currentMemberKeys: List<String>,
@@ -101,7 +106,7 @@ object GroupUpdateAuthorizer {
         if (currentAdminKeys.any { GroupIdentity.canonicalIdentity(it) == senderKey }) {
             return GroupUpdateDecision(
                 apply = true, keepAdminSet = false, keepMembership = false, keepName = false,
-                reason = "admin",
+                reason = REASON_ADMIN,
             )
         }
         return when (currentType) {
@@ -169,6 +174,42 @@ object GroupUpdateAuthorizer {
         if (decision.keepMembership) merged = merged.copy(members = current.members)
         if (decision.keepName) merged = merged.copy(name = current.name)
 
+        // __GROUP_TYPE_TAKEOVER_2026_11_20__ The TYPE decides who may change everything else, so
+        // only an admin may change it. Before: `merged = incoming` carried a non-admin's `type`
+        // through, so a member of an ADMIN_ONLY group sent `type = COLLABORATIVE` once and from
+        // then on passed the "member-of-open-group" rule — add/remove anyone, rename, drop the admin.
+        if (decision.reason != REASON_ADMIN) merged = merged.copy(type = current.type)
+        if (decision.reason != REASON_ADMIN && !decision.keepMembership) {
+            // __GROUP_ADMIN_KICK_2026_11_20__ an open-group member's roster may add and drop
+            // members, but cannot drop an admin or bring back a key an admin evicted.
+            val have = merged.members.map { GroupIdentity.canonicalIdentity(it.publicKey) }.toSet()
+            val keptAdmins = current.members.filter { it.isAdmin && GroupIdentity.canonicalIdentity(it.publicKey) !in have }
+            val evicted = current.evictedMemberKeys.map(GroupIdentity::canonicalIdentity).toSet()
+            val currentKeys = current.members.map { GroupIdentity.canonicalIdentity(it.publicKey) }.toSet()
+            merged = merged.copy(
+                members = merged.members.filter {
+                    val k = GroupIdentity.canonicalIdentity(it.publicKey)
+                    k !in evicted || k in currentKeys
+                } + keptAdmins,
+            )
+        }
+        // In an ADMIN_ONLY group a member changes nothing about the group itself: picture,
+        // wallpaper, avatar, pinned message and description stay the admin's.
+        if (decision.keepName) {
+            merged = merged.copy(
+                groupPictureBase64 = current.groupPictureBase64,
+                groupPictureUpdatedAtUnixMillis = current.groupPictureUpdatedAtUnixMillis,
+                groupPictureUpdatedBy = current.groupPictureUpdatedBy,
+                groupWallpaperBase64 = current.groupWallpaperBase64,
+                groupWallpaperUpdatedAtUnixMillis = current.groupWallpaperUpdatedAtUnixMillis,
+                groupWallpaperUpdatedBy = current.groupWallpaperUpdatedBy,
+                avatar = current.avatar,
+                pinnedMessageId = current.pinnedMessageId,
+                pinnedBy = current.pinnedBy,
+                description = current.description,
+            )
+        }
+
         // Absent blob == "not in this broadcast", never "deleted" (swift:1006-1016).
         if (merged.groupPictureBase64 == null && current.groupPictureBase64 != null) {
             merged = merged.copy(
@@ -184,7 +225,118 @@ object GroupUpdateAuthorizer {
                 groupWallpaperUpdatedBy = current.groupWallpaperUpdatedBy,
             )
         }
-        return merged.copy(isMuted = current.isMuted)
+        // __GROUP_E2E_V2_2026_09_23__ spec §5.1/§5.3: evictedMemberKeys is a UNION that never
+        // shrinks (only an admin's list is taken at all); local stateVersion = max(local, incoming);
+        // an absent description is "not in this broadcast".
+        val evicted = if (decision.keepMembership || decision.keepAdminSet) current.evictedMemberKeys
+            else (current.evictedMemberKeys + merged.evictedMemberKeys)
+        // __GROUP_VERSION_FREEZE_2026_11_20__ The incoming version is sender-chosen. One
+        // definition at Int.MAX_VALUE made every later admin update "stale-version" forever.
+        // A version may move forward, but only by a bounded step.
+        val version = listOfNotNull(
+            current.stateVersion,
+            incoming.stateVersion?.let { v ->
+                val base = current.stateVersion ?: 0
+                if (v.toLong() > base.toLong() + MAX_VERSION_STEP) base + MAX_VERSION_STEP else v
+            },
+        ).maxOrNull()
+        return merged.copy(
+            isMuted = current.isMuted,
+            evictedMemberKeys = evicted.distinctBy(GroupIdentity::canonicalIdentity),
+            stateVersion = version,
+            description = merged.description ?: current.description,
+            settings = mergeSettings(current.settings, incoming.settings, decision),
+        )
+    }
+
+    /**
+     * __GROUP_INFO_SETTINGS_2026_11_20__ GROUP_INFO_SETTINGS_SPEC §2.1 receiver rule:
+     *  1. key absent ⇒ keep ours (an old build re-emits the definition without it);
+     *  2. present from an ADMIN of our copy ⇒ replace, `dissolved` OR-ed (never back to false);
+     *  3. present from anyone else (a member of ANY group type, or an unauthenticated
+     *     transport) ⇒ ignored as a whole (`settings-not-admin`).
+     */
+    fun mergeSettings(current: GroupSettings?, incoming: GroupSettings?, decision: GroupUpdateDecision): GroupSettings? {
+        if (incoming == null) return current
+        if (decision.reason != REASON_ADMIN) return current
+        return incoming.copy(dissolved = incoming.dissolved || current?.dissolved == true)
+    }
+
+    /** True when [incoming] carried settings that [mergeSettings] refused (for the log). */
+    fun settingsRefused(incoming: GroupDefinition, decision: GroupUpdateDecision): Boolean =
+        incoming.settings != null && decision.reason != REASON_ADMIN
+
+    // ------------------------------------------------------------------ joins (spec §3.3)
+
+    /** What the admin side does with a join (§3.3). [reason] is asserted by name in tests. */
+    data class JoinDecision(val verdict: Verdict, val reason: String, val group: GroupDefinition? = null) {
+        enum class Verdict {
+            /** Add the requester, stateVersion+1, broadcast to the new roster. */
+            ACCEPT,
+            /** Already a member: answer with our copy, change nothing. */
+            ANSWER,
+            REFUSE,
+        }
+    }
+
+    /** At most this many accepted public-link joins per group per hour per device (§3.3 rule 6). */
+    const val JOINS_PER_HOUR = 60
+
+    /**
+     * __GROUP_INFO_SETTINGS_2026_11_20__ §3.3, `join_request` (by handle). Pure.
+     *
+     * @param groups every group this device holds (the handle is looked up among them).
+     * @param acceptedLastHour how many joins this device accepted for a group in the past hour.
+     */
+    fun authorizeHandleJoin(
+        sender: String?,
+        requester: String,
+        handle: String,
+        groups: List<GroupDefinition>,
+        self: String,
+        acceptedLastHour: (groupId: String) -> Int,
+        isBlocked: (String) -> Boolean = { false },
+    ): JoinDecision {
+        if (sender.isNullOrBlank()) return JoinDecision(JoinDecision.Verdict.REFUSE, "unauthenticated")
+        if (!GroupIdentity.sameIdentity(requester, sender)) return JoinDecision(JoinDecision.Verdict.REFUSE, "body-names-a-third-party")
+        val h = GroupSettings.wireHandle(handle) ?: return JoinDecision(JoinDecision.Verdict.REFUSE, "unknown-handle")
+        val g = groups.firstOrNull { it.settings?.isPublic == true && it.settings.handle == h }
+            ?: return JoinDecision(JoinDecision.Verdict.REFUSE, "unknown-handle")
+        if (!g.isAdmin(self)) return JoinDecision(JoinDecision.Verdict.REFUSE, "not-admin", g)
+        if (g.isDissolved) return JoinDecision(JoinDecision.Verdict.REFUSE, "dissolved", g)
+        if (g.isEvicted(sender) || isBlocked(sender)) return JoinDecision(JoinDecision.Verdict.REFUSE, "banned", g)
+        if (g.isMember(sender)) return JoinDecision(JoinDecision.Verdict.ANSWER, "member", g)
+        if (acceptedLastHour(g.groupId) >= JOINS_PER_HOUR) return JoinDecision(JoinDecision.Verdict.REFUSE, "rate-limited", g)
+        return JoinDecision(JoinDecision.Verdict.ACCEPT, "joined-via-link", g)
+    }
+
+    /**
+     * __GROUP_INFO_SETTINGS_2026_11_20__ §3.3, `member_sync_request` from a NON-member (an invite
+     * link join). Rules 1-3 are the shipped ones (unauthenticated / third party / evicted or
+     * blocked), then: dissolved ⇒ refuse; a group with an invite token admits only the
+     * matching token (constant time) — that is what "Reset link" revokes; without a token the
+     * legacy rule stands. On desktop "may add members" through a link = we are an admin (the
+     * 1.6 rule: only an admin answers an invite join).
+     */
+    fun authorizeInviteJoin(
+        sender: String?,
+        requester: String,
+        group: GroupDefinition,
+        presentedToken: String?,
+        self: String,
+        isBlocked: (String) -> Boolean = { false },
+    ): JoinDecision {
+        if (sender.isNullOrBlank()) return JoinDecision(JoinDecision.Verdict.REFUSE, "unauthenticated")
+        if (!GroupIdentity.sameIdentity(requester, sender)) return JoinDecision(JoinDecision.Verdict.REFUSE, "body-names-a-third-party")
+        if (group.isEvicted(sender) || isBlocked(sender)) return JoinDecision(JoinDecision.Verdict.REFUSE, "banned", group)
+        if (group.isMember(sender)) return JoinDecision(JoinDecision.Verdict.ANSWER, "member", group)
+        if (group.isDissolved) return JoinDecision(JoinDecision.Verdict.REFUSE, "dissolved", group)
+        val token = group.settings?.inviteToken
+        if (token != null && !GroupSettings.tokensMatch(token, presentedToken)) {
+            return JoinDecision(JoinDecision.Verdict.REFUSE, "invite-revoked", group)
+        }
+        if (!group.isAdmin(self)) return JoinDecision(JoinDecision.Verdict.REFUSE, "not-admin", group)
+        return JoinDecision(JoinDecision.Verdict.ACCEPT, if (token != null) "token" else "legacy", group)
     }
 
     /**

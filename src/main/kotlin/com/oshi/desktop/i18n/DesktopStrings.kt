@@ -6,13 +6,13 @@ package com.oshi.desktop.i18n
  * ============================================================ WHY THIS EXISTS AT ALL
  *
  * The window's chrome reuses iOS keys wherever the phone already has the sentence — that is
- * the whole point of extracting 3840 keys × 34 locales instead of writing new copy. But a
+ * the whole point of extracting thousands of keys × 34 locales instead of writing new copy. But a
  * desktop client says things a phone cannot:
  *
  *  * REPL instructions (`/qr`, `/send`, `./oshi.sh run --args="--client"`);
  *  * the "what this client will not do" screen, which is a list of PARITY.md rows;
  *  * "delivery stops when this window closes" — there is no push on desktop (row 2.3);
- *  * "history on this disk is PLAINTEXT" — a documented regression from both phones.
+ *  * the desktop's at-rest message-history posture.
  *
  * None of those has an iOS counterpart, because none of them is true of iOS.
  *
@@ -55,12 +55,31 @@ package com.oshi.desktop.i18n
  *
  * That is a hole in the audit, not a fact about the code, so the seams a test needs are
  * public and named: [overlayKeys], [misfiledKeys], [shadowedKeys] here, and
- * `SourceKeys.usedDesktop` next door. **No test calls them yet** — writing one means
- * touching `src/test/`, which this change did not own.
+ * `SourceKeys.usedDesktop` next door. `CatalogAuditTest` compares their exact sets, so a
+ * window-only marker, an unnecessary English override, and stale desktop copy all fail CI.
  */
 object DesktopStrings {
 
-    /** Where the desktop's own catalog lives on the classpath. Not under `Localizable/`. */
+    /**
+     * Where the desktop's own catalog lives on the classpath. Not under `Localizable/`.
+     *
+     * __DESKTOP_LOCALE_FILES_ARE_A_NO_OP_2026_10_29__ **`en.json` is the only Desktop file
+     * this object will ever read**, and that is the design above rather than an omission.
+     * There is no `Desktop/<tag>.json` lookup anywhere in this module — [overlay] reads
+     * exactly this resource and parses it as `"en"`.
+     *
+     * So writing `Desktop/fr.json`, `Desktop/de.json` and so on produces 33 files the app
+     * never opens. It is worth saying out loud because it is the obvious-looking way to
+     * close PARITY row 1.5, and a localisation pass aimed at "one `<tag>.json` per locale
+     * beside `en.json`" lands straight in it: thousands of translated strings, every one
+     * dead, and nothing red to say so.
+     *
+     * The route that works is the fallback order: put the sentence in the iOS tree under
+     * the same key, let `./gradlew i18nExtract` carry it into `Localizable/`, and the
+     * shared chain — consulted FIRST — serves the translation in all 34 locales with no
+     * code change here and no entry to delete. That is what "this project extracts
+     * translations; it does not write them" means operationally.
+     */
     const val RESOURCE = "/i18n/Desktop/en.json"
 
     /**
@@ -150,7 +169,8 @@ object DesktopStrings {
  * shared asset into a permanently red one about a deliberate choice.
  *
  * The cost is real and is recorded in [DesktopStrings]' doc: these keys are audited by
- * nothing today. `SourceKeys.usedDesktop` is the seam that closes it.
+ * nothing on the shared-catalog path. `CatalogAuditTest` audits it through
+ * `SourceKeys.usedDesktop` instead.
  *
  * Choose [dt] ONLY when the shared catalogs have no sentence for this. If they do, use `t` —
  * a `desktop.` key where an iOS key existed ships English to 33 locales for nothing.

@@ -1,0 +1,105 @@
+{
+  "description": "Transport phase: ENCRYPT(k, n, ad=empty, plaintext) with the Noise ChaChaPoly nonce (4 zero bytes || u64le n). Each plaintext is ONE record (u8 type | u8 flags | u32be seq | body). Rekey policy per direction: after each message count += 1 and bytes += len(ciphertext); when count >= 2^20 or bytes >= 2^30, Rekey() (k = first 32 bytes of ENCRYPT(k, 2^64-1, empty, 32 zero bytes)) and reset both counters. The nonce n is NOT reset by a rekey. The rekey vectors lower the thresholds (see 'policy').",
+  "fromHandshake": "lan",
+  "initiatorToResponder": [
+    {
+      "plaintext": "1000000000017b7d",
+      "ciphertext": "384a10c569bc4f11bdb1d669dbc63f2e65a27899f7876892"
+    },
+    {
+      "plaintext": "0200000000007b227570546f223a377d",
+      "ciphertext": "c1705f50c57941076a9f0fcfb880b7cf0df20f1820cf626f400b32acb1be226c"
+    },
+    {
+      "plaintext": "7f00000000027b22726561736f6e223a22646f6e65227d",
+      "ciphertext": "bb66b0743ca24e8fbf2bc47e95bf017a856ae3a9dd51d3ce7b9b37110efdd6ff48309b041ef671"
+    }
+  ],
+  "responderToInitiator": [
+    {
+      "plaintext": "1100000000017b22636f6e766572736174696f6e73223a5b5d7d",
+      "ciphertext": "0507a2205f33ec54c6d04857944c3d51673fe336163ef9326ff86de67e56b0c9b37e86011849f1d7a9c4"
+    }
+  ],
+  "rekeyFunction": {
+    "keyBefore": "0bf9ea6acf237e7391a51e79f644366d08cff0a795ee22bd8f2e5b13a464eef7",
+    "keyAfter": "572435fa8be180c58e332068fac99a3c63c30da64ff774d69eaa0ad76f879d69"
+  },
+  "rekeyByMessages": {
+    "policy": {
+      "maxMessages": 2,
+      "maxBytes": 1073741824
+    },
+    "initialKey": "0bf9ea6acf237e7391a51e79f644366d08cff0a795ee22bd8f2e5b13a464eef7",
+    "messages": [
+      {
+        "plaintext": "6d6573736167652030",
+        "ciphertext": "b30810079817aba3d8c34b3c41023aa47792ff792a3b7276d5",
+        "keyUsed": "0bf9ea6acf237e7391a51e79f644366d08cff0a795ee22bd8f2e5b13a464eef7",
+        "nonce": 0,
+        "keyAfter": "0bf9ea6acf237e7391a51e79f644366d08cff0a795ee22bd8f2e5b13a464eef7"
+      },
+      {
+        "plaintext": "6d6573736167652031",
+        "ciphertext": "963abd2fa47387e4455c9bfc1e2472f6a5daafe0a1f77a00f1",
+        "keyUsed": "0bf9ea6acf237e7391a51e79f644366d08cff0a795ee22bd8f2e5b13a464eef7",
+        "nonce": 1,
+        "keyAfter": "572435fa8be180c58e332068fac99a3c63c30da64ff774d69eaa0ad76f879d69"
+      },
+      {
+        "plaintext": "6d6573736167652032",
+        "ciphertext": "ffce1ce127f401b78db188784d0e820fcda69c6529c3056b85",
+        "keyUsed": "572435fa8be180c58e332068fac99a3c63c30da64ff774d69eaa0ad76f879d69",
+        "nonce": 2,
+        "keyAfter": "572435fa8be180c58e332068fac99a3c63c30da64ff774d69eaa0ad76f879d69"
+      },
+      {
+        "plaintext": "6d6573736167652033",
+        "ciphertext": "2d29333bd48217223960c2ce3ce0bd830fec2818856ae6305d",
+        "keyUsed": "572435fa8be180c58e332068fac99a3c63c30da64ff774d69eaa0ad76f879d69",
+        "nonce": 3,
+        "keyAfter": "b7b54f3e38583b9e52e22c7b03da949bbe6692cca27e27563714cc262358bf07"
+      },
+      {
+        "plaintext": "6d6573736167652034",
+        "ciphertext": "b1b30d210d29a41dd1f116be3af6b887c1788aeb28f89468be",
+        "keyUsed": "b7b54f3e38583b9e52e22c7b03da949bbe6692cca27e27563714cc262358bf07",
+        "nonce": 4,
+        "keyAfter": "b7b54f3e38583b9e52e22c7b03da949bbe6692cca27e27563714cc262358bf07"
+      }
+    ]
+  },
+  "rekeyByBytes": {
+    "policy": {
+      "maxMessages": 1048576,
+      "maxBytes": 100
+    },
+    "initialKey": "0bf9ea6acf237e7391a51e79f644366d08cff0a795ee22bd8f2e5b13a464eef7",
+    "messages": [
+      {
+        "plaintext": "00000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "ciphertext": "de6d6374f970ce83e8b145272e16e906006684ebbfd9707519f8ecf66716e2818f808f52c0846119e5d2df6dd58baddf733697ca94062ce1",
+        "keyUsed": "0bf9ea6acf237e7391a51e79f644366d08cff0a795ee22bd8f2e5b13a464eef7",
+        "keyAfter": "0bf9ea6acf237e7391a51e79f644366d08cff0a795ee22bd8f2e5b13a464eef7"
+      },
+      {
+        "plaintext": "01010101010101010101010101010101010101010101010101010101010101010101010101010101",
+        "ciphertext": "fa5ecf5dc415e3c5753227cc8857b655db0144802f0a51fcda9f5db4969d700230dd447dbec1ad68357799c24cfe778d1d7fa6cc7e76f573",
+        "keyUsed": "0bf9ea6acf237e7391a51e79f644366d08cff0a795ee22bd8f2e5b13a464eef7",
+        "keyAfter": "572435fa8be180c58e332068fac99a3c63c30da64ff774d69eaa0ad76f879d69"
+      },
+      {
+        "plaintext": "02020202020202020202020202020202020202020202020202020202020202020202020202020202",
+        "ciphertext": "90a96d9044916695bd4bab5c5be98e42ff9143af316af23648cd4ae52ddc158c3e982d09e3ed92a231818e107cecd6c3c2d393865357af9e",
+        "keyUsed": "572435fa8be180c58e332068fac99a3c63c30da64ff774d69eaa0ad76f879d69",
+        "keyAfter": "572435fa8be180c58e332068fac99a3c63c30da64ff774d69eaa0ad76f879d69"
+      },
+      {
+        "plaintext": "03030303030303030303",
+        "ciphertext": "434f434bb6e671010921c7a240ed9fbbebbc1c39b96cdd87b471",
+        "keyUsed": "572435fa8be180c58e332068fac99a3c63c30da64ff774d69eaa0ad76f879d69",
+        "keyAfter": "572435fa8be180c58e332068fac99a3c63c30da64ff774d69eaa0ad76f879d69"
+      }
+    ]
+  }
+}

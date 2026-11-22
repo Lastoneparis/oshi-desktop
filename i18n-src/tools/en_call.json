@@ -1,0 +1,13 @@
+{
+"pc.call.devices.microphone": "Microphone",
+"pc.call.devices.nextCall": "Microphone and speaker changes apply from your next call.",
+"pc.call.devices.cameraDefaultOnly": "This Mac uses its default camera.",
+"pc.call.devices.default": "System default",
+"pc.call.micBlocked.windows": "The other person can't hear you: your microphone is sending pure silence. Open Windows Settings → Privacy & security → Microphone and turn on \"Let desktop apps access your microphone\".",
+"pc.call.micBlocked.mac": "The other person can't hear you: your microphone is sending pure silence. Open System Settings → Privacy & Security → Microphone and allow OSHI.",
+"pc.call.micBlocked.other": "The other person can't hear you: your microphone is sending pure silence. Check that the microphone is not muted in your system sound settings.",
+"pc.call.audio.connecting": "Connecting audio…",
+"pc.call.audio.none": "Connected — no audio devices on this machine",
+"pc.call.problem": "Why: %@",
+"pc.call.devices": "Microphone, speaker and camera"
+}

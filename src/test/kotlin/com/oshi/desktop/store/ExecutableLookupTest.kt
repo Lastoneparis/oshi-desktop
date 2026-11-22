@@ -1,0 +1,64 @@
+package com.oshi.desktop.store
+
+import java.io.File
+import java.nio.file.Files
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Test
+
+/** __WHICH_FORGOT_DOT_EXE_2026_11_19__ ffmpeg on a Windows PATH is ffmpeg.exe. */
+class ExecutableLookupTest {
+    private val dir: File = Files.createTempDirectory("oshi which").toFile()
+
+    @After fun tearDown() { dir.deleteRecursively() }
+
+    @Test
+    fun `on Windows ffmpeg resolves to ffmpeg exe on PATH`() {
+        val exe = File(dir, "ffmpeg.exe").apply { writeText("") }
+        val got = ExecutableLookup.which("ffmpeg", path = "C:\\nowhere;\"${dir.path}\"", windows = true, pathExt = ".COM;.EXE")
+        assertEquals(exe.absolutePath, got)
+    }
+
+    @Test
+    fun `on Windows a bare name with no extension file is not found`() {
+        assertNull(ExecutableLookup.which("ffmpeg", path = dir.path, windows = true, pathExt = null))
+    }
+
+    @Test
+    fun `off Windows the name is used as is and must be executable`() {
+        val f = File(dir, "ffmpeg").apply { writeText("") }
+        assertNull(ExecutableLookup.which("ffmpeg", path = dir.path, windows = false, isExecutable = { false }))
+        // A ':'-separated PATH cannot carry a real Windows directory (`C:\…` splits at the drive
+        // letter), so the positive half only means something on a Unix host — on windows-latest
+        // it failed for exactly that reason (public build run 44642587644, and again 44717585112).
+        org.junit.Assume.assumeTrue(File.pathSeparatorChar == ':')
+        assertEquals(f.absolutePath, ExecutableLookup.which("ffmpeg", path = "/x:${dir.path}", windows = false, isExecutable = { it.isFile }))
+    }
+}
+
+/**
+ * __VOICE_NOTES_NEED_NO_SYSTEM_FFMPEG_2026_11_19__ The ffmpeg program bundled with the video
+ * natives is found and actually transcodes, so a machine with no ffmpeg on PATH plays phone notes.
+ */
+class BundledFfmpegTest {
+    @Test
+    fun `the bundled ffmpeg exists and turns a WAV into M4A without anything on PATH`() {
+        val exe = com.oshi.desktop.media.AudioProc.bundledFfmpeg
+        org.junit.Assume.assumeTrue("no bytedeco natives for this host", exe != null)
+        val dir = Files.createTempDirectory("oshi bundled ffmpeg").toFile()
+        try {
+            val t = com.oshi.desktop.media.SystemAudioTranscoder(
+                tools = listOf(com.oshi.desktop.media.TranscodeTool.FFMPEG),
+                resolve = { b -> if (b == "ffmpeg") exe else null },
+                workDir = dir,
+            )
+            val src = File(dir, "in.wav").apply { writeBytes(com.oshi.desktop.media.WavWriter.tone(millis = 300)) }
+            val out = File(dir, "out.m4a")
+            val r = t.toM4a(src, out)
+            org.junit.Assert.assertTrue("bundled ffmpeg did not produce M4A: $r", r is com.oshi.desktop.media.TranscodeResult.Produced)
+            val back = File(dir, "back.wav")
+            org.junit.Assert.assertTrue(t.toWav(out, back) is com.oshi.desktop.media.TranscodeResult.Produced)
+        } finally { dir.deleteRecursively() }
+    }
+}

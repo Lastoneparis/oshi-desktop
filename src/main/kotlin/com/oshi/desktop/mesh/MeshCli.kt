@@ -22,6 +22,7 @@ import com.oshi.desktop.DesktopIdentity
  * messenger.
  */
 fun runMeshCli(args: Array<String>) {
+    val stdin = com.oshi.desktop.app.ConsoleIo.install()
     val name = argValue(args, "--name") ?: "OSHI Desktop (${System.getProperty("os.name")})"
     val identity = DesktopIdentity.generate()
     val myKey = identity.userKey
@@ -81,7 +82,7 @@ fun runMeshCli(args: Array<String>) {
     )
 
     while (true) {
-        val line = readlnOrNull() ?: break
+        val line = stdin.readLine() ?: break
         val trimmed = line.trim()
         when {
             trimmed == "/quit" -> break

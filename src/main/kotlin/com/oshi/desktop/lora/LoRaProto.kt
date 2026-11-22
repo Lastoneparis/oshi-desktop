@@ -168,6 +168,9 @@ object LoRaProto {
     const val PORT_TEXT = 1L
 
     /** `PortNum.ROUTING_APP` — what became of a `want_ack` packet (`:558`). */
+    /** `PortNum.POSITION_APP` — a node broadcasting where it is. */
+    const val PORT_POSITION = 3L
+
     const val PORT_ROUTING = 5L
 
     /** `PortNum.ADMIN_APP` — config writes. **This client never encodes one.** (`:575`) */
@@ -190,12 +193,32 @@ object LoRaProto {
      * false. [toRadioPacket] does not enforce that, because a caller sending to a specific
      * node legitimately wants it; the rule is recorded so the caller can apply it.
      */
+    /**
+     * @param channel __CHANNEL_ROOMS_ALL_SENT_ON_SLOT_ZERO_2026_11_07__ `MeshPacket.channel`,
+     *   field 3 — the slot on THIS radio to transmit on.
+     *
+     *   This writer emitted fields 2, 4, 6 and 10 and never 3, exactly like the iOS and
+     *   Android builders did until that fix, even though [Incoming.channelIndex] three
+     *   hundred lines down has PARSED field 3 since 2026-11-04. On the phones that silently
+     *   broadcast every LoRa channel room on slot 0 — the primary, normally LongFast,
+     *   normally public.
+     *
+     *   This client is not currently affected, for a reason worth writing down rather than
+     *   relying on: [LoRaChannelThread.isChannelKey] exists here and is called by NOTHING,
+     *   so the desktop has no path that sends into a channel room at all — rooms are
+     *   receive-only. The parameter is here so that when a send path is added it cannot be
+     *   added wrong, and so this builder matches the other two.
+     *
+     *   Omitted when 0: that is the proto default, a stock Meshtastic encoder omits it, and
+     *   every frame this client sends today must stay byte-identical.
+     */
     fun toRadioPacket(
         to: UInt,
         portnum: Long,
         payload: ByteArray,
         wantAck: Boolean,
         packetId: UInt,
+        channel: Int = 0,
     ): ByteArray {
         val data = ProtoWriter()
             .varint(1, portnum)          // Data.portnum
@@ -204,12 +227,55 @@ object LoRaProto {
 
         val pkt = ProtoWriter()
             .fixed32(2, to)              // MeshPacket.to
-            .bytes(4, data)              // MeshPacket.decoded
+        if (channel != 0) pkt.varint(3, channel.toLong())  // MeshPacket.channel
+        pkt.bytes(4, data)               // MeshPacket.decoded
             .fixed32(6, packetId)        // MeshPacket.id
         if (wantAck) pkt.varint(10, 1)   // MeshPacket.want_ack — ONLY when true
 
         return ProtoWriter().bytes(1, pkt.data).data   // ToRadio.packet
     }
+
+    /**
+     * UTF-8 bytes of PLAIN text that fit one interop frame — iOS's `interopTextLimit`
+     * (`OSHI/MeshtasticManager.swift:230`), the same number for the same reason.
+     *
+     * Larger than the 180-byte OSHI chunk payload because portnum-1 text carries none of
+     * the 8-byte `"OM"` header, and still inside the ~237-byte frame budget with margin.
+     * Interop text is NEVER chunked: a stock Meshtastic client has no reassembler for
+     * OSHI's header, so a longer message would arrive as fragments nobody joins. Over the
+     * limit is refused with a count, never truncated.
+     */
+    const val INTEROP_TEXT_LIMIT = 200
+
+    /**
+     * __DESKTOP_LORA_BEACON_2026_10_28__ A `Position` payload for POSITION_APP — the
+     * SEND half of the position lane this client could only receive.
+     *
+     * Byte-for-byte the phones' encoder (`LoRaPacketParser.positionPayload` on Android,
+     * `MeshtasticManager.positionPayload` on iOS): `latitude_i`/`longitude_i` are
+     * **sfixed32 scaled by 1e-7**, little-endian and read SIGNED, and the time is a
+     * varint in field 4. `LoRaPositionWireTest` pins the bytes against the figures
+     * captured from a real radio rather than against this function's own arithmetic — a
+     * test that re-derives `round(lat * 1e7)` agrees with itself whatever the sender does.
+     *
+     * Getting the sign wrong does not corrupt the frame. It moves this node to the other
+     * side of the planet on somebody else's map, with nothing red anywhere.
+     */
+    fun positionPayload(latitude: Double, longitude: Double, timeSec: Long): ByteArray =
+        ProtoWriter()
+            .fixed32(1, Math.round(latitude * 1e7).toInt())
+            .fixed32(2, Math.round(longitude * 1e7).toInt())
+            .varint(4, timeSec)
+            .data
+
+    /**
+     * A `MeshPacket.id`.
+     *
+     * Meshtastic uses it to deduplicate a packet that arrives by two routes, so it only has
+     * to be unlikely to collide; iOS generates it the same way (`enqueuePacket`). Zero is
+     * avoided because the firmware treats an absent id and a zero id alike.
+     */
+    fun randomPacketId(): UInt = (java.security.SecureRandom().nextInt().toUInt() or 1u)
 
     /** `ToRadio.want_config_id`, field 3 varint (`MeshtasticManager.swift:410-412`). */
     fun wantConfig(configId: UInt): ByteArray = ProtoWriter().varint(3, configId.toLong()).data
@@ -284,7 +350,28 @@ object LoRaProto {
      * `from` is field 1 fixed32 on `MeshPacket` — filled in by the radio, never by the
      * sender, and therefore **not an authenticator**: see [LoRaNodeBindings].
      */
-    data class Incoming(val from: UInt, val portnum: Long, val payload: ByteArray) {
+    /**
+     * @param to `MeshPacket.to`, field 2. [LoRaFrame.BROADCAST_NODE] means the packet went
+     *   to everyone on the channel rather than to this node alone.
+     *
+     *   __LORA_CHANNEL_IS_A_ROOM_2026_11_04__ This field and [channelIndex] were simply not
+     *   read before, so this client could not tell a public broadcast from a private
+     *   message and filed every inbound text as private — three people talking on LongFast
+     *   became three one-to-one threads.
+     * @param channelIndex `MeshPacket.channel`, field 3. An index into the SENDING node's
+     *   own channel table, which is why [LoRaChannelThread] keys a room on the channel's
+     *   NAME wherever one is known.
+     */
+    data class Incoming(
+        val from: UInt,
+        val portnum: Long,
+        val payload: ByteArray,
+        val to: UInt = 0u,
+        val channelIndex: Int = 0,
+    ) {
+        /** Everyone on the channel heard this, not just us. */
+        val isBroadcast: Boolean get() = to == LoRaFrame.BROADCAST_NODE
+
         override fun equals(other: Any?): Boolean =
             other is Incoming && from == other.from && portnum == other.portnum &&
                 payload.contentEquals(other.payload)
@@ -305,6 +392,12 @@ object LoRaProto {
         val decoded = field(meshPacket, 4, wire = 2)?.payload ?: return null
         val portnum = field(decoded, 1, wire = 0)?.varintValue ?: return null
         val payload = field(decoded, 2, wire = 2)?.payload ?: return null
-        return Incoming(from, portnum, payload)
+        // __LORA_CHANNEL_IS_A_ROOM_2026_11_04__ `to` (2, fixed32) and `channel` (3, varint).
+        // Both default rather than refusing the packet: a firmware that omits either is
+        // still sending a readable message, and the old behaviour — treat it as a direct
+        // packet on slot 0 — is the right fallback for one that does.
+        val to = field(meshPacket, 2, wire = 5)?.asUInt32() ?: 0u
+        val channelIndex = field(meshPacket, 3, wire = 0)?.varintValue?.toInt() ?: 0
+        return Incoming(from, portnum, payload, to, channelIndex)
     }
 }
