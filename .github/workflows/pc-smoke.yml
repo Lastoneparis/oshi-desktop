@@ -29,7 +29,7 @@ env:
   # A ci/desktop-* branch is a release CANDIDATE: its installers are built from the branch.
   # Anything else smokes the PUBLISHED files (oshi-messenger.com, checked against SHA256SUMS).
   # ci/pc-smoke-keyring: the concurrent keyring-probe fix (__CONCURRENT_KEYRING_PROBE_2026_11_22__), built from the branch.
-  TEST_VERSION: ${{ (startsWith(github.ref_name, 'ci/desktop-163', 'ci/desktop-164') || github.ref_name == 'ci/pc-smoke-keyring') && '1.6.3' || startsWith(github.ref_name, 'ci/desktop-162') && '1.6.2' || startsWith(github.ref_name, 'ci/desktop-161') && '1.6.1' || startsWith(github.ref_name, 'ci/desktop-') && '1.6.0' || '1.5.1' }}
+  TEST_VERSION: ${{ startsWith(github.ref_name, 'ci/desktop-164') && '1.6.4' || (startsWith(github.ref_name, 'ci/desktop-163') || github.ref_name == 'ci/pc-smoke-keyring') && '1.6.3' || startsWith(github.ref_name, 'ci/desktop-162') && '1.6.2' || startsWith(github.ref_name, 'ci/desktop-161') && '1.6.1' || startsWith(github.ref_name, 'ci/desktop-') && '1.6.0' || '1.5.1' }}
   SMOKE_SOURCE: ${{ (startsWith(github.ref_name, 'ci/desktop-') || github.ref_name == 'ci/pc-smoke-keyring') && 'build' || 'published' }}
   PYTHONIOENCODING: utf-8
   PYTHONUTF8: '1'
