@@ -94,6 +94,63 @@ class OpusPlayoutTest {
         assertEquals(GOLDEN_1_6_2, hex)
     }
 
+    /**
+     * Plays [payloads] (re-numbered so payloads[2], the first one heard, carries codec seq
+     * [firstSeq]) one per 20 ms tick, then drains. Returns every pulled sample, the kinds,
+     * the keys filed and the buffer.
+     */
+    private fun playFrom(payloads: List<ByteArray>, firstSeq: Int): Triple<ShortArray, List<Long>, AdaptiveJitterBuffer> {
+        val heard = payloads.drop(2).mapIndexed { i, p ->
+            OpusWire.pack((firstSeq + i) and 0xFFFF, OpusWire.unpack(p)!!.frames)
+        }
+        var now = 0L
+        val jb = AdaptiveJitterBuffer(OpusPlayoutDecoder(), clock = { now })
+        val unwrap = SeqUnwrapper()
+        val keys = SeqUnwrapper().let { u ->
+            heard.flatMap { p -> val q = OpusWire.unpack(p)!!; val n = u.unwrap(q.seq); (0 until q.frames.size).map { n - (q.frames.size - 1 - it) } }
+        }
+        val pcm = ArrayList<Short>()
+        for (p in heard) {
+            OpusPlayoutDecoder.file(p, jb, unwrap)
+            now += 20; pcm += jb.pull().asList()
+        }
+        repeat(10) { now += 20; pcm += jb.pull().asList() }
+        return Triple(pcm.toShortArray(), keys, jb)
+    }
+
+    @Test fun `a stream first heard at codec seq 0 or 1 or across the wrap plays like any other`() {
+        // __SEQ_ORIGIN_2026_11_22__ Before: first heard at seq 0 filed its two redundant copies
+        // under -2 and -1, and -1 is the buffer's "nothing yet" mark - the start misplayed.
+        val payloads = OpusCallEncoder().encode(voice(42))
+        val (refPcm, refKeys, ref) = playFrom(payloads, 1000)
+        assertEquals(42L, ref.framesPlayed)
+        assertEquals(0L, ref.framesLossConcealed)
+        assertTrue(refKeys.distinct().zipWithNext().all { (a, b) -> b == a + 1 })
+        for (start in listOf(0, 1, 0xFFFF, 0xFFFE, 0xFFFD)) {
+            val (pcm, keys, jb) = playFrom(payloads, start)
+            assertTrue("start=$start keys $keys", keys.all { it >= 0 })
+            assertTrue("start=$start keys in order", keys.distinct().zipWithNext().all { (a, b) -> b == a + 1 })
+            // Only differences between keys matter: same keys up to a shift, same audio.
+            assertEquals(refKeys.map { it - refKeys[0] }, keys.map { it - keys[0] })
+            assertEquals("start=$start played", 42L, jb.framesPlayed)
+            assertEquals("start=$start concealed", 0L, jb.framesLossConcealed)
+            assertTrue("start=$start same audio as the reference", refPcm.contentEquals(pcm))
+        }
+    }
+
+    @Test fun `unwrapped seqs stay positive and monotonic from 0 through the 16-bit wrap`() {
+        val u = SeqUnwrapper()
+        val first = u.unwrap(0)
+        assertTrue(first - OpusWire.MAX_REDUNDANT >= 0)
+        assertEquals(first - 1, u.unwrap(0xFFFF))  // one late packet across the wrap
+        assertEquals(first + 1, u.unwrap(1))
+        u.reset()
+        val a = u.unwrap(0xFFFF)
+        assertEquals(a + 1, u.unwrap(0))
+        assertEquals(a + 2, u.unwrap(1))
+        assertTrue(a - OpusWire.MAX_REDUNDANT >= 0)
+    }
+
     companion object {
         const val GOLDEN_1_6_2 = "f6c3c9af4b3da6d0da8a3c68123ba6ca04741fd500814f81ff9313b577815242"
     }

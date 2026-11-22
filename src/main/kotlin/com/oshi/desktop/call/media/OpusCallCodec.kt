@@ -323,17 +323,29 @@ class OpusPlayoutDecoder : AdaptiveJitterBuffer.FrameDecoder {
     }
 }
 
-/** 16-bit codec seq → monotonic Long, relative to the last one seen. */
+/**
+ * 16-bit codec seq → monotonic Long, relative to the last one seen.
+ *
+ * __SEQ_ORIGIN_2026_11_22__ The first seq maps to [ORIGIN] + seq16, not seq16: a stream first
+ * heard at seq 0 or 1 (or right after the 16-bit wrap) filed its redundant copies under −1,
+ * −2, and −1 is [AdaptiveJitterBuffer]'s "nothing yet" mark — the first frames were lost.
+ * Only differences between keys matter to the buffer, so the offset changes nothing else.
+ * Same constant as iOS `SeqUnwrapper.origin` (OSHI/OshiCodec.swift) — keep them equal.
+ */
 class SeqUnwrapper {
     private var last = -1
     private var base = 0L
     @Synchronized
     fun unwrap(seq16: Int): Long {
-        if (last < 0) { last = seq16; base = seq16.toLong(); return base }
+        if (last < 0) { last = seq16; base = ORIGIN + seq16; return base }
         base += OpusWire.dist(seq16, last)
         last = seq16
         return base
     }
     @Synchronized
     fun reset() { last = -1; base = 0L }
+
+    companion object {
+        const val ORIGIN = 1L shl 32
+    }
 }
