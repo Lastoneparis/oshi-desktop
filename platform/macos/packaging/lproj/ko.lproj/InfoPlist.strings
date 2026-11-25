@@ -1,0 +1,6 @@
+/* Generated from OSHI/ko.lproj/InfoPlist.strings — the SAME strings the iOS
+   app shows. macOS reads these for the TCC prompt; see platform/macos/packaging/README.
+   Only the two keys this bundle actually declares are carried: declaring a
+   permission string for something the app never asks for is a lie in a dialog. */
+"NSCameraUsageDescription" = "OSHI는 QR 코드 스캔과 암호화 메시지용 사진 촬영을 위해 카메라 접근 권한이 필요합니다.";
+"NSMicrophoneUsageDescription" = "OSHI는 암호화 메시지용 동영상을 소리와 함께 녹화하기 위해 마이크 접근 권한이 필요합니다.";

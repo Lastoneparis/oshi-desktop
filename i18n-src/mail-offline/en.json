@@ -1,0 +1,4 @@
+{
+  "pc.mail.offline.unreachable": "Can't reach mail. Check your connection.",
+  "pc.mail.offline.refreshFailed": "Couldn't refresh mail. Check your connection."
+}

@@ -1,0 +1,9 @@
+{
+  "pc.bot.commands": "Perintah",
+  "pc.bot.add_command": "Tambah perintah",
+  "pc.bot.command_rule": "1–32 karakter: huruf kecil, angka, dan _",
+  "pc.bot.duplicate": "Perintah ini sudah ada di daftar",
+  "pc.bot.publish": "Terbitkan ke server OSHI",
+  "pc.bot.published": "Perintah sudah aktif di grup bot Anda",
+  "pc.bot.publish_failed": "Gagal menerbitkan: %@"
+}

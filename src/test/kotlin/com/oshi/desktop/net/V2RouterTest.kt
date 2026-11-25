@@ -16,6 +16,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -64,7 +65,9 @@ class V2RouterTest {
         val messages = V2MessagesClient(http)
         val config = V2ConfigGate(baseUrl = relay.baseUrl, buildNumber = 1)
         val state = RouterState(File(home, RouterState.FILE_NAME))
-        val router = V2Router(identity, config, keys, messages, sessions, prekeys, state)
+        /** Captured so a failing heal test can say WHY, instead of only that it failed. */
+        val logs = mutableListOf<String>()
+        val router = V2Router(identity, config, keys, messages, sessions, prekeys, state, log = { logs.add(it) })
         val inbox = mutableListOf<V2Inbound>()
 
         init {
@@ -79,6 +82,143 @@ class V2RouterTest {
     }
 
     // ------------------------------------------------------------------ the happy path
+
+    // ================================================================ ratchet healing
+
+    /**
+     * __DESKTOP_RATCHET_HEAL_2026_10_29__ A DEAD SESSION REPAIRS ITSELF, end to end.
+     *
+     * The bug this answers was reported twice by real users of the phones — *"I get the
+     * notification but not the message"* — and before this commit the desktop had no cure at
+     * all: the retry budget condemned the envelope, the session stayed dead, and every later
+     * message from that peer died the same way, for ever.
+     *
+     * The break is made the way it actually happens rather than by deleting a session: Bob's
+     * session record is REPLACED with a valid session belonging to a third party, so Bob
+     * holds a session that exists (no X3DH path to rescue him) and cannot open anything Alice
+     * sends. Deleting it instead would exercise the unrelated "first contact, no header" case
+     * that this client already acks and drops.
+     */
+    @Test
+    fun `a session that can no longer decrypt is repaired without either user acting`() {
+        val alice = Client("alice")
+        val bob = Client("bob")
+        val carol = Client("carol")
+        bob.router.publishBundleIfNeeded()
+        alice.router.publishBundleIfNeeded()
+
+        // A working conversation first, so the repair is measured against a real session.
+        assertTrue(alice.router.sendText(bob.address, "before".toByteArray()))
+        assertEquals(1, bob.router.poll())
+        assertEquals("before", bob.inbox.single().text)
+
+        // Now break Bob: his record for Alice becomes a session with Carol's keys. Alice's
+        // own session is untouched, which is the whole premise — she keeps writing with it
+        // and attaches no X3DH header, because as far as she knows nothing is wrong.
+        carol.router.publishBundleIfNeeded()
+        assertTrue(carol.router.sendText(bob.address, "establish carol".toByteArray()))
+        bob.router.poll()
+        val carolRecord = bob.sessions.load(carol.address, null)!!
+        bob.sessions.save(carolRecord.copy(peerUserKey = alice.address), null)
+        assertNotEquals(
+            "the break must leave a session in place, not remove one",
+            null, bob.sessions.load(alice.address, null),
+        )
+
+        // THE TIE-BREAK MADE DETERMINISTIC, and this is not a workaround — it is the rule.
+        // `RatchetHealSignal.Policy.isHealInitiator(me, peer)` is `me < peer`, so whether Bob
+        // may act at once depends on how two random keys happen to sort: on half the runs he
+        // is the non-initiator and must wait a full cooldown. Rather than seed identities
+        // until they sort conveniently, the FIRST-EVIDENCE stamp is backdated past the
+        // cooldown, which is precisely the state a non-initiator reaches when the breakage
+        // persists — the case in which the rule says he SHOULD act. Without this the test
+        // passes or fails on a coin toss, which is worse than not having it.
+        bob.state.healEvidenceAt(
+            alice.address,
+            System.currentTimeMillis() - com.oshi.messenger.network.v2.RatchetHealSignal.Policy.COOLDOWN_MS - 1,
+        )
+
+        // Alice writes into the broken session. Every attempt fails, and the budget holds the
+        // envelope until it condemns it — which is the moment the heal is owed.
+        assertTrue(alice.router.sendText(bob.address, "lost in the dark".toByteArray()))
+        val before = bob.inbox.size
+        repeat(com.oshi.messenger.network.v2.V2RetryBudget.MAX_RETRIES + 2) { bob.router.poll() }
+        assertEquals("the broken message must NOT have been delivered", before, bob.inbox.size)
+
+        // THE REPAIR. Bob deleted his bad session and sent an acknowledgement whose envelope
+        // carries a fresh X3DH header; Alice adopts it in the act of decrypting.
+        //
+        // The session is REPLACED, not absent — asserted that way because asserting `null`
+        // here failed and the code was right: deleting is only the first half, and `sendText`
+        // immediately re-runs X3DH (which is the only reason the header gets attached), so a
+        // fresh INITIATOR session exists by the time this line runs. "Absent" would have been
+        // a weaker claim anyway; "replaced, as initiator" is the state that actually heals.
+        val repaired = bob.sessions.load(alice.address, null)
+        assertNotEquals("no session at all; log=\n" + bob.logs.joinToString("\n"), null, repaired)
+        assertEquals(
+            "the broken session must be GONE, not re-used; log=\n" + bob.logs.joinToString("\n"),
+            SessionStore.Role.INITIATOR, repaired!!.role,
+        )
+        assertTrue(
+            "the heal must have been reported once",
+            bob.logs.count { it.startsWith("heal: session with") } == 1,
+        )
+        val aliceInboxBefore = alice.inbox.size
+        alice.router.poll()
+        assertEquals(
+            "a heal acknowledgement must never become a message for the user",
+            aliceInboxBefore, alice.inbox.size,
+        )
+
+        // And the conversation works again, in both directions, with nobody having touched
+        // anything. This is the assertion the whole feature exists for.
+        assertTrue(alice.router.sendText(bob.address, "after the repair".toByteArray()))
+        bob.router.poll()
+        assertEquals("after the repair", bob.inbox.last().text)
+        assertTrue(bob.router.sendText(alice.address, "and back".toByteArray()))
+        alice.router.poll()
+        assertEquals("and back", alice.inbox.last().text)
+    }
+
+    /**
+     * A FORGERY MUST NOT DESTROY A WORKING SESSION.
+     *
+     * `establishResponder` throws `SecurityException` when an envelope's X3DH identity does
+     * not match its `from`. If that condemnation healed, anyone able to POST a relay envelope
+     * could delete a verified session at will — a denial of service handed to a stranger, and
+     * worse, one that makes the victim re-run X3DH against an attacker-chosen moment.
+     */
+    @Test
+    fun `a condemned forgery leaves the session alone`() {
+        val alice = Client("alice")
+        val bob = Client("bob")
+        bob.router.publishBundleIfNeeded()
+        alice.router.sendText(bob.address, "legitimate".toByteArray())
+        bob.router.poll()
+        val good = bob.sessions.load(alice.address, null)
+        assertNotEquals(null, good)
+
+        // An envelope claiming to be from Alice, bootstrapped with a DIFFERENT identity's
+        // X3DH header. Carol publishes and sends to Bob, and the envelope is relabelled as
+        // Alice's on the relay — which is exactly the shape the responder-side TOFU refuses.
+        val carol = Client("carol")
+        carol.router.publishBundleIfNeeded()
+        assertTrue(carol.router.sendText(bob.address, "forged".toByteArray()))
+        relay.relabelSender(carol.address, alice.address, inMailboxOf = bob.address)
+
+        // Backdated as above, so this test cannot pass merely because Bob was yielding: the
+        // refusal has to come from the forgery branch, not from the cooldown.
+        bob.state.healEvidenceAt(
+            alice.address,
+            System.currentTimeMillis() - com.oshi.messenger.network.v2.RatchetHealSignal.Policy.COOLDOWN_MS - 1,
+        )
+        repeat(com.oshi.messenger.network.v2.V2RetryBudget.MAX_RETRIES + 2) { bob.router.poll() }
+        assertNotEquals(
+            "a forgery deleted a verified session — a stranger can now break any conversation",
+            null, bob.sessions.load(alice.address, null),
+        )
+        assertEquals("and it must never be stored as a message", 1, bob.inbox.size)
+    }
 
     @Test
     fun `a first message establishes a session and arrives readable`() {

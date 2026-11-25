@@ -36,12 +36,16 @@ import java.security.MessageDigest
  */
 class DesktopV2Signer(private val identity: DesktopIdentity) {
 
+    /** The account X25519 userKey this signer puts in `x-oshi-user` (the devsync upgrade binds it into B). */
+    val userKey: String get() = identity.userKey
+
     fun sign(
         method: String,
         path: String,
         bodyToHash: ByteArray,
         withUserHeader: Boolean = false,
-        timestampMs: Long = System.currentTimeMillis(),
+        // __CALL_CLOCK_SKEW_DESKTOP_2026_11_21__ server time when this PC is >= 5 s off.
+        timestampMs: Long = com.oshi.desktop.net.ServerClock.nowMs(),
     ): Map<String, String> {
         val timestamp = timestampMs.toString()
         val canonical = canonicalString(method, path, bodyToHash, timestamp)

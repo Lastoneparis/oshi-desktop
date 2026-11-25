@@ -1,0 +1,4 @@
+{
+  "pc.mail.offline.unreachable": "Poštu nelze načíst. Zkontrolujte připojení.",
+  "pc.mail.offline.refreshFailed": "Poštu se nepodařilo obnovit. Zkontrolujte připojení."
+}

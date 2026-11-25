@@ -24,6 +24,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.oshi.desktop.i18n.t
 import com.oshi.desktop.ui.OshiTheme
 
 /**
@@ -38,7 +39,8 @@ import com.oshi.desktop.ui.OshiTheme
 object WallpaperPainter {
 
     /** The ground colour, always painted first so an alpha wash has something to sit on. */
-    val ground: Color get() = OshiTheme.background
+    // __BUBBLE_MEDIA_2026_11_21__ the thread's own ground (soft lavender / deep neutral / black).
+    val ground: Color get() = OshiTheme.bubbles.chatBackground
 
     fun brush(id: WallpaperId): Brush = when (id) {
         WallpaperId.NONE -> SolidColor(Color.Transparent)
@@ -107,7 +109,7 @@ fun WallpaperPicker(
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                "Wallpaper",
+                t("wallpaper.title"),
                 style = OshiTheme.typography.titleMedium,
                 color = Ink.strong,
                 modifier = Modifier.weight(1f),
@@ -125,10 +127,10 @@ fun WallpaperPicker(
             }
         }
         Hairline()
+        // __WALLPAPER_BLUR_2026_11_21__ was hard-coded English; "the others in this chat"
+        // because the same picker now serves groups and channels as plainly as 1:1s.
         Text(
-            "This is a local appearance setting for this machine. It is stored beside your " +
-                "message logs, it is never sent, and the person you are talking to will not " +
-                "see it — the same way the phone stores its own wallpaper.",
+            t("desktop.wallpaper.local_note"),
             fontSize = 11.sp,
             color = Ink.soft,
             modifier = Modifier.padding(top = OshiTheme.md),
@@ -168,7 +170,7 @@ private fun WallpaperOption(option: WallpaperId, selected: Boolean, onPick: () -
             }
         }
         Text(
-            option.label,
+            wallpaperName(option),
             style = OshiTheme.typography.bodyMedium,
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
             color = Ink.strong,

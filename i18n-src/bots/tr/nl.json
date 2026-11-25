@@ -1,0 +1,9 @@
+{
+  "pc.bot.commands": "Opdrachten",
+  "pc.bot.add_command": "Opdracht toevoegen",
+  "pc.bot.command_rule": "1–32 tekens: kleine letters, cijfers en _",
+  "pc.bot.duplicate": "Deze opdracht staat al in de lijst",
+  "pc.bot.publish": "Publiceren op de OSHI-server",
+  "pc.bot.published": "De opdrachten werken in de groepen van je bot",
+  "pc.bot.publish_failed": "Publiceren mislukt: %@"
+}

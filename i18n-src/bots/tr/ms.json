@@ -1,0 +1,9 @@
+{
+  "pc.bot.commands": "Arahan",
+  "pc.bot.add_command": "Tambah arahan",
+  "pc.bot.command_rule": "1–32 aksara: huruf kecil, digit dan _",
+  "pc.bot.duplicate": "Arahan ini sudah ada dalam senarai",
+  "pc.bot.publish": "Terbitkan ke pelayan OSHI",
+  "pc.bot.published": "Arahan kini aktif dalam kumpulan bot anda",
+  "pc.bot.publish_failed": "Tidak dapat menerbitkan: %@"
+}

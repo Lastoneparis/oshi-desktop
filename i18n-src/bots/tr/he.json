@@ -1,0 +1,9 @@
+{
+  "pc.bot.commands": "פקודות",
+  "pc.bot.add_command": "הוספת פקודה",
+  "pc.bot.command_rule": "1–32 תווים: אותיות קטנות, ספרות ו־_",
+  "pc.bot.duplicate": "הפקודה הזו כבר ברשימה",
+  "pc.bot.publish": "פרסום בשרת OSHI",
+  "pc.bot.published": "הפקודות פעילות בקבוצות של הבוט שלך",
+  "pc.bot.publish_failed": "הפרסום נכשל: %@"
+}

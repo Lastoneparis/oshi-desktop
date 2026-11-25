@@ -1,11 +1,18 @@
 package com.oshi.desktop.ui.state
 
+import com.oshi.desktop.i18n.t
 import com.oshi.desktop.ai.DesktopLlmManager
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 
 /**
- * The AI destination's state — PARITY.md row 2.5, and the row says "no inference has ever run".
+ * The AI destination's state — PARITY.md row 2.5.
+ *
+ * This line used to end "and the row says 'no inference has ever run'". The row says the
+ * opposite now: the native was built on 2026-10-28 and three answers were generated on
+ * 2026-10-29 (1431/1194/1444 ms). The paragraph below said "**Neither is shipped**, and on
+ * this machine neither has ever been present at the same time" — also no longer true here,
+ * though still true of what ships.
  *
  * ============================================================ WHAT THIS SCREEN IS FOR
  *
@@ -13,8 +20,9 @@ import java.util.concurrent.Executors
  * the plumbing is shared source — `service/LlamaCpp.kt` is compiled straight out of the
  * Android tree so the desktop and the handset load a JNI shim built from one header — but
  * two things have to be true before a single token is generated: a `llama_jni` native has to
- * be on `java.library.path`, and a GGUF file has to be pointed at. **Neither is shipped**,
- * and on this machine neither has ever been present at the same time.
+ * be on `java.library.path`, and a GGUF file has to be pointed at. **Neither is SHIPPED** —
+ * that part stands — but both have been present together on a development machine since
+ * 2026-10-28, which is what closed row 2.5.
  *
  * So the honest screen is not a chat box that silently does nothing. It is a screen that
  * reports, in order: whether the native loaded, whether a model is configured, and only then
@@ -70,7 +78,7 @@ class AiConsoleModel(
         synchronized(lock) {
             notice = when (outcome) {
                 is DesktopLlmManager.ModelOutcome.Accepted -> Notice(
-                    "Model accepted: ${outcome.file.name} (${outcome.bytes} bytes). Nothing was uploaded.",
+                    t("pc.ai.modelAccepted", outcome.file.name, com.oshi.desktop.ui.components.humanBytes(outcome.bytes)),
                     Severity.OK,
                 )
                 else -> Notice(modelProblem(outcome), Severity.ERROR)
@@ -83,7 +91,7 @@ class AiConsoleModel(
         val q = question.trim()
         val go = synchronized(lock) {
             when {
-                q.isEmpty() -> { notice = Notice("Nothing to ask.", Severity.INFO); false }
+                q.isEmpty() -> { notice = Notice(t("pc.ai.nothingToAsk"), Severity.INFO); false }
                 busy -> false
                 else -> { busy = true; notice = null; true }
             }
@@ -109,7 +117,7 @@ class AiConsoleModel(
         val dropped = manager.forget()
         synchronized(lock) {
             turns.clear()
-            notice = Notice("Cleared $dropped stored turn(s). The model keeps no other memory.", Severity.OK)
+            notice = Notice(t("pc.ai.cleared"), Severity.OK)
         }
         publish()
     }
@@ -126,33 +134,33 @@ class AiConsoleModel(
      */
     private fun turnFor(q: String, a: DesktopLlmManager.Answer): Turn = when (a) {
         is DesktopLlmManager.Answer.Generated ->
-            Turn(q, a.text, true, "${a.elapsedMs} ms, ${a.rawChars} raw characters, entirely on this machine.")
+            Turn(q, a.text, true, t("pc.ai.generatedIn", "%.1f".format(java.util.Locale.ROOT, a.elapsedMs / 1000.0)))
         is DesktopLlmManager.Answer.NoNativeLibrary ->
-            Turn(q, "", false, "No llama.cpp native library is loaded. ${a.explain}")
+            Turn(q, "", false, t("pc.ai.noNative") + " " + a.explain)
         DesktopLlmManager.Answer.NoModel ->
-            Turn(q, "", false, "No model file is configured. Point this screen at a .gguf first.")
+            Turn(q, "", false, t("pc.ai.noModel"))
         is DesktopLlmManager.Answer.ModelGone ->
-            Turn(q, "", false, "The configured model is no longer usable: " + modelProblem(a.outcome))
+            Turn(q, "", false, t("pc.ai.modelGone", modelProblem(a.outcome)))
         is DesktopLlmManager.Answer.ModelLoadFailed ->
-            Turn(q, "", false, "llama.cpp refused to load ${a.path}. It is a GGUF file the engine would not open.")
+            Turn(q, "", false, t("pc.ai.loadFailed", a.path))
         is DesktopLlmManager.Answer.NativeCallFailed ->
-            Turn(q, "", false, "The native call failed: ${a.detail}")
+            Turn(q, "", false, t("pc.ai.nativeFailed", a.detail))
         is DesktopLlmManager.Answer.TimedOut ->
-            Turn(q, "", false, "Gave up after ${a.afterMs} ms. Nothing partial is shown — half an answer from a local model is not an answer.")
+            Turn(q, "", false, t("pc.ai.timedOut", (a.afterMs / 1000).toInt()))
         DesktopLlmManager.Answer.Busy ->
-            Turn(q, "", false, "The engine is already generating. One question at a time.")
+            Turn(q, "", false, t("pc.ai.busy"))
         is DesktopLlmManager.Answer.EmptyOutput ->
-            Turn(q, "", false, "The model produced ${a.rawChars} characters and none of them survived cleanup.")
+            Turn(q, "", false, t("pc.ai.emptyOutput"))
     }
 
     private fun modelProblem(o: DesktopLlmManager.ModelOutcome): String = when (o) {
         is DesktopLlmManager.ModelOutcome.Accepted -> "accepted"
-        is DesktopLlmManager.ModelOutcome.NotFound -> "No file at ${o.path}."
-        is DesktopLlmManager.ModelOutcome.NotAFile -> "${o.path} is not a file."
-        is DesktopLlmManager.ModelOutcome.Unreadable -> "${o.path} cannot be read by this process."
-        is DesktopLlmManager.ModelOutcome.Empty -> "${o.path} is zero bytes."
+        is DesktopLlmManager.ModelOutcome.NotFound -> t("pc.ai.model.notFound", o.path)
+        is DesktopLlmManager.ModelOutcome.NotAFile -> t("pc.ai.model.notAFile", o.path)
+        is DesktopLlmManager.ModelOutcome.Unreadable -> t("pc.ai.model.unreadable", o.path)
+        is DesktopLlmManager.ModelOutcome.Empty -> t("pc.ai.model.empty", o.path)
         is DesktopLlmManager.ModelOutcome.NotGguf ->
-            "${o.path} does not start with the GGUF magic — it begins ${o.firstBytes}. A renamed file is the usual cause."
+            t("pc.ai.model.notGguf", o.path)
     }
 
     // ---------------------------------------------------------------- plumbing

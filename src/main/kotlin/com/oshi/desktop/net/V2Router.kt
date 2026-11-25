@@ -7,6 +7,9 @@ import com.oshi.desktop.store.PrekeyStore
 import com.oshi.desktop.store.SessionStore
 import com.oshi.messenger.network.v2.OSHICryptoV2
 import com.oshi.messenger.network.v2.OSHIRatchetV2
+import com.oshi.messenger.network.v2.RatchetHealSignal
+import com.oshi.messenger.network.v2.V2Padding
+import com.oshi.messenger.network.v2.V2PaddingPeers
 import com.oshi.messenger.network.v2.V2RetryBudget
 import com.oshi.messenger.network.v2.V2Session
 import java.util.Base64
@@ -22,6 +25,8 @@ data class V2Inbound(
     val ts: Long,
     val groupId: String?,
     val text: String,
+    /** __PER_DEVICE_MAILBOX_2026_09_23__ The sender's device, on a per-device copy; null otherwise. */
+    val fromDevice: String? = null,
 )
 
 /**
@@ -79,27 +84,74 @@ class V2Router(
     private val prekeys: PrekeyStore,
     private val state: RouterState,
     private val log: (String) -> Unit = {},
+    /**
+     * __PER_DEVICE_MAILBOX_2026_09_23__ This install as a device of its account. Null, or not
+     * [DeviceMailbox.active] (flag off / not registered / removed), means every path below is
+     * exactly the pre-existing one.
+     */
+    private val devices: DeviceMailbox? = null,
 ) {
 
     /** Invoked for every decrypted message, BEFORE the relay is acked. Must be durable. */
     var onMessage: (V2Inbound) -> Unit = {}
 
+    /**
+     * __PER_DEVICE_MAILBOX_2026_09_23__ A `sent-copy` another device of this account encrypted
+     * for this one (CLIENT_SPEC.md §3.6): to be stored as an OUTGOING row. Called BEFORE the ack,
+     * like [onMessage]. Never routed through [onMessage]: it is not something a contact said.
+     */
+    var onSentCopy: (SentCopy) -> Unit = {}
+
+    /**
+     * Account envelopes this device could not open and dropped WITHOUT a retry, a reset or a
+     * heal signal because they were not addressed to it (§3.4). The reset-storm check reads it.
+     */
+    @Volatile var foreignDrops: Int = 0
+        private set
+
     private val ratchetLock = ReentrantLock()
     private val pollLock = ReentrantLock()
     private val bundleCache = ConcurrentHashMap<String, com.oshi.messenger.network.v2.FetchedBundle>()
-    private val retryBudget = V2RetryBudget(state.retryStore())
+    private val retryBudget = V2RetryBudget(state.retryStore(), state.retryStall())
 
     private val myUserKey: String get() = identity.userKey
     private val myPair: OSHICryptoV2.X25519Pair get() = identity.identity
 
+    init {
+        // __V2_PADDING_2026_11_09__ per-session "strips padding" knowledge, kept in router-state.json.
+        V2PaddingPeers.attach(state.paddingStore())
+    }
+
     // ------------------------------------------------------------------ capability
 
-    /** V2 enabled AND this peer is reachable over it (existing session, or a fetchable bundle). */
-    fun ensureCapable(peerUserKey: String): Boolean {
-        if (!config.isEnabledCached()) return false
-        if (sessions.has(peerUserKey)) return true
-        return fetchBundleCached(peerUserKey) != null
+    /**
+     * Whether this peer can receive v2 at all.
+     *
+     * __NO_BUNDLE_IS_NOT_A_TIMEOUT_2026_11_02__ Three states, because the group
+     * screen turns one of them into **"<name> must update OSHI"** — a sentence
+     * naming a real person. [UNKNOWN] means "ask again on the next send" and is
+     * shown to nobody. The v2 gate being shut is a fact about THIS machine, so
+     * it is UNKNOWN too, never NO_BUNDLE.
+     */
+    enum class V2Reach { REACHABLE, NO_BUNDLE, UNKNOWN }
+
+    fun v2Reach(peerUserKey: String): V2Reach {
+        if (!config.isEnabledCached()) return V2Reach.UNKNOWN
+        if (activeDevices()?.peerDevices(peerUserKey)?.isNotEmpty() == true) return V2Reach.REACHABLE
+        if (sessions.has(peerUserKey)) return V2Reach.REACHABLE
+        bundleCache[peerUserKey]?.let { return V2Reach.REACHABLE }
+        return when (val r = keys.fetchBundleOutcome(peerUserKey)) {
+            is V2KeysClient.BundleFetch.Found -> {
+                bundleCache[peerUserKey] = r.bundle
+                V2Reach.REACHABLE
+            }
+            V2KeysClient.BundleFetch.Missing -> V2Reach.NO_BUNDLE
+            V2KeysClient.BundleFetch.Unknown -> V2Reach.UNKNOWN
+        }
     }
+
+    /** V2 enabled AND this peer is reachable over it (existing session, or a fetchable bundle). */
+    fun ensureCapable(peerUserKey: String): Boolean = v2Reach(peerUserKey) == V2Reach.REACHABLE
 
     fun refreshConfig() = config.refresh(myUserKey)
 
@@ -116,12 +168,35 @@ class V2Router(
     fun publishBundleIfNeeded(): Boolean {
         if (!config.isEnabled(myUserKey)) return false
         return try {
-            if (!prekeys.hasPublished()) return keys.publish(OPK_TARGET) != null
+            // __PER_DEVICE_MAILBOX_2026_09_23__ The ACCOUNT bundle has ONE owner. A second
+            // install of the same identity publishing it resets the owner's pool and steals
+            // its new sessions (CLIENT_SPEC.md §1-§3.2). [DeviceMailbox.mayPublishAccountBundle]
+            // says whether this install is that owner; "no" is not a failure (return true: the
+            // bundle that is live is valid, it is just not ours to replace).
+            val policy = devices
+            if (!prekeys.hasPublished()) {
+                if (policy != null && !policy.mayPublishAccountBundle(null)) return true
+                return (keys.publish(OPK_TARGET) != null).also { if (it) state.setPublishedCaps(V2ConfigGate.MY_CAPS) }
+            }
             when (val remaining = keys.remainingCount()) {
                 // Count unavailable → do NOT mint. Guessing is what grew the pool; the
                 // bundle already on the server is still valid.
                 null -> true
-                else -> if (remaining >= OPK_LOW_WATER) true else keys.publish(OPK_TARGET - remaining) != null
+                else -> when {
+                    policy != null && !policy.mayPublishAccountBundle(remaining) -> true
+                    // __V2_PADDING_2026_11_09__ Caps drift (iOS `republishIfCapabilitiesDrifted`):
+                    // a healthy pool used to mean the bundle's `caps` never changed, so a new
+                    // capability stayed unannounced indefinitely. Republish ONCE with zero new
+                    // one-time pre-keys — same generation, the server keeps the pool.
+                    remaining >= OPK_LOW_WATER -> {
+                        if (state.publishedCaps() != V2ConfigGate.MY_CAPS && keys.publish(0) != null) {
+                            state.setPublishedCaps(V2ConfigGate.MY_CAPS)
+                            log("caps republished: ${V2ConfigGate.MY_CAPS}")
+                        }
+                        true
+                    }
+                    else -> (keys.publish(OPK_TARGET - remaining) != null).also { if (it) state.setPublishedCaps(V2ConfigGate.MY_CAPS) }
+                }
             }
         } catch (e: Exception) {
             log("publishBundle failed: ${e.message}")
@@ -151,8 +226,59 @@ class V2Router(
         plaintext: ByteArray,
         msgId: String? = null,
         groupId: String? = null,
+        /**
+         * __PER_DEVICE_MAILBOX_2026_09_23__ Also send a `sent-copy` to this account's other
+         * devices, in the same batch (§3.6). For USER messages only — never receipts/typing.
+         * Ignored outside device mode. A group send asks via [sendSelfCopy] once instead.
+         */
+        selfCopy: Boolean = false,
+        /**
+         * __V2_PADDING_2026_11_09__ The caller's GROUP rule: false when a member cannot strip
+         * padding ([groupPaddingAllowed]). 1:1 leaves it true; the per-session capability is
+         * checked at each encrypt, where the session slot is known.
+         */
+        padGate: Boolean = true,
+        /**
+         * __RESEND_KEEPS_DATE_2026_11_18__ The time the message is DATED — the moment the person
+         * pressed send — for a RESEND (cover outbox retry, radio escalation). The envelope's `ts`
+         * is what every receiver sorts its thread by, so a message parked during a block and
+         * delivered after a newer one must keep its original date or it lands BELOW the newer
+         * one. Android's `originalTimestampMs`. Null = now (a first send).
+         */
+        sentAtMs: Long? = null,
     ): Boolean {
         if (!config.isEnabledCached()) return false
+        if (sentAtMs != null) datedAt.set(sentAtMs)
+        try { return sendTextDated(peerUserKey, plaintext, msgId, groupId, selfCopy, padGate) } finally { datedAt.remove() }
+    }
+
+    /** See [sendText]'s `sentAtMs`: read by every envelope built on this thread for the call. */
+    private val datedAt = ThreadLocal<Long?>()
+    private fun envelopeTs(): Long = datedAt.get() ?: System.currentTimeMillis()
+
+    /**
+     * __COVER_RETRY_KICK_2026_11_18__ Wall-clock time of the last pull that went THROUGH (the
+     * relay answered), legacy or device view. The client kicks the cover outbox when it moves.
+     */
+    @Volatile var lastPullOkMs: Long = 0L
+        private set
+
+    private fun sendTextDated(
+        peerUserKey: String,
+        plaintext: ByteArray,
+        msgId: String?,
+        groupId: String?,
+        selfCopy: Boolean,
+        padGate: Boolean,
+    ): Boolean {
+        activeDevices()?.let { dm ->
+            return try {
+                sendDeviceMode(dm, peerUserKey, plaintext, msgId ?: UUID.randomUUID().toString(), groupId, selfCopy, padGate)
+            } catch (e: Exception) {
+                log("sendText (device mode) failed: ${e.javaClass.simpleName}: ${e.message}")
+                false
+            }
+        }
         val routing = groupId?.let { GroupFanout.envelopeFields(it) }
         return try {
             // The bundle fetch is network I/O and stays OUTSIDE the ratchet lock, so a
@@ -163,7 +289,7 @@ class V2Router(
                 // Re-read inside the lock: a concurrent inbound may have established or
                 // advanced this session while we were fetching.
                 val session = sessions.load(peerUserKey) ?: run {
-                    val b = bundle ?: return@sendText false
+                    val b = bundle ?: return@sendTextDated false
                     // ONE initiator() call: each mints fresh ephemerals, so the state and
                     // the header must come from the same one.
                     val init = V2Session.initiator(myPair, b)
@@ -178,7 +304,7 @@ class V2Router(
                 }
                 val x3dh = session.pendingInitiatorHeader
                 session.pendingInitiatorHeader = null
-                val (header, ct) = OSHIRatchetV2.encrypt(session.ratchet, plaintext, EMPTY)
+                val (header, ct) = OSHIRatchetV2.encrypt(session.ratchet, sealForRelay(peerUserKey, null, plaintext, padGate), EMPTY)
                 // BEFORE the send. A failed send costs one skipped sequence number, which
                 // the peer ignores; a rewound chain costs a reused (key, nonce).
                 sessions.save(session)
@@ -191,7 +317,7 @@ class V2Router(
                     x3dh = x3dh,
                     header = OSHICryptoV2.encodeHeader(header),
                     ciphertext = ct,
-                    ts = System.currentTimeMillis(),
+                    ts = envelopeTs(),
                 )
             }
             messages.send(envelope).isNotEmpty()
@@ -201,8 +327,45 @@ class V2Router(
         }
     }
 
+    /**
+     * __V2_PADDING_2026_11_09__ The relay seal's plaintext: padded only when the caller's group
+     * rule allows it AND this session's counterpart is known to strip padding. Everything this
+     * router encrypts goes to the relay — the mesh and LoRa paths never come through here.
+     */
+    private fun sealForRelay(peer: String, device: String?, plaintext: ByteArray, padGate: Boolean): ByteArray =
+        if (V2Padding.shouldPad(padGate, V2PaddingPeers.slotCapable(peer, device))) V2Padding.pad(plaintext) else plaintext
+
+    /** Same rule as `GroupEnvelopeV3.canUse`: pad a group message only if EVERY other member advertises it. */
+    fun groupPaddingAllowed(members: Collection<String>): Boolean = V2PaddingPeers.groupAllows(members, myUserKey)
+
+    /**
+     * __MEDIA_PADDING_2026_11_10__ Whether a v2 blob for [peer] may be padded. Not "the path
+     * routing picks today": [sendText] can fall back from per-device copies to the account
+     * envelope after the blob is sealed. So the peer's ACCOUNT slot AND every device on its
+     * server-side list must advertise `CAP_MEDIA_PADDING` — asked whatever our own device mode
+     * is. A list that cannot be fetched, or any unknown/old slot ⇒ false (unpadded). The relay
+     * blob path only: the mesh/LoRa/legacy paths never pad.
+     */
+    fun mediaPaddingAllowed(peer: String): Boolean = try {
+        if (!V2PaddingPeers.mediaSlotCapable(peer, null)) false      // no network for a known no
+        else {
+            val list = devices?.let { dm -> dm.peerDevices(peer) } ?: keys.peerDevices(peer)
+            // Our own other devices are never in a peer's list; a note-to-self excludes this one.
+            val others = if (isSelf(peer)) list?.filter { it != devices?.deviceId } else list
+            V2PaddingPeers.mediaAllows(peer, others)
+        }
+    } catch (e: Exception) {
+        false
+    }
+
+    /** Group media is sealed ONCE for every member: padded only if every other member allows it. */
+    fun groupMediaPaddingAllowed(members: Collection<String>): Boolean =
+        V2PaddingPeers.groupMediaAllows(members.filter { it.isNotBlank() }.distinct().associateWith { mediaPaddingAllowed(it) }, myUserKey)
+
     /** Establish an initiator session without sending; the X3DH header rides whatever goes first. */
     fun ensureSession(peerUserKey: String): Boolean {
+        // Device mode: the per-device sessions are created by the fan-out itself.
+        if (activeDevices()?.peerDevices(peerUserKey)?.isNotEmpty() == true) return true
         if (sessions.has(peerUserKey)) return true
         val bundle = takeBundle(peerUserKey) ?: return false
         return ratchetLock.withLock {
@@ -227,48 +390,227 @@ class V2Router(
      */
     fun poll(): Int = pollLock.withLock {
         if (!config.isEnabledCached()) return 0
+        activeDevices()?.let { return pollDevice(it) }
         val pull = messages.pull(myUserKey, state.lastSeq()) ?: return 0
-        var delivered = 0
+        lastPullOkMs = System.currentTimeMillis()
+        val (delivered, ackSeq) = processPull(pull, deviceView = null)
+        if (ackSeq > state.lastSeq() && messages.ack(myUserKey, ackSeq)) {
+            state.setLastSeq(ackSeq)
+            // __BUDGET_REFUND_DEADLOCK_2026_10_20__ The cursor ADVANCED, so the
+            // mailbox is draining and the stall clock restarts. Without this call
+            // the clock would only ever run forward and, twenty minutes after the
+            // first poll, the budget would stop holding ANY envelope back — the
+            // opposite failure to the wedge, and just as silent.
+            retryBudget.noteCursorMoved()
+        }
+        state.flush()
+        delivered
+    }
 
-        // Hold the ack BEFORE the earliest failed seq so the relay keeps anything we could
-        // not decrypt — but only while the retry budget lasts.
+    /**
+     * Decrypt → deliver every envelope of one pull, in seq order, and say how far it may be
+     * acked. Shared by the legacy view ([deviceView] null) and the device view.
+     *
+     * Hold the ack BEFORE the earliest failed seq so the relay keeps anything we could not
+     * decrypt — but only while the retry budget lasts, and only for envelopes ADDRESSED to this
+     * device: one that was not (§3.4) is let go on the first failure, with no retry, no reset.
+     */
+    private fun processPull(pull: V2Pull, deviceView: DeviceMailbox?): Pair<Int, Long> {
+        var delivered = 0
         var lowestFailedSeq = Long.MAX_VALUE
         fun hold(seq: Long) { if (seq in 0 until lowestFailedSeq) lowestFailedSeq = seq }
 
         for (env in pull.messages.sortedBy { it.seq }) {
+            val route = routeInbound(deviceView, env)
+            if (route == null) { foreignDrops++; continue }
             if (!state.markSeen(env.msgId)) continue
 
-            val plaintext: ByteArray? = try {
-                ratchetLock.withLock { decryptInbound(env) }
+            val rawPlaintext: ByteArray? = try {
+                ratchetLock.withLock { decryptInbound(env, route.sessionDevice, route.pool) }
             } catch (e: Exception) {
-                // The ratchet was NOT advanced. Hold the seq so the relay keeps the
-                // envelope — bounded, so one poisoned envelope cannot wedge the mailbox.
+                // The ratchet was NOT advanced.
                 state.unmarkSeen(env.msgId)
-                if (retryBudget.shouldRetry(env.msgId)) {
+                if (!route.addressed) {
+                    // THE RULE (§3.4): an envelope that was not addressed to this device never
+                    // costs a retry, a session reset, a heal signal or an error row. The device
+                    // holding the account bundle has it; devsync brings it here.
+                    foreignDrops++
+                    log("account envelope ${env.msgId.take(8)} not decryptable on this device — dropped quietly")
+                } else if (retryBudget.shouldRetry(env.msgId)) {
+                    // Hold the seq so the relay keeps the envelope — bounded, so one poisoned
+                    // envelope cannot wedge the mailbox.
                     hold(env.seq)
                     log("inbound ${env.msgId.take(8)} from ${env.from.take(8)}… held: ${e.message}")
                 } else {
                     log("giving up on ${env.msgId.take(8)} after ${V2RetryBudget.MAX_RETRIES} attempts: ${e.message}")
+                    // __DESKTOP_RATCHET_HEAL_2026_10_29__ THE PEER HOLDS THE REMEDY AND HAS
+                    // NO WAY TO LEARN IT IS NEEDED. This branch used to end here, and that
+                    // was the whole defect: the retry budget condemns the envelope, the
+                    // session stays dead, and every later message from that peer dies the
+                    // same way. Half the cure was already present — the shared `V2Session`
+                    // adopts a fresh session from an inbound X3DH header — but an X3DH header
+                    // is attached ONLY by a sender with no session, and the peer's own is
+                    // fine as far as it knows.
+                    healBrokenSession(env.from, e)
                 }
                 continue
             }
-            if (plaintext == null) continue      // undecryptable-forever → let it be acked
+            if (rawPlaintext == null) {                // undecryptable-forever → let it be acked
+                if (!route.addressed) foreignDrops++
+                continue
+            }
             retryBudget.clear(env.msgId)
 
+            // __V2_PADDING_2026_11_09__ Stripped AFTER the ratchet, never inside decryptInbound
+            // (a throw there would be taken for a broken session). A malformed tail is
+            // authenticated bytes from the peer: acked and dropped, no retry, no heal.
+            val plaintext: ByteArray = when (val u = V2Padding.unpad(rawPlaintext)) {
+                is V2Padding.Unpadded.Plain -> {
+                    V2PaddingPeers.noteInbound(env.from, route.sessionDevice, padded = false, carriedX3DH = env.x3dh != null); u.bytes
+                }
+                is V2Padding.Unpadded.Padded -> {
+                    V2PaddingPeers.noteInbound(env.from, route.sessionDevice, padded = true, carriedX3DH = env.x3dh != null); u.bytes
+                }
+                V2Padding.Unpadded.Malformed -> {
+                    log("padded plaintext ${env.msgId.take(8)} from ${env.from.take(8)}… has a malformed tail — dropped")
+                    continue
+                }
+            }
+            // __MEDIA_PADDING_2026_11_10__ a file whose manifest carries `paddedSize` proves this
+            // slot's counterpart reads padded media (only such a build writes one).
+            com.oshi.messenger.network.v2.V2FileKeyMessage.parse(plaintext)?.let { key ->
+                val padded = runCatching {
+                    com.oshi.messenger.network.v2.OSHICryptoV2Streaming.openManifest(key.fileKey, key.fileNonce, key.manifest).paddedSize != null
+                }.getOrDefault(false)
+                if (padded) V2PaddingPeers.noteInboundPaddedMedia(env.from, route.sessionDevice)
+            }
+
             try {
-                onMessage(V2Inbound(env.from, env.msgId, env.ts, env.groupId, String(plaintext, Charsets.UTF_8)))
-                delivered++
+                if (env.fromDevice != null && isSelf(env.from)) {
+                    // Another device of this account (§3.6). Only a sent-copy becomes anything.
+                    SentCopy.parse(plaintext)?.let { onSentCopy(it.copy(fromDevice = env.fromDevice)); delivered++ }
+                } else {
+                    val text = String(plaintext, Charsets.UTF_8)
+                    // __DESKTOP_RATCHET_HEAL_2026_10_29__ A heal acknowledgement is caught
+                    // HERE, in the router, and never handed to the client.
+                    //
+                    // It is not a control sentinel and `ControlPrefix` must not learn about
+                    // it: this is a V2 SESSION artefact, meaningful only to the layer that
+                    // owns sessions, and the client has no business knowing the ratchet broke.
+                    // Caught before `onMessage` is also what keeps it out of every path that
+                    // follows — no row, no receipt, no notification, no profile request.
+                    //
+                    // **By the time this runs it has already done its work.** The envelope
+                    // carried an X3DH header, `decryptInbound` adopted the fresh session while
+                    // opening it, and that adoption IS the repair. There is nothing to act on;
+                    // the only job left is to not draw it.
+                    val heal = RatchetHealSignal.parse(text)
+                    if (heal != null) {
+                        // The resend list is READ and deliberately not honoured: this client
+                        // keeps no store of message ids a peer could not open, so it has
+                        // nothing to look them up in. Logged with the count so the gap is
+                        // visible rather than silent — both phones log the mirror case when a
+                        // peer cannot honour a list.
+                        if (heal.resend.isNotEmpty()) {
+                            log("heal: ${env.from.take(8)}… asked us to resend ${heal.resend.size} message(s); " +
+                                "this client keeps no unreadable-id store, so the session is repaired and nothing is resent")
+                        } else {
+                            log("heal: session with ${env.from.take(8)}… repaired by their fresh X3DH header")
+                        }
+                        continue
+                    }
+                    onMessage(V2Inbound(env.from, env.msgId, env.ts, env.groupId, text, env.fromDevice))
+                    delivered++
+                }
             } catch (e: Exception) {
                 // The ratchet is ALREADY spent — this envelope can never be decrypted
                 // again, so holding the seq would poison the queue for nothing.
                 log("deliver failed after decrypt; ${env.msgId.take(8)} dropped locally: ${e.message}")
             }
         }
-
         val ackSeq = if (lowestFailedSeq == Long.MAX_VALUE) pull.maxSeq else lowestFailedSeq - 1
-        if (ackSeq > state.lastSeq() && messages.ack(myUserKey, ackSeq)) state.setLastSeq(ackSeq)
-        state.flush()
-        delivered
+        return delivered to ackSeq
+    }
+
+    /**
+     * __DESKTOP_RATCHET_HEAL_2026_10_29__ Repair a 1:1 session the retry budget condemned.
+     *
+     * The shape is Signal's and WhatsApp's, which is worth stating because the obvious design
+     * is the wrong one: **nobody sends a "reset"**. The receiver is the only party that KNOWS
+     * the session is broken, so it sends an acknowledgement on the ORDINARY message channel
+     * and the sender re-emits with a fresh session. The repair therefore travels the path the
+     * messages travel — if messages arrive, the repair arrives. The predecessor of this on
+     * the phones went over a SEPARATE channel (Pinata/IPFS) and was observed failing while
+     * messages still flowed.
+     *
+     * **And the acknowledgement IS the repair, not a request for one.** It is sent AFTER the
+     * session is deleted, so [sendText] finds nothing, re-runs X3DH, and the envelope CARRIES
+     * the header; the peer adopts it in the act of decrypting. Signal's `PreKeySignalMessage`,
+     * out of pieces this client already had.
+     *
+     * ## Two failures that must NOT heal, and why
+     *
+     *  - [SecurityException] — the envelope's X3DH identity did not match its `from`. That is
+     *    a forgery, and a forgery proves nothing about our session with the real contact.
+     *    Deleting it would let anyone who can POST an envelope destroy a working session.
+     *    **Nothing is deleted and nothing is sent.**
+     *  - [V2X3DHException] — the peer bootstrapped against pre-key material this device no
+     *    longer holds. An acknowledgement would restart that exact problem; what is missing
+     *    is our material back on the server, so the bundle is republished instead.
+     *
+     * ## The tie-break is not ours to re-decide
+     *
+     * `RatchetHealSignal.Policy` is COMPILED from the phones' own source (see
+     * `build.gradle.kts`), including `isHealInitiator(me, peer) = me < peer`. Two devices
+     * that both see one broken batch would each delete and each send a header — a symmetric
+     * loop the cooldown only spaces out. Exactly one side acts immediately; the other waits a
+     * full cooldown, adopting headers in the meantime. A second implementation that disagreed
+     * about which side waits would produce the loop the rule exists to prevent, which is why
+     * this is shared source and not a port.
+     *
+     * The resend list (`RatchetHealSignal.encode(resend)`) is deliberately sent EMPTY here:
+     * this client keeps no store of unreadable message ids to ask for, so claiming to is
+     * worse than the bare form, which still heals the session and simply rescues nothing —
+     * exactly what both phones log when the peer cannot honour a list.
+     */
+    private fun healBrokenSession(peer: String, cause: Exception) {
+        when (cause) {
+            is SecurityException -> {
+                log("heal: refusing to touch the session for ${peer.take(8)}… — that was a forged identity")
+                return
+            }
+            is V2X3DHException -> {
+                log("heal: ${peer.take(8)}… used pre-key material we no longer hold — republishing our bundle")
+                runCatching { publishBundleIfNeeded() }
+                    .onFailure { log("heal: republish failed: ${it.message}") }
+                return
+            }
+        }
+        val now = System.currentTimeMillis()
+        val firstEvidence = state.healEvidenceAt(peer, now)
+        if (!RatchetHealSignal.Policy.isHealInitiator(identity.userKey, peer) &&
+            now - firstEvidence < RatchetHealSignal.Policy.COOLDOWN_MS
+        ) {
+            log("heal: yielding to ${peer.take(8)}… as the initiator of this pair")
+            return
+        }
+        if (!RatchetHealSignal.Policy.maySend(state.healSentAt(peer), now)) {
+            log("heal: still within the cooldown for ${peer.take(8)}…")
+            return
+        }
+        // The deletion is HERE and not inside the envelope loop: it must happen once per
+        // condemnation, not once per undecryptable envelope in the batch.
+        sessions.delete(peer)
+        state.noteHealSent(peer, now)
+        val sent = runCatching {
+            sendText(
+                peer,
+                RatchetHealSignal.encode().toByteArray(Charsets.UTF_8),
+                msgId = RatchetHealSignal.makeMsgId(),
+            )
+        }.getOrDefault(false)
+        log("heal: session with ${peer.take(8)}… deleted and a fresh X3DH header " +
+            if (sent) "sent — the peer adopts it by decrypting" else "could NOT be sent; it will be retried on the next condemnation")
     }
 
     /**
@@ -278,32 +620,41 @@ class V2Router(
      *         only "first contact with no X3DH header", a no-op the caller may ack.
      * @throws Exception on a genuine failure, so the caller holds the seq.
      */
-    private fun decryptInbound(env: DesktopEnvelope): ByteArray? {
+    private fun decryptInbound(
+        env: DesktopEnvelope,
+        // __PER_DEVICE_MAILBOX_2026_09_23__ the session is (from, sessionDevice) and a first
+        // message is answered with [pool] — this device's own pre-keys for a per-device copy,
+        // the account pre-keys otherwise. Defaults = the legacy path, unchanged.
+        sessionDevice: String? = null,
+        pool: PrekeyStore = prekeys,
+    ): ByteArray? {
         val header = OSHICryptoV2.decodeHeader(env.header)
-        val existing = sessions.load(env.from)
+        val existing = sessions.load(env.from, sessionDevice)
 
         if (existing == null) {
             val x = env.x3dh ?: return null       // nothing to establish from
-            val (fresh, opkId) = establishResponder(env.from, x)
+            val (fresh, opkId) = establishResponder(env.from, x, pool)
             val pt = OSHIRatchetV2.decrypt(fresh, header, env.ciphertext, EMPTY)   // throws if forged
-            opkId?.let { prekeys.consumeOneTimePreKeyPriv(it) }                    // burn AFTER verify
-            sessions.save(responderRecord(env.from, fresh, x.identityKey))
+            opkId?.let { pool.consumeOneTimePreKeyPriv(it) }                       // burn AFTER verify
+            sessions.save(responderRecord(env.from, fresh, x.identityKey), sessionDevice)
             return pt
         }
 
         return try {
             val pt = OSHIRatchetV2.decrypt(existing.ratchet, header, env.ciphertext, EMPTY)
             existing.pendingInitiatorHeader = null      // the peer answered → stop attaching x3dh
-            sessions.save(existing)
+            sessions.save(existing, sessionDevice)
             pt
         } catch (e: Exception) {
             // Recovery: a message carrying an X3DH header that the current session cannot
             // open → re-establish as responder and retry, exactly as both platforms do.
+            // The replacement is saved only once the message AEAD-verifies, so an envelope
+            // that was never meant for this session cannot reset it.
             val x = env.x3dh ?: throw e
-            val (fresh, opkId) = establishResponder(env.from, x)
+            val (fresh, opkId) = establishResponder(env.from, x, pool)
             val pt = OSHIRatchetV2.decrypt(fresh, header, env.ciphertext, EMPTY)
-            opkId?.let { prekeys.consumeOneTimePreKeyPriv(it) }
-            sessions.save(responderRecord(env.from, fresh, x.identityKey))
+            opkId?.let { pool.consumeOneTimePreKeyPriv(it) }
+            sessions.save(responderRecord(env.from, fresh, x.identityKey), sessionDevice)
             pt
         }
     }
@@ -312,6 +663,7 @@ class V2Router(
     private fun establishResponder(
         sender: String,
         x: V2Session.X3DHHeader,
+        prekeys: PrekeyStore = this.prekeys,
     ): Pair<OSHIRatchetV2.State, String?> {
         // RESPONDER-SIDE TOFU. The initiator's X3DH identity key MUST equal their routing
         // address — the address IS the X25519 identity. Without this, anyone who can POST
@@ -342,6 +694,219 @@ class V2Router(
     private fun responderRecord(peer: String, state: OSHIRatchetV2.State, peerIdentity: ByteArray) =
         SessionStore.Record(peer, SessionStore.Role.RESPONDER, state, peerIdentity, null, null)
 
+    // ------------------------------------------------------------------ device mode
+    // __PER_DEVICE_MAILBOX_2026_09_23__ CLIENT_SPEC.md §3.3-§3.6.
+
+    private fun activeDevices(): DeviceMailbox? = devices?.takeIf { it.active }
+
+    private fun isSelf(userKey: String) = DeviceAuth.normalizeIdentity(userKey) == DeviceAuth.normalizeIdentity(myUserKey)
+
+    /** How one inbound envelope is opened on THIS device, or null = not ours: ack past it, silently. */
+    private class InboundRoute(val sessionDevice: String?, val pool: PrekeyStore, val addressed: Boolean)
+
+    /**
+     * @param dm the device view, or null for the legacy view. In the legacy view an account
+     *        envelope is handled EXACTLY as before; a per-device copy (queued while the flag was
+     *        on, shown to the legacy view after it turned off) is still opened when it is ours.
+     */
+    private fun routeInbound(dm: DeviceMailbox?, env: DesktopEnvelope): InboundRoute? {
+        val to = env.toDevice
+        if (to == null) {
+            // An account envelope (old sender). In device view only the account-bundle holder
+            // is its real recipient; every other device merely TRIES it (§3.4).
+            return InboundRoute(null, prekeys, addressed = dm?.holdsAccountBundle ?: true)
+        }
+        val mine = dm ?: devices ?: return null
+        return when {
+            // The server filters these; if one is seen anyway it is someone else's copy.
+            to != mine.deviceId -> null
+            isSelf(env.from) && env.fromDevice == null -> null
+            // A copy encrypted for this device: its own pre-keys, session (from, fromDevice).
+            else -> InboundRoute(env.fromDevice, mine.devicePrekeys, addressed = true)
+        }
+    }
+
+    /** One poll of THIS DEVICE's view: its own cursor, device-signed pull and ack. */
+    private fun pollDevice(dm: DeviceMailbox): Int {
+        val call = messages.pullDevice(myUserKey, state.deviceLastSeq())
+        if (!call.ok) {
+            when (call.code) {
+                410 -> dm.onDeviceUnknown()                 // removed: alert, back to legacy next tick
+                409 -> dm.onMailboxDisabled()               // the flag went off server-side
+                else -> log("device poll → HTTP ${call.code} ${call.error ?: ""}")
+            }
+            return 0
+        }
+        val pull = call.value!!
+        lastPullOkMs = System.currentTimeMillis()
+        val (delivered, ackSeq) = processPull(pull, deviceView = dm)
+        if (ackSeq > state.deviceLastSeq()) {
+            val ack = messages.ackDevice(myUserKey, ackSeq)
+            when {
+                ack.code in 200..299 -> {
+                    state.setDeviceLastSeq(ackSeq)
+                    // The device view acks different items but shares the one stall
+                    // clock: either cursor moving means the mailbox is draining.
+                    retryBudget.noteCursorMoved()
+                }
+                ack.code == 410 -> dm.onDeviceUnknown()
+                ack.code == 409 -> dm.onMailboxDisabled()
+            }
+        }
+        state.flush()
+        return delivered
+    }
+
+    /**
+     * One encrypted envelope for (peer, device?) — device null = the legacy/account session.
+     * Same rules as the legacy send: bundle fetch outside the ratchet lock, ONE initiator()
+     * call, the X3DH header on the first message only, ratchet persisted BEFORE the network.
+     * Null = no usable bundle for that target.
+     */
+    private fun encryptFor(
+        peer: String,
+        device: String?,
+        plaintext: ByteArray,
+        msgId: String,
+        routing: Map<String, String>?,
+        fromDevice: String?,
+        padGate: Boolean = true,
+    ): DesktopEnvelope? {
+        val bundle = if (sessions.load(peer, device) == null) {
+            (if (device == null) takeBundle(peer) else keys.fetchDeviceBundle(peer, device)) ?: return null
+        } else null
+        return ratchetLock.withLock {
+            val session = sessions.load(peer, device) ?: run {
+                val b = bundle ?: return null
+                val init = V2Session.initiator(myPair, b)
+                SessionStore.Record(peer, SessionStore.Role.INITIATOR, init.state, b.identityKey, b.signingKey, init.x3dh)
+            }
+            val x3dh = session.pendingInitiatorHeader
+            session.pendingInitiatorHeader = null
+            val (header, ct) = OSHIRatchetV2.encrypt(session.ratchet, sealForRelay(peer, device, plaintext, padGate), EMPTY)
+            sessions.save(session, device)
+            DesktopEnvelope(
+                msgId = msgId, from = myUserKey, to = peer,
+                type = routing?.get("type") ?: "1to1", groupId = routing?.get("groupId"),
+                x3dh = x3dh, header = OSHICryptoV2.encodeHeader(header), ciphertext = ct,
+                ts = envelopeTs(), toDevice = device, fromDevice = fromDevice,
+            )
+        }
+    }
+
+    /** One recipient identity of a fan-out: its device list, or null = one account envelope. */
+    private class Leg(val to: String, val plaintext: ByteArray, val routing: Map<String, String>?, var devices: List<String>?, val isSelfCopy: Boolean, val padGate: Boolean = true)
+
+    private fun sendDeviceMode(dm: DeviceMailbox, peer: String, plaintext: ByteArray, msgId: String, groupId: String?, selfCopy: Boolean, padGate: Boolean = true): Boolean {
+        val routing = groupId?.let { GroupFanout.envelopeFields(it) }
+        val toSelf = isSelf(peer)
+        // §3.5 step 1-2: the recipient's devices. Could not ask → today's path, unchanged.
+        val peerDevices = (if (toSelf) dm.ownOtherDevices() else dm.peerDevices(peer))
+            ?: return sendLegacyOnly(peer, plaintext, msgId, routing, padGate)
+        val legs = ArrayList<Leg>()
+        legs += Leg(peer, plaintext, routing, peerDevices.takeIf { it.isNotEmpty() }, isSelfCopy = false, padGate = padGate)
+        if (selfCopy && !toSelf) {
+            val mine = dm.ownOtherDevices().orEmpty()
+            if (mine.isNotEmpty()) {
+                val conv = if (groupId != null) SentCopy.conversationGroup(groupId) else SentCopy.conversation1to1(peer)
+                val copy = SentCopy.encode(conv, String(plaintext, Charsets.UTF_8), msgId, System.currentTimeMillis())
+                legs += Leg(myUserKey, copy, null, mine, isSelfCopy = true)
+            }
+        }
+        return postFanout(dm, msgId, legs, fallback = { sendLegacyOnly(peer, plaintext, msgId, routing, padGate) })
+    }
+
+    /**
+     * §3.6 for a GROUP send: the member legs go out one by one, the self copies once, here.
+     * @param payload the exact plaintext the members received.
+     */
+    fun sendSelfCopy(conversation: org.json.JSONObject, payload: ByteArray, msgId: String): Boolean {
+        val dm = activeDevices() ?: return false
+        val mine = dm.ownOtherDevices() ?: return false
+        if (mine.isEmpty()) return true
+        val copy = SentCopy.encode(conversation, String(payload, Charsets.UTF_8), msgId, System.currentTimeMillis())
+        return try {
+            postFanout(dm, msgId, listOf(Leg(myUserKey, copy, null, mine, isSelfCopy = true)), fallback = { false })
+        } catch (e: Exception) {
+            log("sendSelfCopy failed: ${e.javaClass.simpleName}: ${e.message}"); false
+        }
+    }
+
+    /**
+     * Encrypt every leg, POST ONE batch, and answer `409 device-list-mismatch` by adopting the
+     * server's list, dropping the sessions of stale devices and rebuilding only what is missing
+     * (§3.5 step 5). Copies already encrypted are REUSED across retries — their ratchet step is
+     * spent and persisted, re-encrypting would only skip a message number. After
+     * [MAX_MISMATCH_RETRIES] the caller's [fallback] sends one account envelope.
+     */
+    private fun postFanout(
+        dm: DeviceMailbox,
+        msgId: String,
+        legs: List<Leg>,
+        fallback: () -> Boolean,
+        built: HashMap<String, DesktopEnvelope> = HashMap(),
+    ): Boolean {
+        for (attempt in 0..MAX_MISMATCH_RETRIES) {
+            val batch = ArrayList<DesktopEnvelope>()
+            for (leg in legs) {
+                val devs = leg.devices
+                if (devs == null) {
+                    val k = "${leg.to}|"
+                    val env = built[k] ?: encryptFor(leg.to, null, leg.plaintext, msgId, leg.routing, null, leg.padGate)?.also { built[k] = it }
+                    if (env == null) { if (!leg.isSelfCopy) return false else continue }
+                    batch += env
+                    continue
+                }
+                val usable = ArrayList<String>()
+                for (d in devs) {
+                    val k = "${leg.to}|$d"
+                    val env = built[k] ?: encryptFor(leg.to, d, leg.plaintext, msgId, leg.routing, dm.deviceId, leg.padGate)?.also { built[k] = it }
+                    // No bundle for d: leave it out; if the server still counts it, it says so.
+                    if (env == null) { dm.invalidatePeer(leg.to); continue }
+                    batch += env; usable += d
+                }
+                leg.devices = usable
+            }
+            if (batch.isEmpty()) return legs.firstOrNull()?.isSelfCopy == true
+            val r = messages.sendBatch(batch)
+            if (r.ok && r.value!!.isNotEmpty()) return true
+            if (r.code != 409) { log("fan-out ${msgId.take(8)} → HTTP ${r.code} ${r.error ?: ""}"); return false }
+            when (r.error) {
+                "device-list-mismatch" -> {
+                    val m = V2MessagesClient.parseMismatch(r.body) ?: return false
+                    val leg = legs.firstOrNull { it.devices != null && DeviceAuth.normalizeIdentity(it.to) == m.to } ?: return fallback()
+                    dm.replacePeerDevices(leg.to, m.devices)
+                    val next = if (leg.isSelfCopy || isSelf(leg.to)) m.devices.filter { it != dm.deviceId } else m.devices
+                    for (stale in m.stale) {
+                        built.remove("${leg.to}|$stale")
+                        ratchetLock.withLock { sessions.delete(leg.to, stale) }
+                    }
+                    log("fan-out ${msgId.take(8)}: device list for ${leg.to.take(8)}… was stale (missing ${m.missing.size}, stale ${m.stale.size}) — retrying")
+                    if (next.isEmpty() && !leg.isSelfCopy) {
+                        // The recipient no longer has any device: one account envelope, as today.
+                        leg.devices = null
+                    } else leg.devices = next
+                }
+                "device-mailbox-disabled" -> { dm.onMailboxDisabled(); return fallback() }
+                "unknown-fromDevice" -> { dm.onDeviceUnknown(); return fallback() }
+                else -> { log("fan-out ${msgId.take(8)} → 409 ${r.error}"); return false }
+            }
+        }
+        // Our OWN list kept moving: the message to the contact matters more than the copy.
+        if (legs.any { it.isSelfCopy } && legs.any { !it.isSelfCopy }) {
+            log("fan-out ${msgId.take(8)}: self copies dropped after $MAX_MISMATCH_RETRIES retries")
+            return postFanout(dm, msgId, legs.filterNot { it.isSelfCopy }, fallback, built)
+        }
+        log("fan-out ${msgId.take(8)}: device list still mismatched after $MAX_MISMATCH_RETRIES retries — account envelope instead")
+        return fallback()
+    }
+
+    /** Today's path for one peer: one account envelope, session (peer, nil), no device fields. */
+    private fun sendLegacyOnly(peer: String, plaintext: ByteArray, msgId: String, routing: Map<String, String>?, padGate: Boolean = true): Boolean {
+        val env = encryptFor(peer, null, plaintext, msgId, routing, null, padGate) ?: return false
+        return messages.send(env).isNotEmpty()
+    }
+
     // ------------------------------------------------------------------ bundles
 
     private fun fetchBundleCached(peer: String) =
@@ -350,9 +915,17 @@ class V2Router(
     /** Consume the cached bundle, or fetch a fresh one. A bundle is never reused: its OPK is spent. */
     private fun takeBundle(peer: String) = bundleCache.remove(peer) ?: keys.fetchBundle(peer)
 
+    /**
+     * __GROUP_FANOUT_2026_11_24__ The last relay POST of this router still ended on a 429 after the
+     * whole [RateLimitBackoff] budget. Read by the group fan-out right after a failed [sendText].
+     */
+    val lastSendRateLimited: Boolean get() = messages.lastSendRateLimited
+
     companion object {
         private val EMPTY = ByteArray(0)
         const val OPK_TARGET = 20
         const val OPK_LOW_WATER = 5
+        /** §3.5: at most two rebuilds after a device-list mismatch, then the account envelope. */
+        const val MAX_MISMATCH_RETRIES = 2
     }
 }

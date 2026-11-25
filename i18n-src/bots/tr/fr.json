@@ -1,0 +1,9 @@
+{
+  "pc.bot.commands": "Commandes",
+  "pc.bot.add_command": "Ajouter une commande",
+  "pc.bot.command_rule": "1 à 32 caractères : minuscules, chiffres et _",
+  "pc.bot.duplicate": "Cette commande est déjà dans la liste",
+  "pc.bot.publish": "Publier sur le serveur OSHI",
+  "pc.bot.published": "Les commandes sont actives dans les groupes du bot",
+  "pc.bot.publish_failed": "Publication impossible : %@"
+}

@@ -53,6 +53,9 @@ class BotQueueServer : AutoCloseable {
     /** Every RAW path this server was asked for — bytes on the wire, not a decoding. */
     val requestedPaths: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf<String>())
 
+    /** `X-OSHI-Caps` of every `/api/pending` request, in order (null when absent). */
+    val pendingCaps: MutableList<String?> = java.util.Collections.synchronizedList(mutableListOf<String?>())
+
     /** Set to make the next N `/api/pending` calls answer 500. */
     var failPendingRemaining: Int = 0
 
@@ -115,6 +118,8 @@ class BotQueueServer : AutoCloseable {
                 path == "/api/bot/list" -> botList(ex, query)
                 path == "/api/bot/unregister" -> botUnregister(ex, query)
                 path == "/api/bot/update-groups" -> botUpdateGroups(ex)
+                path == "/api/bot/setMyCommands" -> botSetCommands(ex)
+                path == "/api/bot/getMyCommands" -> botGetCommands(ex, query)
                 else -> send(ex, 404, "{\"error\":\"no route\"}")
             }
         } catch (e: Exception) {
@@ -125,6 +130,7 @@ class BotQueueServer : AutoCloseable {
     }
 
     private fun pending(ex: HttpExchange, path: String, query: String) {
+        pendingCaps.add(ex.requestHeaders.getFirst("X-OSHI-Caps"))
         if (failPendingRemaining > 0) {
             failPendingRemaining--
             send(ex, 500, "{\"error\":\"induced\"}")
@@ -179,6 +185,33 @@ class BotQueueServer : AutoCloseable {
         // Unconditional set — no ownership check. See BotApi's class doc.
         registerBot(token, name, owner, b.optJSONArray("groups") ?: JSONArray())
         send(ex, 200, "{\"success\":true,\"bot\":{\"botName\":\"$name\"}}")
+    }
+
+    /** `bot_platform.js:457-476`: strip `/`, `^[a-z0-9_]{1,32}$`, ≤100, description cut at 256. */
+    private fun botSetCommands(ex: HttpExchange) {
+        val b = JSONObject(readBody(ex))
+        val rec = bots[b.optString("token", "")]
+        if (rec == null) { send(ex, 401, "{\"success\":false,\"error\":\"Invalid bot token\"}"); return }
+        val cmds = b.optJSONArray("commands")
+        if (cmds == null) { send(ex, 400, "{\"success\":false,\"error\":\"commands must be an array\"}"); return }
+        if (cmds.length() > 100) { send(ex, 400, "{\"success\":false,\"error\":\"too many commands (max 100)\"}"); return }
+        val clean = JSONArray()
+        for (i in 0 until cmds.length()) {
+            val c = cmds.optJSONObject(i)
+            val command = (c?.optString("command", "") ?: "").removePrefix("/").trim()
+            if (!Regex("^[a-z0-9_]{1,32}$").matches(command)) {
+                send(ex, 400, "{\"success\":false,\"error\":\"invalid command: $command\"}"); return
+            }
+            clean.put(JSONObject().put("command", command).put("description", (c?.optString("description", "") ?: "").take(256)))
+        }
+        if (clean.length() > 0) rec.put("commands", clean) else rec.remove("commands")
+        send(ex, 200, JSONObject().put("success", true).put("commands", clean).toString())
+    }
+
+    private fun botGetCommands(ex: HttpExchange, query: String) {
+        val rec = bots[param(query, "token") ?: ""]
+        if (rec == null) { send(ex, 401, "{\"success\":false,\"error\":\"Invalid bot token\"}"); return }
+        send(ex, 200, JSONObject().put("success", true).put("commands", rec.optJSONArray("commands") ?: JSONArray()).toString())
     }
 
     private fun botUpdateGroups(ex: HttpExchange) {

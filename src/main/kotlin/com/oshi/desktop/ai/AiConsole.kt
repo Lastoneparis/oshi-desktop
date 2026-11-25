@@ -35,9 +35,12 @@ object AiConsole {
             "${I}NO ANSWER — no model is configured.",
             "$I  /ai model <path-to-a-.gguf>",
             "${I}Nothing is downloaded automatically; a model is 0.6-2.5 GB and it is",
-            "${I}fetched by hand. See DesktopLlmManager.MODEL_SOURCES for the three the",
-            "${I}Android client offers, so a phone and this client can share one file.",
-        )
+            "${I}fetched by hand.",
+        // __MODEL_SOURCES_NAMED_2026_10_29__ PRINT the list rather than naming the Kotlin
+        // constant that holds it. The old line sent the reader to
+        // `DesktopLlmManager.MODEL_SOURCES`, which a person running the app cannot open, and
+        // which itself only said "see the KDoc on DesktopLlmManager.MODEL_SOURCES".
+        ) + DesktopLlmManager.MODEL_SOURCES.split("\n").map { I + it }
 
         is DesktopLlmManager.Answer.ModelGone -> listOf(
             "${I}NO ANSWER — the configured model is no longer usable:",
@@ -45,9 +48,18 @@ object AiConsole {
 
         is DesktopLlmManager.Answer.ModelLoadFailed -> listOf(
             "${I}NO ANSWER — llama.cpp refused to load ${answer.path}.",
-            "${I}The file is a GGUF; the engine still would not take it. Usual causes are a",
-            "${I}GGUF version newer than the llama.cpp this shim was built from, or not",
-            "${I}enough free RAM for the quantisation.",
+            "${I}The file is a GGUF; the engine still would not take it. The commonest",
+            // __VOCAB_ONLY_GGUF_2026_10_29__ Listed FIRST because it is the one a person
+            // actually hits. llama.cpp's own repository ships `models/ggml-vocab-*.gguf`
+            // — valid GGUF, 0 tensors, a tokenizer and no weights — and pointing `/ai
+            // model` at one is the obvious thing to do when you have just built the shim
+            // from that same checkout and want something to try. It was the first thing
+            // tried here, and the old text sent the reader to look at llama.cpp versions
+            // and free RAM, neither of which was wrong with it.
+            "${I}cause is a vocab-only GGUF: llama.cpp's own models/ggml-vocab-*.gguf are",
+            "${I}valid files with ZERO tensors — a tokenizer, no weights — so there is",
+            "${I}nothing to run. Otherwise: a GGUF version newer than the llama.cpp this",
+            "${I}shim was built from, or not enough free RAM for the quantisation.",
         )
 
         is DesktopLlmManager.Answer.NativeCallFailed -> listOf(
@@ -119,11 +131,25 @@ object AiConsole {
         } else {
             "${I}A question asked now would produce NO ANSWER, and would say why."
         }
-        // Said on every status, because it is the single most likely thing to be assumed:
-        // this client has never generated a token, on any machine, and the ledger row says
-        // so too.
-        out += "${I}NOTE: no inference has ever been verified from this client — there is no"
-        out += "${I}native library in this repository and no model is shipped. See PARITY.md 2.5."
+        // __INFERENCE_NOTE_STATES_ONLY_WHAT_IT_KNOWS_2026_10_29__ This printed, on EVERY
+        // status and unconditionally, "no inference has ever been verified from this
+        // client". On 2026-10-29 it printed that directly beneath a successful generation:
+        // engine loaded, model loaded, "Paris" returned in 1,194 ms, and then the diagnostic
+        // told the reader no inference had ever run.
+        //
+        // The bug is not the wording, it is the KIND of claim. "Never, anywhere, by anyone"
+        // is a fact about history that a running process cannot check, so it could only ever
+        // be a constant, and a constant about the past goes stale the first time someone
+        // changes the past — which is this repository's most expensive recurring defect, a
+        // doc line announcing a gap that outlives the gap. Gating it on `canGenerate` was
+        // tried and is ALSO wrong: the model maps lazily on the first question, so a fresh
+        // process with a perfectly good engine and model still reports false.
+        //
+        // It now says only what it can verify from this run: what ships, which is a property
+        // of the build and cannot go stale. Whether inference has been proven is the
+        // ledger's job, and PARITY.md 2.5 is where it is recorded.
+        out += "${I}NOTE: neither the native library nor a GGUF model ships with this client;"
+        out += "${I}both are supplied by hand. See PARITY.md 2.5 for what has been measured."
         return out
     }
 }

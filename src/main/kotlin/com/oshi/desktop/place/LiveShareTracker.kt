@@ -79,7 +79,9 @@ package com.oshi.desktop.place
  * equivalents from a single message-processing path and adding a lock here would imply a
  * concurrency story this row has not earned. Callers that need one wrap it.
  */
-class LiveShareTracker {
+class LiveShareTracker(private val maxSessions: Int = MAX_SESSIONS) {
+
+    init { require(maxSessions > 0) { "maxSessions must be positive" } }
 
     /**
      * The rule, as a named constant so it can be grepped and so the mutation test that
@@ -89,6 +91,9 @@ class LiveShareTracker {
      */
     companion object {
         const val EXPIRY_NEVER_EXTENDS: Boolean = true
+
+        /** More simultaneous live shares than a person can reasonably follow, but bounded. */
+        const val MAX_SESSIONS = 128
     }
 
     /** What this tracker believes about one session, after everything it has seen. */
@@ -146,6 +151,13 @@ class LiveShareTracker {
             longitude = payload.longitude,
             lastSeenMs = maxOf(prior?.lastSeenMs ?: payload.timestampMs, payload.timestampMs),
         )
+
+        // An inbound peer controls sessionId. Preserve an existing session's insertion
+        // position, but a new id beyond the cap replaces the oldest live session rather than
+        // keeping process-lifetime state under a far-future expiry.
+        while (sessions.size > maxSessions) {
+            sessions.entries.iterator().apply { next(); remove() }
+        }
 
         if (stopped) return LiveState.STOPPED
         return if (nowMs >= pinned) LiveState.EXPIRED else LiveState.LIVE

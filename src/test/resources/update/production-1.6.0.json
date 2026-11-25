@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "product": "oshi-desktop",
+  "version": "1.6.0",
+  "released": "2026-11-21",
+  "page": "https://oshi-messenger.com/desktop",
+  "files": {
+    "exe": {
+      "url": "https://oshi-messenger.com/downloads/OSHI-1.6.0.exe",
+      "sha256": "3fb5d4c4fc6b78382076bea37702b8842def67cf3d1cbc835912c372999ad682",
+      "size": 267041792
+    },
+    "msi": {
+      "url": "https://oshi-messenger.com/downloads/OSHI-1.6.0.msi",
+      "sha256": "ed5e73987424a81298e6f70949c6e17b35ed29344b3a38ac7e7d0cc428cf10c5",
+      "size": 266425547
+    },
+    "deb": {
+      "url": "https://oshi-messenger.com/downloads/oshi-desktop_1.6.0-1_amd64.deb",
+      "sha256": "072a5e774064596441b5cb0676240f709df14bb9cfe3c6e08e464eb7fbacce3a",
+      "size": 247768388
+    },
+    "rpm": {
+      "url": "https://oshi-messenger.com/downloads/oshi-desktop-1.6.0-1.x86_64.rpm",
+      "sha256": "3bf42233bb30e267415641c14df9678129e54a18114cd88f02ac88b7defe639c",
+      "size": 247840113
+    }
+  }
+}

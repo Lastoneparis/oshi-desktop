@@ -1,0 +1,14 @@
+{
+"pc.groups.discover.title": "Discover groups",
+"pc.groups.discover.subtitle": "Public groups announced on your local network",
+"pc.groups.discover.menu": "Public groups announced nearby",
+"pc.groups.discover.mesh_off": "This computer is not listening to the local network. Public groups are announced by OSHI devices on the same network; start listening to hear them.",
+"pc.groups.discover.start_mesh": "Listen on this network",
+"pc.groups.discover.empty": "Groups announced by OSHI phones and computers on this network appear here, usually within a minute. A group you were invited to can be joined with its link or QR code.",
+"pc.groups.discover.step1": "Be on the same Wi-Fi or local network as people running OSHI.",
+"pc.groups.discover.privacy": "Listening makes this computer visible to OSHI devices on the network, as on the phones. Joining asks the group's admin to add you; your messages stay end-to-end encrypted.",
+"pc.groups.discover.gone": "That group is no longer being announced. Ask a member for its invite link.",
+"pc.groups.qr.save": "Save QR code as image…",
+"pc.groups.qr.saved": "QR code saved. Anyone with OSHI can join by scanning it or choosing it as a picture.",
+"pc.groups.qr.save_failed": "The image could not be saved there."
+}

@@ -1,0 +1,4 @@
+{
+  "pc.mail.offline.unreachable": "Sähköpostiin ei saada yhteyttä. Tarkista yhteytesi.",
+  "pc.mail.offline.refreshFailed": "Sähköpostia ei voitu päivittää. Tarkista yhteytesi."
+}

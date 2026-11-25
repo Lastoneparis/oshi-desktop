@@ -174,6 +174,8 @@ class CallMediaLaneTest {
         val a = Endpoint()
         val b = Endpoint()
 
+        assertEquals(CallLane.MediaStatus.READY, a.lane.mediaDiagnostics().status)
+
         // --- signalling, exactly as CallSignalingTest proves it ---------------------
         assertTrue(a.lane.call(b.address, t0) is CallLane.Dialled.Ringing)
         assertEquals(1, b.lane.pollOnce(t0 + 10))
@@ -216,6 +218,8 @@ class CallMediaLaneTest {
         val aLeg = a.lane.media!!
         val bLeg = b.lane.media!!
         assertEquals(bLeg.socket.localPort, aLeg.selected!!.port)
+        assertEquals(CallLane.MediaStatus.ACTIVE, a.lane.mediaDiagnostics().status)
+        assertEquals(CallLane.MediaStatus.ACTIVE, b.lane.mediaDiagnostics().status)
 
         // --- audio ------------------------------------------------------------------
         val pcm = ByteArray(CallAudio.BYTES_PER_FRAME) { ((it * 7 + 11) % 251).toByte() }

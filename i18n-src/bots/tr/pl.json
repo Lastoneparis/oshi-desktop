@@ -1,0 +1,9 @@
+{
+  "pc.bot.commands": "Polecenia",
+  "pc.bot.add_command": "Dodaj polecenie",
+  "pc.bot.command_rule": "1–32 znaki: małe litery, cyfry i _",
+  "pc.bot.duplicate": "To polecenie jest już na liście",
+  "pc.bot.publish": "Opublikuj na serwerze OSHI",
+  "pc.bot.published": "Polecenia działają w grupach Twojego bota",
+  "pc.bot.publish_failed": "Nie udało się opublikować: %@"
+}

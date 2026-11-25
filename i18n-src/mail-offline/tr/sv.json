@@ -1,0 +1,4 @@
+{
+  "pc.mail.offline.unreachable": "Det går inte att nå e-posten. Kontrollera anslutningen.",
+  "pc.mail.offline.refreshFailed": "Det gick inte att uppdatera e-posten. Kontrollera anslutningen."
+}

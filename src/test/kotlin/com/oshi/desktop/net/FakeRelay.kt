@@ -41,6 +41,8 @@ class FakeRelay : AutoCloseable {
 
     /** What to answer, per request. Replace per test; default is 200 `{}`. */
     var responder: (Recorded) -> Pair<Int, String> = { 200 to "{}" }
+    /** __GROUP_FANOUT_2026_11_24__ extra response headers (e.g. Retry-After) per request. */
+    var responseHeaders: (Recorded) -> Map<String, String> = { emptyMap() }
 
     private val recorded = ConcurrentLinkedQueue<Recorded>()
     private val server: HttpServer = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
@@ -64,6 +66,7 @@ class FakeRelay : AutoCloseable {
             val (code, text) = try { responder(rec) } catch (e: Exception) { 500 to (e.message ?: "boom") }
             val bytes = text.toByteArray(Charsets.UTF_8)
             exchange.responseHeaders.add("Content-Type", "application/json")
+            for ((k, v) in responseHeaders(rec)) exchange.responseHeaders.add(k, v)
             exchange.sendResponseHeaders(code, bytes.size.toLong())
             exchange.responseBody.use { it.write(bytes) }
         }

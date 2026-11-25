@@ -3,6 +3,7 @@ package com.oshi.desktop.msg
 import com.oshi.desktop.store.DeliveryStatus
 import com.oshi.desktop.store.Message
 import com.oshi.desktop.store.MessageStore
+import com.oshi.desktop.store.PinnedMessageStore
 import com.oshi.desktop.store.TimestampSource
 import java.io.File
 import java.nio.file.Files
@@ -26,6 +27,11 @@ class ControlPayloadRouterTest {
     private val dir: File = Files.createTempDirectory("oshi-msg-router-test").toFile()
     private val store = MessageStore(dir)
     private val router = ControlPayloadRouter(store)
+
+    /** __DESKTOP_DIRECT_PIN_2026_10_29__ the wired pair, beside the storeless [router]. */
+    private val pinFile = File(dir, PinnedMessageStore.FILE_NAME)
+    private val pins = PinnedMessageStore(pinFile)
+    private val pinnedRouter = ControlPayloadRouter(store, pins)
 
     @After
     fun tearDown() {
@@ -59,6 +65,10 @@ class ControlPayloadRouterTest {
     }
 
     private fun apply(plaintext: String, from: String = peer) = router.apply(conv, from, plaintext).second
+
+    /** The same call through the router that HAS a pin store. */
+    private fun applyPinned(plaintext: String, from: String = peer) =
+        pinnedRouter.apply(conv, from, plaintext).second
 
     // ================================================================== classification
 
@@ -182,14 +192,142 @@ class ControlPayloadRouterTest {
         )
     }
 
-    /** iOS keeps a pinned map we have nowhere to write. Reported, not silently dropped. */
+    /**
+     * __DESKTOP_DIRECT_PIN_2026_10_29__ A router built with no pin store still REPORTS the
+     * pin rather than dropping it. This is the pre-fix behaviour, kept deliberately: the
+     * pure-classification constructions and `PlaceRouterTest` pass no store, and an honest
+     * "not applied" is what made this gap findable in the first place.
+     */
     @Test
-    fun `a pin is understood and reported as not applied`() {
+    fun `a pin with no store is understood and reported as not applied`() {
         put("theirs-4", fromMe = false)
         assertEquals(
             ControlPayloadRouter.Outcome.PIN_NOT_APPLIED,
             apply(MessageActionPayload.encode(MessageActionPayload.ActionType.PIN_MESSAGE, "theirs-4", baseMs)),
         )
+        assertTrue("no store was wired, so nothing may have been written", pins.all().isEmpty())
+    }
+
+    /** With a store wired, an inbound pin lands — iOS's and Android's receivers both do this. */
+    @Test
+    fun `a wired router applies an inbound pin`() {
+        put("theirs-4", fromMe = false)
+        assertEquals(
+            ControlPayloadRouter.Outcome.APPLIED,
+            applyPinned(MessageActionPayload.encode(MessageActionPayload.ActionType.PIN_MESSAGE, "theirs-4", baseMs)),
+        )
+        assertEquals("theirs-4", pins.get(conv))
+    }
+
+    /**
+     * THE RULE THAT IS NOT INHERITED. Edit and delete-for-everyone refuse a target that is
+     * not the sender's (C-MSG-4); a pin must NOT, because the ordinary case is pinning what
+     * the other person said. Both phones' receivers apply a pin with no sender comparison —
+     * Android's `addPinCallback` does not even receive one for that branch.
+     *
+     * Asserted with OUR OWN message as the target, pinned by the PEER: under the ownership
+     * rule this is exactly the shape that would be rejected.
+     */
+    @Test
+    fun `a peer may pin a message we sent`() {
+        put("mine-pin", fromMe = true)
+        assertEquals(
+            ControlPayloadRouter.Outcome.APPLIED,
+            applyPinned(MessageActionPayload.encode(MessageActionPayload.ActionType.PIN_MESSAGE, "mine-pin", baseMs)),
+        )
+        assertEquals("mine-pin", pins.get(conv))
+    }
+
+    /** One pin per conversation: a second one replaces the first, as both phones' maps do. */
+    @Test
+    fun `a second pin replaces the first`() {
+        put("theirs-6", fromMe = false)
+        put("theirs-7", fromMe = false)
+        applyPinned(MessageActionPayload.encode(MessageActionPayload.ActionType.PIN_MESSAGE, "theirs-6", baseMs))
+        assertEquals(
+            ControlPayloadRouter.Outcome.APPLIED,
+            applyPinned(MessageActionPayload.encode(MessageActionPayload.ActionType.PIN_MESSAGE, "theirs-7", baseMs)),
+        )
+        assertEquals("theirs-7", pins.get(conv))
+        assertEquals(1, pins.all().size)
+    }
+
+    /** Repeating a pin is NO_CHANGE, not a second APPLIED. */
+    @Test
+    fun `the same pin twice reports no change`() {
+        put("theirs-8", fromMe = false)
+        applyPinned(MessageActionPayload.encode(MessageActionPayload.ActionType.PIN_MESSAGE, "theirs-8", baseMs))
+        assertEquals(
+            ControlPayloadRouter.Outcome.NO_CHANGE,
+            applyPinned(MessageActionPayload.encode(MessageActionPayload.ActionType.PIN_MESSAGE, "theirs-8", baseMs)),
+        )
+    }
+
+    /**
+     * An iPhone pins an id it rendered from `UUID.uuidString`, i.e. UPPERCASE, and then
+     * unpins it in the same spelling. A case-SENSITIVE match would leave the banner up for
+     * ever and look like a lost message rather than a comparison bug. Both phones compare
+     * `ignoreCase = true` and say why.
+     */
+    @Test
+    fun `an unpin from an iPhone clears a pin stored in our own spelling`() {
+        put("abc-def", fromMe = false)
+        applyPinned(MessageActionPayload.encode(MessageActionPayload.ActionType.PIN_MESSAGE, "abc-def", baseMs))
+        assertEquals(
+            ControlPayloadRouter.Outcome.APPLIED,
+            applyPinned(MessageActionPayload.encode(MessageActionPayload.ActionType.UNPIN_MESSAGE, "ABC-DEF", baseMs)),
+        )
+        assertNull(pins.get(conv))
+    }
+
+    /**
+     * A stale unpin naming some OTHER message must not clear the current pin. Without the
+     * `isPinned` guard this would have cleared it, because the store's `set(null)` does not
+     * care what was there.
+     */
+    @Test
+    fun `an unpin naming a different message leaves the pin alone`() {
+        put("theirs-9", fromMe = false)
+        put("theirs-10", fromMe = false)
+        applyPinned(MessageActionPayload.encode(MessageActionPayload.ActionType.PIN_MESSAGE, "theirs-9", baseMs))
+        assertEquals(
+            ControlPayloadRouter.Outcome.NO_CHANGE,
+            applyPinned(MessageActionPayload.encode(MessageActionPayload.ActionType.UNPIN_MESSAGE, "theirs-10", baseMs)),
+        )
+        assertEquals("theirs-9", pins.get(conv))
+    }
+
+    /**
+     * An unpin for a message this device never stored is still accepted when it IS our pin.
+     * The target lookup happens AFTER the pin branch for exactly this case: a conversation
+     * trimmed on this side would otherwise be stuck showing a banner the peer has cleared.
+     */
+    @Test
+    fun `an unpin applies even when the message itself is gone`() {
+        pins.set(conv, "long-gone")
+        assertEquals(
+            ControlPayloadRouter.Outcome.APPLIED,
+            applyPinned(MessageActionPayload.encode(MessageActionPayload.ActionType.UNPIN_MESSAGE, "long-gone", baseMs)),
+        )
+        assertNull(pins.get(conv))
+    }
+
+    /** A pin survives a restart: the store is a file, and a new instance reads it. */
+    @Test
+    fun `a pin is persisted across instances`() {
+        put("theirs-11", fromMe = false)
+        applyPinned(MessageActionPayload.encode(MessageActionPayload.ActionType.PIN_MESSAGE, "theirs-11", baseMs))
+        assertEquals("theirs-11", PinnedMessageStore(pinFile).get(conv))
+    }
+
+    /** A corrupt pin file reads as "nothing pinned" and never throws out of the receive path. */
+    @Test
+    fun `a corrupt pin file is not fatal`() {
+        pinFile.writeText("{ this is not json", Charsets.UTF_8)
+        val fresh = PinnedMessageStore(pinFile)
+        assertNull(fresh.get(conv))
+        assertTrue(fresh.all().isEmpty())
+        assertTrue("and it must still accept a new pin", fresh.set(conv, "theirs-12"))
     }
 
     /**

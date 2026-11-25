@@ -1,0 +1,790 @@
+{
+  "version": 1,
+  "spec": "docs/GROUP_E2E_V2_SPEC.md",
+  "constants": {
+    "A": "ERERERERERERERERERERERERERERERERERERERERERE=",
+    "B": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+    "C": "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM=",
+    "D": "REREREREREREREREREREREREREREREREREREREREREQ=",
+    "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+    "messageId": "0F8E1C2A-3B4D-4E5F-8A9B-0C1D2E3F4A5B",
+    "otherId": "7A6B5C4D-3E2F-4A1B-8C9D-0E1F2A3B4C5D",
+    "tsUnixMs": 1790000000123,
+    "tsAppleEpoch": 811692800.1229999,
+    "iso": "2026-09-21T14:13:20Z",
+    "groupUpdatePrefix": "📢GROUP_UPDATE📢"
+  },
+  "content": [
+    {
+      "name": "text",
+      "note": "plain text",
+      "channel": "content",
+      "envelope": {
+        "type": "group",
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "from": "ERERERERERERERERERERERERERERERERERERERERERE="
+      },
+      "groupMessage": {
+        "id": "0F8E1C2A-3B4D-4E5F-8A9B-0C1D2E3F4A5B",
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "senderPublicKey": "ERERERERERERERERERERERERERERERERERERERERERE=",
+        "encryptedContent": "aGVsbG8gZ3JvdXAg4pyT",
+        "timestamp": 811692800.1229999,
+        "isRead": false,
+        "messageChainIndex": 0,
+        "messageId": "0F8E1C2A-3B4D-4E5F-8A9B-0C1D2E3F4A5B",
+        "content": "hello group ✓",
+        "senderName": ""
+      },
+      "plaintext": "eyJpZCI6IjBGOEUxQzJBLTNCNEQtNEU1Ri04QTlCLTBDMUQyRTNGNEE1QiIsImdyb3VwSWQiOiI1RTJBOUMxQi03RDNGLTRCOEEtOUU2Qy0wRjFEMkEzQjRDNUQiLCJzZW5kZXJQdWJsaWNLZXkiOiJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFPSIsImVuY3J5cHRlZENvbnRlbnQiOiJhR1ZzYkc4Z1ozSnZkWEFnNHB5VCIsInRpbWVzdGFtcCI6ODExNjkyODAwLjEyMjk5OTksImlzUmVhZCI6ZmFsc2UsIm1lc3NhZ2VDaGFpbkluZGV4IjowLCJtZXNzYWdlSWQiOiIwRjhFMUMyQS0zQjRELTRFNUYtOEE5Qi0wQzFEMkUzRjRBNUIiLCJjb250ZW50IjoiaGVsbG8gZ3JvdXAg4pyTIiwic2VuZGVyTmFtZSI6IiJ9",
+      "body": "hello group ✓"
+    },
+    {
+      "name": "reply",
+      "note": "reply envelope inside the body; iOS MessageWithReply",
+      "channel": "content",
+      "envelope": {
+        "type": "group",
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "from": "ERERERERERERERERERERERERERERERERERERERERERE="
+      },
+      "groupMessage": {
+        "id": "7A6B5C4D-3E2F-4A1B-8C9D-0E1F2A3B4C5D",
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "senderPublicKey": "ERERERERERERERERERERERERERERERERERERERERERE=",
+        "encryptedContent": "8J+SrFJFUExZ8J+SrHsiY29udGVudCI6InllcyIsInJlcGx5VG8iOnsib3JpZ2luYWxNZXNzYWdlSWQiOiIwRjhFMUMyQS0zQjRELTRFNUYtOEE5Qi0wQzFEMkUzRjRBNUIiLCJvcmlnaW5hbFNlbmRlcktleSI6IklpSWlJaUlpSWlJaUlpSWlJaUlpSWlJaUlpSWlJaUlpSWlJaUlpSWlJaUk9Iiwib3JpZ2luYWxUZXh0IjoiYXJlIHlvdSBpbj8iLCJvcmlnaW5hbFRpbWVzdGFtcCI6ODExNjkyODAwLjEyMjk5OTksIm9yaWdpbmFsTWVkaWFUeXBlIjpudWxsfX0=",
+        "timestamp": 811692800.1229999,
+        "isRead": false,
+        "messageChainIndex": 0,
+        "messageId": "7A6B5C4D-3E2F-4A1B-8C9D-0E1F2A3B4C5D",
+        "content": "💬REPLY💬{\"content\":\"yes\",\"replyTo\":{\"originalMessageId\":\"0F8E1C2A-3B4D-4E5F-8A9B-0C1D2E3F4A5B\",\"originalSenderKey\":\"IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=\",\"originalText\":\"are you in?\",\"originalTimestamp\":811692800.1229999,\"originalMediaType\":null}}",
+        "senderName": ""
+      },
+      "plaintext": "eyJpZCI6IjdBNkI1QzRELTNFMkYtNEExQi04QzlELTBFMUYyQTNCNEM1RCIsImdyb3VwSWQiOiI1RTJBOUMxQi03RDNGLTRCOEEtOUU2Qy0wRjFEMkEzQjRDNUQiLCJzZW5kZXJQdWJsaWNLZXkiOiJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFPSIsImVuY3J5cHRlZENvbnRlbnQiOiI4SitTckZKRlVFeFo4SitTckhzaVkyOXVkR1Z1ZENJNklubGxjeUlzSW5KbGNHeDVWRzhpT25zaWIzSnBaMmx1WVd4TlpYTnpZV2RsU1dRaU9pSXdSamhGTVVNeVFTMHpRalJFTFRSRk5VWXRPRUU1UWkwd1F6RkVNa1V6UmpSQk5VSWlMQ0p2Y21sbmFXNWhiRk5sYm1SbGNrdGxlU0k2SWtscFNXbEphVWxwU1dsSmFVbHBTV2xKYVVscFNXbEphVWxwU1dsSmFVbHBTV2xKYVVscFNXbEphVWs5SWl3aWIzSnBaMmx1WVd4VVpYaDBJam9pWVhKbElIbHZkU0JwYmo4aUxDSnZjbWxuYVc1aGJGUnBiV1Z6ZEdGdGNDSTZPREV4TmpreU9EQXdMakV5TWprNU9Ua3NJbTl5YVdkcGJtRnNUV1ZrYVdGVWVYQmxJanB1ZFd4c2ZYMD0iLCJ0aW1lc3RhbXAiOjgxMTY5MjgwMC4xMjI5OTk5LCJpc1JlYWQiOmZhbHNlLCJtZXNzYWdlQ2hhaW5JbmRleCI6MCwibWVzc2FnZUlkIjoiN0E2QjVDNEQtM0UyRi00QTFCLThDOUQtMEUxRjJBM0I0QzVEIiwiY29udGVudCI6IvCfkqxSRVBMWfCfkqx7XCJjb250ZW50XCI6XCJ5ZXNcIixcInJlcGx5VG9cIjp7XCJvcmlnaW5hbE1lc3NhZ2VJZFwiOlwiMEY4RTFDMkEtM0I0RC00RTVGLThBOUItMEMxRDJFM0Y0QTVCXCIsXCJvcmlnaW5hbFNlbmRlcktleVwiOlwiSWlJaUlpSWlJaUlpSWlJaUlpSWlJaUlpSWlJaUlpSWlJaUlpSWlJaUlpST1cIixcIm9yaWdpbmFsVGV4dFwiOlwiYXJlIHlvdSBpbj9cIixcIm9yaWdpbmFsVGltZXN0YW1wXCI6ODExNjkyODAwLjEyMjk5OTksXCJvcmlnaW5hbE1lZGlhVHlwZVwiOm51bGx9fSIsInNlbmRlck5hbWUiOiIifQ==",
+      "body": "💬REPLY💬{\"content\":\"yes\",\"replyTo\":{\"originalMessageId\":\"0F8E1C2A-3B4D-4E5F-8A9B-0C1D2E3F4A5B\",\"originalSenderKey\":\"IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=\",\"originalText\":\"are you in?\",\"originalTimestamp\":811692800.1229999,\"originalMediaType\":null}}"
+    },
+    {
+      "name": "reaction_add",
+      "note": "iOS ReactionPayload; never stored as a bubble",
+      "channel": "content",
+      "envelope": {
+        "type": "group",
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "from": "ERERERERERERERERERERERERERERERERERERERERERE="
+      },
+      "groupMessage": {
+        "id": "7A6B5C4D-3E2F-4A1B-8C9D-0E1F2A3B4C5D",
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "senderPublicKey": "ERERERERERERERERERERERERERERERERERERERERERE=",
+        "encryptedContent": "8J+UpVJFQUNUSU9O8J+UpXsibWVzc2FnZUlkIjoiMEY4RTFDMkEtM0I0RC00RTVGLThBOUItMEMxRDJFM0Y0QTVCIiwiZW1vamkiOiLwn5GNIiwic2VuZGVyUHVibGljS2V5IjoiRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRT0iLCJzZW5kZXJOYW1lIjoiQWxpY2UiLCJ0aW1lc3RhbXAiOjgxMTY5MjgwMC4xMjI5OTk5LCJhY3Rpb24iOiJhZGQifQ==",
+        "timestamp": 811692800.1229999,
+        "isRead": false,
+        "messageChainIndex": 0,
+        "messageId": "7A6B5C4D-3E2F-4A1B-8C9D-0E1F2A3B4C5D",
+        "content": "🔥REACTION🔥{\"messageId\":\"0F8E1C2A-3B4D-4E5F-8A9B-0C1D2E3F4A5B\",\"emoji\":\"👍\",\"senderPublicKey\":\"ERERERERERERERERERERERERERERERERERERERERERE=\",\"senderName\":\"Alice\",\"timestamp\":811692800.1229999,\"action\":\"add\"}",
+        "senderName": ""
+      },
+      "plaintext": "eyJpZCI6IjdBNkI1QzRELTNFMkYtNEExQi04QzlELTBFMUYyQTNCNEM1RCIsImdyb3VwSWQiOiI1RTJBOUMxQi03RDNGLTRCOEEtOUU2Qy0wRjFEMkEzQjRDNUQiLCJzZW5kZXJQdWJsaWNLZXkiOiJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFPSIsImVuY3J5cHRlZENvbnRlbnQiOiI4SitVcFZKRlFVTlVTVTlPOEorVXBYc2liV1Z6YzJGblpVbGtJam9pTUVZNFJURkRNa0V0TTBJMFJDMDBSVFZHTFRoQk9VSXRNRU14UkRKRk0wWTBRVFZDSWl3aVpXMXZhbWtpT2lMd241R05JaXdpYzJWdVpHVnlVSFZpYkdsalMyVjVJam9pUlZKRlVrVlNSVkpGVWtWU1JWSkZVa1ZTUlZKRlVrVlNSVkpGVWtWU1JWSkZVa1ZTUlZKRlVrVlNSVDBpTENKelpXNWtaWEpPWVcxbElqb2lRV3hwWTJVaUxDSjBhVzFsYzNSaGJYQWlPamd4TVRZNU1qZ3dNQzR4TWpJNU9UazVMQ0poWTNScGIyNGlPaUpoWkdRaWZRPT0iLCJ0aW1lc3RhbXAiOjgxMTY5MjgwMC4xMjI5OTk5LCJpc1JlYWQiOmZhbHNlLCJtZXNzYWdlQ2hhaW5JbmRleCI6MCwibWVzc2FnZUlkIjoiN0E2QjVDNEQtM0UyRi00QTFCLThDOUQtMEUxRjJBM0I0QzVEIiwiY29udGVudCI6IvCflKVSRUFDVElPTvCflKV7XCJtZXNzYWdlSWRcIjpcIjBGOEUxQzJBLTNCNEQtNEU1Ri04QTlCLTBDMUQyRTNGNEE1QlwiLFwiZW1vamlcIjpcIvCfkY1cIixcInNlbmRlclB1YmxpY0tleVwiOlwiRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRT1cIixcInNlbmRlck5hbWVcIjpcIkFsaWNlXCIsXCJ0aW1lc3RhbXBcIjo4MTE2OTI4MDAuMTIyOTk5OSxcImFjdGlvblwiOlwiYWRkXCJ9Iiwic2VuZGVyTmFtZSI6IiJ9",
+      "body": "🔥REACTION🔥{\"messageId\":\"0F8E1C2A-3B4D-4E5F-8A9B-0C1D2E3F4A5B\",\"emoji\":\"👍\",\"senderPublicKey\":\"ERERERERERERERERERERERERERERERERERERERERERE=\",\"senderName\":\"Alice\",\"timestamp\":811692800.1229999,\"action\":\"add\"}"
+    },
+    {
+      "name": "reaction_remove",
+      "note": "same, action=remove",
+      "channel": "content",
+      "envelope": {
+        "type": "group",
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "from": "ERERERERERERERERERERERERERERERERERERERERERE="
+      },
+      "groupMessage": {
+        "id": "7A6B5C4D-3E2F-4A1B-8C9D-0E1F2A3B4C5D",
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "senderPublicKey": "ERERERERERERERERERERERERERERERERERERERERERE=",
+        "encryptedContent": "8J+UpVJFQUNUSU9O8J+UpXsibWVzc2FnZUlkIjoiMEY4RTFDMkEtM0I0RC00RTVGLThBOUItMEMxRDJFM0Y0QTVCIiwiZW1vamkiOiLwn5GNIiwic2VuZGVyUHVibGljS2V5IjoiRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRT0iLCJzZW5kZXJOYW1lIjoiQWxpY2UiLCJ0aW1lc3RhbXAiOjgxMTY5MjgwMC4xMjI5OTk5LCJhY3Rpb24iOiJyZW1vdmUifQ==",
+        "timestamp": 811692800.1229999,
+        "isRead": false,
+        "messageChainIndex": 0,
+        "messageId": "7A6B5C4D-3E2F-4A1B-8C9D-0E1F2A3B4C5D",
+        "content": "🔥REACTION🔥{\"messageId\":\"0F8E1C2A-3B4D-4E5F-8A9B-0C1D2E3F4A5B\",\"emoji\":\"👍\",\"senderPublicKey\":\"ERERERERERERERERERERERERERERERERERERERERERE=\",\"senderName\":\"Alice\",\"timestamp\":811692800.1229999,\"action\":\"remove\"}",
+        "senderName": ""
+      },
+      "plaintext": "eyJpZCI6IjdBNkI1QzRELTNFMkYtNEExQi04QzlELTBFMUYyQTNCNEM1RCIsImdyb3VwSWQiOiI1RTJBOUMxQi03RDNGLTRCOEEtOUU2Qy0wRjFEMkEzQjRDNUQiLCJzZW5kZXJQdWJsaWNLZXkiOiJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFPSIsImVuY3J5cHRlZENvbnRlbnQiOiI4SitVcFZKRlFVTlVTVTlPOEorVXBYc2liV1Z6YzJGblpVbGtJam9pTUVZNFJURkRNa0V0TTBJMFJDMDBSVFZHTFRoQk9VSXRNRU14UkRKRk0wWTBRVFZDSWl3aVpXMXZhbWtpT2lMd241R05JaXdpYzJWdVpHVnlVSFZpYkdsalMyVjVJam9pUlZKRlVrVlNSVkpGVWtWU1JWSkZVa1ZTUlZKRlVrVlNSVkpGVWtWU1JWSkZVa1ZTUlZKRlVrVlNSVDBpTENKelpXNWtaWEpPWVcxbElqb2lRV3hwWTJVaUxDSjBhVzFsYzNSaGJYQWlPamd4TVRZNU1qZ3dNQzR4TWpJNU9UazVMQ0poWTNScGIyNGlPaUp5WlcxdmRtVWlmUT09IiwidGltZXN0YW1wIjo4MTE2OTI4MDAuMTIyOTk5OSwiaXNSZWFkIjpmYWxzZSwibWVzc2FnZUNoYWluSW5kZXgiOjAsIm1lc3NhZ2VJZCI6IjdBNkI1QzRELTNFMkYtNEExQi04QzlELTBFMUYyQTNCNEM1RCIsImNvbnRlbnQiOiLwn5SlUkVBQ1RJT07wn5Sle1wibWVzc2FnZUlkXCI6XCIwRjhFMUMyQS0zQjRELTRFNUYtOEE5Qi0wQzFEMkUzRjRBNUJcIixcImVtb2ppXCI6XCLwn5GNXCIsXCJzZW5kZXJQdWJsaWNLZXlcIjpcIkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkU9XCIsXCJzZW5kZXJOYW1lXCI6XCJBbGljZVwiLFwidGltZXN0YW1wXCI6ODExNjkyODAwLjEyMjk5OTksXCJhY3Rpb25cIjpcInJlbW92ZVwifSIsInNlbmRlck5hbWUiOiIifQ==",
+      "body": "🔥REACTION🔥{\"messageId\":\"0F8E1C2A-3B4D-4E5F-8A9B-0C1D2E3F4A5B\",\"emoji\":\"👍\",\"senderPublicKey\":\"ERERERERERERERERERERERERERERERERERERERERERE=\",\"senderName\":\"Alice\",\"timestamp\":811692800.1229999,\"action\":\"remove\"}"
+    },
+    {
+      "name": "typing",
+      "note": "ephemeral: not stored, no push, no self copy",
+      "channel": "content",
+      "envelope": {
+        "type": "group",
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "from": "ERERERERERERERERERERERERERERERERERERERERERE="
+      },
+      "groupMessage": {
+        "id": "7A6B5C4D-3E2F-4A1B-8C9D-0E1F2A3B4C5D",
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "senderPublicKey": "ERERERERERERERERERERERERERERERERERERERERERE=",
+        "encryptedContent": "4oyo77iPVFlQSU5H4oyo77iPeyJzZW5kZXJQdWJsaWNLZXkiOiJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFPSIsImlzVHlwaW5nIjp0cnVlLCJ0aW1lc3RhbXAiOjgxMTY5MjgwMC4xMjI5OTk5LCJncm91cElkIjoiNUUyQTlDMUItN0QzRi00QjhBLTlFNkMtMEYxRDJBM0I0QzVEIiwic2VuZGVyTmFtZSI6IkFsaWNlIn0=",
+        "timestamp": 811692800.1229999,
+        "isRead": false,
+        "messageChainIndex": 0,
+        "messageId": "7A6B5C4D-3E2F-4A1B-8C9D-0E1F2A3B4C5D",
+        "content": "⌨️TYPING⌨️{\"senderPublicKey\":\"ERERERERERERERERERERERERERERERERERERERERERE=\",\"isTyping\":true,\"timestamp\":811692800.1229999,\"groupId\":\"5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D\",\"senderName\":\"Alice\"}",
+        "senderName": ""
+      },
+      "plaintext": "eyJpZCI6IjdBNkI1QzRELTNFMkYtNEExQi04QzlELTBFMUYyQTNCNEM1RCIsImdyb3VwSWQiOiI1RTJBOUMxQi03RDNGLTRCOEEtOUU2Qy0wRjFEMkEzQjRDNUQiLCJzZW5kZXJQdWJsaWNLZXkiOiJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFPSIsImVuY3J5cHRlZENvbnRlbnQiOiI0b3lvNzdpUFZGbFFTVTVING95bzc3aVBleUp6Wlc1a1pYSlFkV0pzYVdOTFpYa2lPaUpGVWtWU1JWSkZVa1ZTUlZKRlVrVlNSVkpGVWtWU1JWSkZVa1ZTUlZKRlVrVlNSVkpGVWtWU1JWSkZQU0lzSW1selZIbHdhVzVuSWpwMGNuVmxMQ0owYVcxbGMzUmhiWEFpT2pneE1UWTVNamd3TUM0eE1qSTVPVGs1TENKbmNtOTFjRWxrSWpvaU5VVXlRVGxETVVJdE4wUXpSaTAwUWpoQkxUbEZOa010TUVZeFJESkJNMEkwUXpWRUlpd2ljMlZ1WkdWeVRtRnRaU0k2SWtGc2FXTmxJbjA9IiwidGltZXN0YW1wIjo4MTE2OTI4MDAuMTIyOTk5OSwiaXNSZWFkIjpmYWxzZSwibWVzc2FnZUNoYWluSW5kZXgiOjAsIm1lc3NhZ2VJZCI6IjdBNkI1QzRELTNFMkYtNEExQi04QzlELTBFMUYyQTNCNEM1RCIsImNvbnRlbnQiOiLijKjvuI9UWVBJTkfijKjvuI97XCJzZW5kZXJQdWJsaWNLZXlcIjpcIkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkU9XCIsXCJpc1R5cGluZ1wiOnRydWUsXCJ0aW1lc3RhbXBcIjo4MTE2OTI4MDAuMTIyOTk5OSxcImdyb3VwSWRcIjpcIjVFMkE5QzFCLTdEM0YtNEI4QS05RTZDLTBGMUQyQTNCNEM1RFwiLFwic2VuZGVyTmFtZVwiOlwiQWxpY2VcIn0iLCJzZW5kZXJOYW1lIjoiIn0=",
+      "body": "⌨️TYPING⌨️{\"senderPublicKey\":\"ERERERERERERERERERERERERERERERERERERERERERE=\",\"isTyping\":true,\"timestamp\":811692800.1229999,\"groupId\":\"5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D\",\"senderName\":\"Alice\"}"
+    },
+    {
+      "name": "edit",
+      "note": "message_edited system message; actor MUST equal envelope.from and be the author",
+      "channel": "content",
+      "envelope": {
+        "type": "group",
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "from": "ERERERERERERERERERERERERERERERERERERERERERE="
+      },
+      "groupMessage": {
+        "id": "7A6B5C4D-3E2F-4A1B-8C9D-0E1F2A3B4C5D",
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "senderPublicKey": "SYSTEM",
+        "encryptedContent": "",
+        "timestamp": 811692800.1229999,
+        "isRead": true,
+        "messageChainIndex": 0,
+        "systemMessageType": "message_edited",
+        "systemMessageData": {
+          "actorPublicKey": "ERERERERERERERERERERERERERERERERERERERERERE=",
+          "editedMessageId": "0F8E1C2A-3B4D-4E5F-8A9B-0C1D2E3F4A5B",
+          "editedContent": "hello group (edited)"
+        }
+      },
+      "plaintext": "eyJpZCI6IjdBNkI1QzRELTNFMkYtNEExQi04QzlELTBFMUYyQTNCNEM1RCIsImdyb3VwSWQiOiI1RTJBOUMxQi03RDNGLTRCOEEtOUU2Qy0wRjFEMkEzQjRDNUQiLCJzZW5kZXJQdWJsaWNLZXkiOiJTWVNURU0iLCJlbmNyeXB0ZWRDb250ZW50IjoiIiwidGltZXN0YW1wIjo4MTE2OTI4MDAuMTIyOTk5OSwiaXNSZWFkIjp0cnVlLCJtZXNzYWdlQ2hhaW5JbmRleCI6MCwic3lzdGVtTWVzc2FnZVR5cGUiOiJtZXNzYWdlX2VkaXRlZCIsInN5c3RlbU1lc3NhZ2VEYXRhIjp7ImFjdG9yUHVibGljS2V5IjoiRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRT0iLCJlZGl0ZWRNZXNzYWdlSWQiOiIwRjhFMUMyQS0zQjRELTRFNUYtOEE5Qi0wQzFEMkUzRjRBNUIiLCJlZGl0ZWRDb250ZW50IjoiaGVsbG8gZ3JvdXAgKGVkaXRlZCkifX0="
+    },
+    {
+      "name": "delete",
+      "note": "message_deleted system message; actor MUST equal envelope.from and be the author or an admin",
+      "channel": "content",
+      "envelope": {
+        "type": "group",
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "from": "ERERERERERERERERERERERERERERERERERERERERERE="
+      },
+      "groupMessage": {
+        "id": "7A6B5C4D-3E2F-4A1B-8C9D-0E1F2A3B4C5D",
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "senderPublicKey": "SYSTEM",
+        "encryptedContent": "",
+        "timestamp": 811692800.1229999,
+        "isRead": true,
+        "messageChainIndex": 0,
+        "systemMessageType": "message_deleted",
+        "systemMessageData": {
+          "actorPublicKey": "ERERERERERERERERERERERERERERERERERERERERERE=",
+          "deletedMessageId": "0F8E1C2A-3B4D-4E5F-8A9B-0C1D2E3F4A5B"
+        }
+      },
+      "plaintext": "eyJpZCI6IjdBNkI1QzRELTNFMkYtNEExQi04QzlELTBFMUYyQTNCNEM1RCIsImdyb3VwSWQiOiI1RTJBOUMxQi03RDNGLTRCOEEtOUU2Qy0wRjFEMkEzQjRDNUQiLCJzZW5kZXJQdWJsaWNLZXkiOiJTWVNURU0iLCJlbmNyeXB0ZWRDb250ZW50IjoiIiwidGltZXN0YW1wIjo4MTE2OTI4MDAuMTIyOTk5OSwiaXNSZWFkIjp0cnVlLCJtZXNzYWdlQ2hhaW5JbmRleCI6MCwic3lzdGVtTWVzc2FnZVR5cGUiOiJtZXNzYWdlX2RlbGV0ZWQiLCJzeXN0ZW1NZXNzYWdlRGF0YSI6eyJhY3RvclB1YmxpY0tleSI6IkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkU9IiwiZGVsZXRlZE1lc3NhZ2VJZCI6IjBGOEUxQzJBLTNCNEQtNEU1Ri04QTlCLTBDMUQyRTNGNEE1QiJ9fQ=="
+    }
+  ],
+  "media": [
+    {
+      "name": "photo",
+      "note": "v2file key message (ratchet plaintext of a type=group envelope). blobId/fileKey/fileNonce/manifest are placeholders: the receiver takes groupMessage from here and the bytes from the blob.",
+      "channel": "content",
+      "envelope": {
+        "type": "group",
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "from": "ERERERERERERERERERERERERERERERERERERERERERE="
+      },
+      "groupMessage": {
+        "id": "0F8E1C2A-3B4D-4E5F-8A9B-0C1D2E3F4A5B",
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "senderPublicKey": "ERERERERERERERERERERERERERERERERERERERERERE=",
+        "encryptedContent": "",
+        "timestamp": 811692800.1229999,
+        "isRead": false,
+        "messageChainIndex": 0,
+        "mediaType": "photo",
+        "mediaFileName": "photo.jpg",
+        "plaintextContent": "sunset",
+        "messageId": "0F8E1C2A-3B4D-4E5F-8A9B-0C1D2E3F4A5B",
+        "content": "",
+        "senderName": ""
+      },
+      "keyMessage": {
+        "kind": "v2file",
+        "blobId": "blob-placeholder",
+        "fileKey": "AAAA",
+        "fileNonce": "AAAA",
+        "chunkCount": 1,
+        "manifest": "AAAA",
+        "filename": "photo.jpg",
+        "mime": "image/jpeg",
+        "mediaType": "photo",
+        "groupMessage": "eyJpZCI6IjBGOEUxQzJBLTNCNEQtNEU1Ri04QTlCLTBDMUQyRTNGNEE1QiIsImdyb3VwSWQiOiI1RTJBOUMxQi03RDNGLTRCOEEtOUU2Qy0wRjFEMkEzQjRDNUQiLCJzZW5kZXJQdWJsaWNLZXkiOiJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFPSIsImVuY3J5cHRlZENvbnRlbnQiOiIiLCJ0aW1lc3RhbXAiOjgxMTY5MjgwMC4xMjI5OTk5LCJpc1JlYWQiOmZhbHNlLCJtZXNzYWdlQ2hhaW5JbmRleCI6MCwibWVkaWFUeXBlIjoicGhvdG8iLCJtZWRpYUZpbGVOYW1lIjoicGhvdG8uanBnIiwicGxhaW50ZXh0Q29udGVudCI6InN1bnNldCIsIm1lc3NhZ2VJZCI6IjBGOEUxQzJBLTNCNEQtNEU1Ri04QTlCLTBDMUQyRTNGNEE1QiIsImNvbnRlbnQiOiIiLCJzZW5kZXJOYW1lIjoiIn0="
+      }
+    }
+  ],
+  "state": [
+    {
+      "name": "create",
+      "note": "creator sends the definition to every member (stateVersion 1)",
+      "channel": "state",
+      "envelope": {
+        "type": "1to1",
+        "groupId": null,
+        "from": "ERERERERERERERERERERERERERERERERERERERERERE="
+      },
+      "json": {
+        "id": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "name": "Team",
+        "type": "collaborative",
+        "adminPublicKey": "ERERERERERERERERERERERERERERERERERERERERERE=",
+        "members": [
+          {
+            "publicKey": "ERERERERERERERERERERERERERERERERERERERERERE=",
+            "joinedAt": "2026-09-21T14:13:20Z",
+            "isAdmin": true
+          },
+          {
+            "publicKey": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+            "joinedAt": "2026-09-21T14:13:20Z",
+            "isAdmin": false
+          },
+          {
+            "publicKey": "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM=",
+            "joinedAt": "2026-09-21T14:13:20Z",
+            "isAdmin": false
+          }
+        ],
+        "createdAt": "2026-09-21T14:13:20Z",
+        "lastActivity": "2026-09-21T14:13:20Z",
+        "isMuted": false,
+        "description": "weekly sync",
+        "stateVersion": 1
+      },
+      "plaintext": "📢GROUP_UPDATE📢{\"id\":\"5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D\",\"name\":\"Team\",\"type\":\"collaborative\",\"adminPublicKey\":\"ERERERERERERERERERERERERERERERERERERERERERE=\",\"members\":[{\"publicKey\":\"ERERERERERERERERERERERERERERERERERERERERERE=\",\"joinedAt\":\"2026-09-21T14:13:20Z\",\"isAdmin\":true},{\"publicKey\":\"IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=\",\"joinedAt\":\"2026-09-21T14:13:20Z\",\"isAdmin\":false},{\"publicKey\":\"MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM=\",\"joinedAt\":\"2026-09-21T14:13:20Z\",\"isAdmin\":false}],\"createdAt\":\"2026-09-21T14:13:20Z\",\"lastActivity\":\"2026-09-21T14:13:20Z\",\"isMuted\":false,\"description\":\"weekly sync\",\"stateVersion\":1}"
+    },
+    {
+      "name": "created_minimal",
+      "note": "Android<=1.6 compatibility; OPTIONAL, sent AFTER the definition",
+      "channel": "state",
+      "envelope": {
+        "type": "1to1",
+        "groupId": null,
+        "from": "ERERERERERERERERERERERERERERERERERERERERERE="
+      },
+      "json": {
+        "type": "created",
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "name": "Team",
+        "description": "weekly sync",
+        "creatorPublicKey": "ERERERERERERERERERERERERERERERERERERERERERE=",
+        "members": [
+          "ERERERERERERERERERERERERERERERERERERERERERE=",
+          "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+          "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM="
+        ],
+        "admins": [
+          "ERERERERERERERERERERERERERERERERERERERERERE="
+        ],
+        "isPublic": false
+      },
+      "plaintext": "📢GROUP_UPDATE📢{\"type\":\"created\",\"groupId\":\"5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D\",\"name\":\"Team\",\"description\":\"weekly sync\",\"creatorPublicKey\":\"ERERERERERERERERERERERERERERERERERERERERERE=\",\"members\":[\"ERERERERERERERERERERERERERERERERERERERERERE=\",\"IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=\",\"MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM=\"],\"admins\":[\"ERERERERERERERERERERERERERERERERERERERERERE=\"],\"isPublic\":false}"
+    },
+    {
+      "name": "rename",
+      "note": "definition v2 (authoritative)",
+      "channel": "state",
+      "envelope": {
+        "type": "1to1",
+        "groupId": null,
+        "from": "ERERERERERERERERERERERERERERERERERERERERERE="
+      },
+      "json": {
+        "id": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "name": "Team 2",
+        "type": "collaborative",
+        "adminPublicKey": "ERERERERERERERERERERERERERERERERERERERERERE=",
+        "members": [
+          {
+            "publicKey": "ERERERERERERERERERERERERERERERERERERERERERE=",
+            "joinedAt": "2026-09-21T14:13:20Z",
+            "isAdmin": true
+          },
+          {
+            "publicKey": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+            "joinedAt": "2026-09-21T14:13:20Z",
+            "isAdmin": false
+          },
+          {
+            "publicKey": "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM=",
+            "joinedAt": "2026-09-21T14:13:20Z",
+            "isAdmin": false
+          }
+        ],
+        "createdAt": "2026-09-21T14:13:20Z",
+        "lastActivity": "2026-09-21T14:13:20Z",
+        "isMuted": false,
+        "description": "weekly sync",
+        "stateVersion": 2
+      },
+      "plaintext": "📢GROUP_UPDATE📢{\"id\":\"5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D\",\"name\":\"Team 2\",\"type\":\"collaborative\",\"adminPublicKey\":\"ERERERERERERERERERERERERERERERERERERERERERE=\",\"members\":[{\"publicKey\":\"ERERERERERERERERERERERERERERERERERERERERERE=\",\"joinedAt\":\"2026-09-21T14:13:20Z\",\"isAdmin\":true},{\"publicKey\":\"IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=\",\"joinedAt\":\"2026-09-21T14:13:20Z\",\"isAdmin\":false},{\"publicKey\":\"MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM=\",\"joinedAt\":\"2026-09-21T14:13:20Z\",\"isAdmin\":false}],\"createdAt\":\"2026-09-21T14:13:20Z\",\"lastActivity\":\"2026-09-21T14:13:20Z\",\"isMuted\":false,\"description\":\"weekly sync\",\"stateVersion\":2}"
+    },
+    {
+      "name": "rename_minimal",
+      "note": "OPTIONAL companion",
+      "channel": "state",
+      "envelope": {
+        "type": "1to1",
+        "groupId": null,
+        "from": "ERERERERERERERERERERERERERERERERERERERERERE="
+      },
+      "json": {
+        "type": "group_renamed",
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "name": "Team 2"
+      },
+      "plaintext": "📢GROUP_UPDATE📢{\"type\":\"group_renamed\",\"groupId\":\"5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D\",\"name\":\"Team 2\"}"
+    },
+    {
+      "name": "add_member",
+      "note": "definition v3 to the whole NEW roster, D included",
+      "channel": "state",
+      "envelope": {
+        "type": "1to1",
+        "groupId": null,
+        "from": "ERERERERERERERERERERERERERERERERERERERERERE="
+      },
+      "json": {
+        "id": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "name": "Team 2",
+        "type": "collaborative",
+        "adminPublicKey": "ERERERERERERERERERERERERERERERERERERERERERE=",
+        "members": [
+          {
+            "publicKey": "ERERERERERERERERERERERERERERERERERERERERERE=",
+            "joinedAt": "2026-09-21T14:13:20Z",
+            "isAdmin": true
+          },
+          {
+            "publicKey": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+            "joinedAt": "2026-09-21T14:13:20Z",
+            "isAdmin": false
+          },
+          {
+            "publicKey": "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM=",
+            "joinedAt": "2026-09-21T14:13:20Z",
+            "isAdmin": false
+          },
+          {
+            "publicKey": "REREREREREREREREREREREREREREREREREREREREREQ=",
+            "joinedAt": "2026-09-21T14:13:20Z",
+            "isAdmin": false
+          }
+        ],
+        "createdAt": "2026-09-21T14:13:20Z",
+        "lastActivity": "2026-09-21T14:13:20Z",
+        "isMuted": false,
+        "description": "weekly sync",
+        "stateVersion": 3
+      },
+      "plaintext": "📢GROUP_UPDATE📢{\"id\":\"5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D\",\"name\":\"Team 2\",\"type\":\"collaborative\",\"adminPublicKey\":\"ERERERERERERERERERERERERERERERERERERERERERE=\",\"members\":[{\"publicKey\":\"ERERERERERERERERERERERERERERERERERERERERERE=\",\"joinedAt\":\"2026-09-21T14:13:20Z\",\"isAdmin\":true},{\"publicKey\":\"IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=\",\"joinedAt\":\"2026-09-21T14:13:20Z\",\"isAdmin\":false},{\"publicKey\":\"MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM=\",\"joinedAt\":\"2026-09-21T14:13:20Z\",\"isAdmin\":false},{\"publicKey\":\"REREREREREREREREREREREREREREREREREREREREREQ=\",\"joinedAt\":\"2026-09-21T14:13:20Z\",\"isAdmin\":false}],\"createdAt\":\"2026-09-21T14:13:20Z\",\"lastActivity\":\"2026-09-21T14:13:20Z\",\"isMuted\":false,\"description\":\"weekly sync\",\"stateVersion\":3}"
+    },
+    {
+      "name": "add_member_minimal",
+      "note": "OPTIONAL companion",
+      "channel": "state",
+      "envelope": {
+        "type": "1to1",
+        "groupId": null,
+        "from": "ERERERERERERERERERERERERERERERERERERERERERE="
+      },
+      "json": {
+        "type": "member_added",
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "memberPublicKey": "REREREREREREREREREREREREREREREREREREREREREQ="
+      },
+      "plaintext": "📢GROUP_UPDATE📢{\"type\":\"member_added\",\"groupId\":\"5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D\",\"memberPublicKey\":\"REREREREREREREREREREREREREREREREREREREREREQ=\"}"
+    },
+    {
+      "name": "remove_member",
+      "note": "definition v4 to the remaining members AND to C; evictedMemberKeys carries C",
+      "channel": "state",
+      "envelope": {
+        "type": "1to1",
+        "groupId": null,
+        "from": "ERERERERERERERERERERERERERERERERERERERERERE="
+      },
+      "json": {
+        "id": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "name": "Team 2",
+        "type": "collaborative",
+        "adminPublicKey": "ERERERERERERERERERERERERERERERERERERERERERE=",
+        "members": [
+          {
+            "publicKey": "ERERERERERERERERERERERERERERERERERERERERERE=",
+            "joinedAt": "2026-09-21T14:13:20Z",
+            "isAdmin": true
+          },
+          {
+            "publicKey": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+            "joinedAt": "2026-09-21T14:13:20Z",
+            "isAdmin": false
+          },
+          {
+            "publicKey": "REREREREREREREREREREREREREREREREREREREREREQ=",
+            "joinedAt": "2026-09-21T14:13:20Z",
+            "isAdmin": false
+          }
+        ],
+        "createdAt": "2026-09-21T14:13:20Z",
+        "lastActivity": "2026-09-21T14:13:20Z",
+        "isMuted": false,
+        "description": "weekly sync",
+        "evictedMemberKeys": [
+          "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM="
+        ],
+        "stateVersion": 4
+      },
+      "plaintext": "📢GROUP_UPDATE📢{\"id\":\"5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D\",\"name\":\"Team 2\",\"type\":\"collaborative\",\"adminPublicKey\":\"ERERERERERERERERERERERERERERERERERERERERERE=\",\"members\":[{\"publicKey\":\"ERERERERERERERERERERERERERERERERERERERERERE=\",\"joinedAt\":\"2026-09-21T14:13:20Z\",\"isAdmin\":true},{\"publicKey\":\"IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=\",\"joinedAt\":\"2026-09-21T14:13:20Z\",\"isAdmin\":false},{\"publicKey\":\"REREREREREREREREREREREREREREREREREREREREREQ=\",\"joinedAt\":\"2026-09-21T14:13:20Z\",\"isAdmin\":false}],\"createdAt\":\"2026-09-21T14:13:20Z\",\"lastActivity\":\"2026-09-21T14:13:20Z\",\"isMuted\":false,\"description\":\"weekly sync\",\"evictedMemberKeys\":[\"MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM=\"],\"stateVersion\":4}"
+    },
+    {
+      "name": "remove_member_minimal",
+      "note": "REQUIRED companion to the removed member (so it learns), OPTIONAL to others",
+      "channel": "state",
+      "envelope": {
+        "type": "1to1",
+        "groupId": null,
+        "from": "ERERERERERERERERERERERERERERERERERERERERERE="
+      },
+      "json": {
+        "type": "member_removed",
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "memberPublicKey": "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM="
+      },
+      "plaintext": "📢GROUP_UPDATE📢{\"type\":\"member_removed\",\"groupId\":\"5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D\",\"memberPublicKey\":\"MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM=\"}"
+    },
+    {
+      "name": "leave",
+      "note": "B leaves: member_removed naming B, sent BY B (self-departure, accepted from any member in any group type)",
+      "channel": "state",
+      "envelope": {
+        "type": "1to1",
+        "groupId": null,
+        "from": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI="
+      },
+      "json": {
+        "type": "member_removed",
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "memberPublicKey": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI="
+      },
+      "plaintext": "📢GROUP_UPDATE📢{\"type\":\"member_removed\",\"groupId\":\"5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D\",\"memberPublicKey\":\"IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=\"}"
+    },
+    {
+      "name": "promote_admin",
+      "note": "definition v5, D promoted (sender must already be admin)",
+      "channel": "state",
+      "envelope": {
+        "type": "1to1",
+        "groupId": null,
+        "from": "ERERERERERERERERERERERERERERERERERERERERERE="
+      },
+      "json": {
+        "id": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "name": "Team 2",
+        "type": "collaborative",
+        "adminPublicKey": "ERERERERERERERERERERERERERERERERERERERERERE=",
+        "members": [
+          {
+            "publicKey": "ERERERERERERERERERERERERERERERERERERERERERE=",
+            "joinedAt": "2026-09-21T14:13:20Z",
+            "isAdmin": true
+          },
+          {
+            "publicKey": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+            "joinedAt": "2026-09-21T14:13:20Z",
+            "isAdmin": false
+          },
+          {
+            "publicKey": "REREREREREREREREREREREREREREREREREREREREREQ=",
+            "joinedAt": "2026-09-21T14:13:20Z",
+            "isAdmin": true
+          }
+        ],
+        "createdAt": "2026-09-21T14:13:20Z",
+        "lastActivity": "2026-09-21T14:13:20Z",
+        "isMuted": false,
+        "description": "weekly sync",
+        "evictedMemberKeys": [
+          "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM="
+        ],
+        "stateVersion": 5
+      },
+      "plaintext": "📢GROUP_UPDATE📢{\"id\":\"5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D\",\"name\":\"Team 2\",\"type\":\"collaborative\",\"adminPublicKey\":\"ERERERERERERERERERERERERERERERERERERERERERE=\",\"members\":[{\"publicKey\":\"ERERERERERERERERERERERERERERERERERERERERERE=\",\"joinedAt\":\"2026-09-21T14:13:20Z\",\"isAdmin\":true},{\"publicKey\":\"IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=\",\"joinedAt\":\"2026-09-21T14:13:20Z\",\"isAdmin\":false},{\"publicKey\":\"REREREREREREREREREREREREREREREREREREREREREQ=\",\"joinedAt\":\"2026-09-21T14:13:20Z\",\"isAdmin\":true}],\"createdAt\":\"2026-09-21T14:13:20Z\",\"lastActivity\":\"2026-09-21T14:13:20Z\",\"isMuted\":false,\"description\":\"weekly sync\",\"evictedMemberKeys\":[\"MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM=\"],\"stateVersion\":5}"
+    },
+    {
+      "name": "pin",
+      "note": "definition carrying the pin",
+      "channel": "state",
+      "envelope": {
+        "type": "1to1",
+        "groupId": null,
+        "from": "ERERERERERERERERERERERERERERERERERERERERERE="
+      },
+      "json": {
+        "id": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "name": "Team 2",
+        "type": "collaborative",
+        "adminPublicKey": "ERERERERERERERERERERERERERERERERERERERERERE=",
+        "members": [
+          {
+            "publicKey": "ERERERERERERERERERERERERERERERERERERERERERE=",
+            "joinedAt": "2026-09-21T14:13:20Z",
+            "isAdmin": true
+          },
+          {
+            "publicKey": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+            "joinedAt": "2026-09-21T14:13:20Z",
+            "isAdmin": false
+          },
+          {
+            "publicKey": "REREREREREREREREREREREREREREREREREREREREREQ=",
+            "joinedAt": "2026-09-21T14:13:20Z",
+            "isAdmin": false
+          }
+        ],
+        "createdAt": "2026-09-21T14:13:20Z",
+        "lastActivity": "2026-09-21T14:13:20Z",
+        "isMuted": false,
+        "description": "weekly sync",
+        "evictedMemberKeys": [
+          "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM="
+        ],
+        "pinnedMessageId": "0F8E1C2A-3B4D-4E5F-8A9B-0C1D2E3F4A5B",
+        "pinnedBy": "ERERERERERERERERERERERERERERERERERERERERERE=",
+        "stateVersion": 6
+      },
+      "plaintext": "📢GROUP_UPDATE📢{\"id\":\"5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D\",\"name\":\"Team 2\",\"type\":\"collaborative\",\"adminPublicKey\":\"ERERERERERERERERERERERERERERERERERERERERERE=\",\"members\":[{\"publicKey\":\"ERERERERERERERERERERERERERERERERERERERERERE=\",\"joinedAt\":\"2026-09-21T14:13:20Z\",\"isAdmin\":true},{\"publicKey\":\"IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=\",\"joinedAt\":\"2026-09-21T14:13:20Z\",\"isAdmin\":false},{\"publicKey\":\"REREREREREREREREREREREREREREREREREREREREREQ=\",\"joinedAt\":\"2026-09-21T14:13:20Z\",\"isAdmin\":false}],\"createdAt\":\"2026-09-21T14:13:20Z\",\"lastActivity\":\"2026-09-21T14:13:20Z\",\"isMuted\":false,\"description\":\"weekly sync\",\"evictedMemberKeys\":[\"MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM=\"],\"pinnedMessageId\":\"0F8E1C2A-3B4D-4E5F-8A9B-0C1D2E3F4A5B\",\"pinnedBy\":\"ERERERERERERERERERERERERERERERERERERERERERE=\",\"stateVersion\":6}"
+    },
+    {
+      "name": "avatar_emoji",
+      "note": "emoji avatar rides every definition",
+      "channel": "state",
+      "envelope": {
+        "type": "1to1",
+        "groupId": null,
+        "from": "ERERERERERERERERERERERERERERERERERERERERERE="
+      },
+      "json": {
+        "id": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "name": "Team 2",
+        "type": "collaborative",
+        "adminPublicKey": "ERERERERERERERERERERERERERERERERERERERERERE=",
+        "members": [
+          {
+            "publicKey": "ERERERERERERERERERERERERERERERERERERERERERE=",
+            "joinedAt": "2026-09-21T14:13:20Z",
+            "isAdmin": true
+          },
+          {
+            "publicKey": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+            "joinedAt": "2026-09-21T14:13:20Z",
+            "isAdmin": false
+          },
+          {
+            "publicKey": "REREREREREREREREREREREREREREREREREREREREREQ=",
+            "joinedAt": "2026-09-21T14:13:20Z",
+            "isAdmin": false
+          }
+        ],
+        "createdAt": "2026-09-21T14:13:20Z",
+        "lastActivity": "2026-09-21T14:13:20Z",
+        "isMuted": false,
+        "description": "weekly sync",
+        "evictedMemberKeys": [
+          "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM="
+        ],
+        "avatar": "🚀",
+        "stateVersion": 7
+      },
+      "plaintext": "📢GROUP_UPDATE📢{\"id\":\"5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D\",\"name\":\"Team 2\",\"type\":\"collaborative\",\"adminPublicKey\":\"ERERERERERERERERERERERERERERERERERERERERERE=\",\"members\":[{\"publicKey\":\"ERERERERERERERERERERERERERERERERERERERERERE=\",\"joinedAt\":\"2026-09-21T14:13:20Z\",\"isAdmin\":true},{\"publicKey\":\"IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=\",\"joinedAt\":\"2026-09-21T14:13:20Z\",\"isAdmin\":false},{\"publicKey\":\"REREREREREREREREREREREREREREREREREREREREREQ=\",\"joinedAt\":\"2026-09-21T14:13:20Z\",\"isAdmin\":false}],\"createdAt\":\"2026-09-21T14:13:20Z\",\"lastActivity\":\"2026-09-21T14:13:20Z\",\"isMuted\":false,\"description\":\"weekly sync\",\"evictedMemberKeys\":[\"MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM=\"],\"avatar\":\"🚀\",\"stateVersion\":7}"
+    },
+    {
+      "name": "picture",
+      "note": "picture inline (JPEG base64, framed plaintext <= 180000 bytes); placeholder bytes",
+      "channel": "state",
+      "envelope": {
+        "type": "1to1",
+        "groupId": null,
+        "from": "ERERERERERERERERERERERERERERERERERERERERERE="
+      },
+      "json": {
+        "id": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "name": "Team 2",
+        "type": "collaborative",
+        "adminPublicKey": "ERERERERERERERERERERERERERERERERERERERERERE=",
+        "members": [
+          {
+            "publicKey": "ERERERERERERERERERERERERERERERERERERERERERE=",
+            "joinedAt": "2026-09-21T14:13:20Z",
+            "isAdmin": true
+          },
+          {
+            "publicKey": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+            "joinedAt": "2026-09-21T14:13:20Z",
+            "isAdmin": false
+          },
+          {
+            "publicKey": "REREREREREREREREREREREREREREREREREREREREREQ=",
+            "joinedAt": "2026-09-21T14:13:20Z",
+            "isAdmin": false
+          }
+        ],
+        "createdAt": "2026-09-21T14:13:20Z",
+        "lastActivity": "2026-09-21T14:13:20Z",
+        "isMuted": false,
+        "groupPictureData": "/9j/AA==",
+        "groupPictureUpdatedBy": "ERERERERERERERERERERERERERERERERERERERERERE=",
+        "groupPictureUpdatedAt": "2026-09-21T14:13:20Z",
+        "stateVersion": 8
+      },
+      "plaintext": "📢GROUP_UPDATE📢{\"id\":\"5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D\",\"name\":\"Team 2\",\"type\":\"collaborative\",\"adminPublicKey\":\"ERERERERERERERERERERERERERERERERERERERERERE=\",\"members\":[{\"publicKey\":\"ERERERERERERERERERERERERERERERERERERERERERE=\",\"joinedAt\":\"2026-09-21T14:13:20Z\",\"isAdmin\":true},{\"publicKey\":\"IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=\",\"joinedAt\":\"2026-09-21T14:13:20Z\",\"isAdmin\":false},{\"publicKey\":\"REREREREREREREREREREREREREREREREREREREREREQ=\",\"joinedAt\":\"2026-09-21T14:13:20Z\",\"isAdmin\":false}],\"createdAt\":\"2026-09-21T14:13:20Z\",\"lastActivity\":\"2026-09-21T14:13:20Z\",\"isMuted\":false,\"groupPictureData\":\"/9j/AA==\",\"groupPictureUpdatedBy\":\"ERERERERERERERERERERERERERERERERERERERERERE=\",\"groupPictureUpdatedAt\":\"2026-09-21T14:13:20Z\",\"stateVersion\":8}"
+    },
+    {
+      "name": "read_receipt_batch",
+      "note": "OPTIONAL; timestamp is Unix millis here",
+      "channel": "state",
+      "envelope": {
+        "type": "1to1",
+        "groupId": null,
+        "from": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI="
+      },
+      "json": {
+        "type": "read_receipt_batch",
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "messageIds": [
+          "0F8E1C2A-3B4D-4E5F-8A9B-0C1D2E3F4A5B"
+        ],
+        "senderPublicKey": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+        "timestamp": 1790000000123
+      },
+      "plaintext": "📢GROUP_UPDATE📢{\"type\":\"read_receipt_batch\",\"groupId\":\"5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D\",\"messageIds\":[\"0F8E1C2A-3B4D-4E5F-8A9B-0C1D2E3F4A5B\"],\"senderPublicKey\":\"IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=\",\"timestamp\":1790000000123}"
+    },
+    {
+      "name": "member_sync_request",
+      "note": "member asks for the definition",
+      "channel": "state",
+      "envelope": {
+        "type": "1to1",
+        "groupId": null,
+        "from": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI="
+      },
+      "json": {
+        "type": "member_sync_request",
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "requesterPublicKey": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI="
+      },
+      "plaintext": "📢GROUP_UPDATE📢{\"type\":\"member_sync_request\",\"groupId\":\"5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D\",\"requesterPublicKey\":\"IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=\"}"
+    },
+    {
+      "name": "sync_request",
+      "note": "ask for every group we share",
+      "channel": "state",
+      "envelope": {
+        "type": "1to1",
+        "groupId": null,
+        "from": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI="
+      },
+      "json": {
+        "type": "sync_request",
+        "requesterKey": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI="
+      },
+      "plaintext": "📢GROUP_UPDATE📢{\"type\":\"sync_request\",\"requesterKey\":\"IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=\"}"
+    }
+  ],
+  "sentCopy": [
+    {
+      "name": "group_text_self_copy",
+      "note": "one per group message per OTHER own device (to=me,toDevice=other); message = the exact content plaintext",
+      "plaintext": {
+        "kind": "sent-copy",
+        "v": 1,
+        "conversation": {
+          "type": "group",
+          "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D"
+        },
+        "message": "eyJpZCI6IjBGOEUxQzJBLTNCNEQtNEU1Ri04QTlCLTBDMUQyRTNGNEE1QiIsImdyb3VwSWQiOiI1RTJBOUMxQi03RDNGLTRCOEEtOUU2Qy0wRjFEMkEzQjRDNUQiLCJzZW5kZXJQdWJsaWNLZXkiOiJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFUkVSRVJFPSIsImVuY3J5cHRlZENvbnRlbnQiOiJhR1ZzYkc4Z1ozSnZkWEFnNHB5VCIsInRpbWVzdGFtcCI6ODExNjkyODAwLjEyMjk5OTksImlzUmVhZCI6ZmFsc2UsIm1lc3NhZ2VDaGFpbkluZGV4IjowLCJtZXNzYWdlSWQiOiIwRjhFMUMyQS0zQjRELTRFNUYtOEE5Qi0wQzFEMkUzRjRBNUIiLCJjb250ZW50IjoiaGVsbG8gZ3JvdXAg4pyTIiwic2VuZGVyTmFtZSI6IiJ9",
+        "msgId": "0F8E1C2A-3B4D-4E5F-8A9B-0C1D2E3F4A5B",
+        "sentAt": "2026-09-21T14:13:20Z"
+      }
+    }
+  ],
+  "receiver": [
+    {
+      "name": "sender_mismatch",
+      "rule": "content: GroupMessage.senderPublicKey != envelope.from (canonical) and not SYSTEM => drop",
+      "envelopeFrom": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+      "groupMessage": {
+        "id": "0F8E1C2A-3B4D-4E5F-8A9B-0C1D2E3F4A5B",
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "senderPublicKey": "ERERERERERERERERERERERERERERERERERERERERERE=",
+        "encryptedContent": "c3Bvb2Y=",
+        "timestamp": 811692800.1229999,
+        "isRead": false,
+        "messageChainIndex": 0,
+        "messageId": "0F8E1C2A-3B4D-4E5F-8A9B-0C1D2E3F4A5B",
+        "content": "spoof",
+        "senderName": ""
+      }
+    },
+    {
+      "name": "system_actor_mismatch",
+      "rule": "SYSTEM message whose systemMessageData.actorPublicKey != envelope.from => drop",
+      "envelopeFrom": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
+      "groupMessage": {
+        "id": "7A6B5C4D-3E2F-4A1B-8C9D-0E1F2A3B4C5D",
+        "groupId": "5E2A9C1B-7D3F-4B8A-9E6C-0F1D2A3B4C5D",
+        "senderPublicKey": "SYSTEM",
+        "encryptedContent": "",
+        "timestamp": 811692800.1229999,
+        "isRead": true,
+        "messageChainIndex": 0,
+        "systemMessageType": "message_edited",
+        "systemMessageData": {
+          "actorPublicKey": "ERERERERERERERERERERERERERERERERERERERERERE=",
+          "editedMessageId": "0F8E1C2A-3B4D-4E5F-8A9B-0C1D2E3F4A5B",
+          "editedContent": "hello group (edited)"
+        }
+      }
+    },
+    {
+      "name": "group_update_on_group_channel",
+      "rule": "a type=group envelope whose plaintext is not base64(JSON GroupMessage) or v2file => drop (never shown)",
+      "envelopeFrom": "ERERERERERERERERERERERERERERERERERERERERERE=",
+      "plaintext": "📢GROUP_UPDATE📢{}"
+    },
+    {
+      "name": "stale_definition",
+      "rule": "incoming stateVersion < local stateVersion => ignore",
+      "local": 5,
+      "incoming": 4,
+      "apply": false
+    },
+    {
+      "name": "equal_definition",
+      "rule": "incoming stateVersion == local => apply (authorizer still gates), local = max",
+      "local": 5,
+      "incoming": 5,
+      "apply": true
+    },
+    {
+      "name": "unversioned_definition",
+      "rule": "either side without stateVersion => no version check",
+      "local": null,
+      "incoming": 4,
+      "apply": true
+    }
+  ]
+}
