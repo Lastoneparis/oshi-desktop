@@ -960,7 +960,7 @@ private fun ToolsPage(actions: SettingsActions) {
         SettingsDivider()
         SettingsLinkRow(SettingsIcon.CLOCK, t("desktop.settings.tools.scheduled"), t("desktop.settings.tools.scheduled.detail")) { actions.onShow(Pane.SCHEDULED) }
         SettingsDivider()
-        SettingsLinkRow(SettingsIcon.ANTENNA, t("settings.section.longRange"), t("desktop.settings.tools.radio.detail")) { actions.onShow(Pane.LORA) }
+        SettingsLinkRow(SettingsIcon.ANTENNA, t("settings.section.longRange"), t("pc.radio.tool.detail")) { actions.onShow(Pane.LORA) }
         SettingsDivider()
         SettingsLinkRow(SettingsIcon.DEVICES, t("desktop.settings.tools.peers"), t("desktop.settings.tools.peers.detail")) { actions.onShow(Pane.PEERS) }
         SettingsDivider()

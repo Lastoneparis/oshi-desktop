@@ -346,7 +346,10 @@ class StringsFileTest {
         // 5525 → 5527 on 2026-11-25 (2 keys): __MAIL_OFFLINE_DESKTOP_2026_11_25__ pc.mail.offline.{unreachable,
         // refreshFailed} (Mail offline: no claim form without a 404), from OSHI-Desktop/i18n-src/mail-offline,
         // all 34 .lproj, re-extracted.
-        assertEquals("en Localizable key count", 5527, en.localizable.size)
+        // 5527 → 5590 on 2026-11-25 (63 keys): __MESHCORE_INTEROP_DESKTOP_2026_11_25__ pc.meshcore.* and
+        // pc.radio.{autoDetect.hint,checking,detecting,detected.*,tool.detail,notAttached.body2} (MeshCore users
+        // over USB, firmware auto-detect), from OSHI-Desktop/i18n-src/meshcore, all 34 .lproj, re-extracted.
+        assertEquals("en Localizable key count", 5590, en.localizable.size)
         assertEquals("en InfoPlist key count", 16, en.infoPlist.size)
         assertEquals("Messages", en.localizable["tab.messages"])
         // Spot-check a value with an escape and one with a bare percent.

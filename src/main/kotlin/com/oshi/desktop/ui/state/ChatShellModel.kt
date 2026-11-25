@@ -256,6 +256,8 @@ class ChatShellModel(
         val previousComment = client.onComment
         client.onComment = { m, notify -> previousComment(m, notify); onComment(m, notify) }
         client.onLoRaStatusChanged = { publish() }
+        // __MESHCORE_INTEROP_DESKTOP_2026_11_25__ radio status, contacts, channels, a join, a send state.
+        client.onMeshCoreChanged = { publish() }
         // __PROFILE_PHOTOS_DESKTOP_2027__ a contact's new picture repaints the list and header.
         client.photos.addChangeListener { publish() }
         com.oshi.desktop.store.PrivacyPreferences.addChangeListener(photoPrivacyListener)
@@ -302,6 +304,24 @@ class ChatShellModel(
 
     /** __GROUP_RESEND_2026_11_25__ "Retry now" on a group message some members have not received. */
     fun retryGroupDelivery(messageId: String) = client.retryGroupDelivery(messageId)
+
+    /** __MESHCORE_INTEROP_DESKTOP_2026_11_25__ What a MeshCore thread says about itself, and its byte budget. */
+    private fun meshCoreInfo(id: String): MeshCoreThreadInfo {
+        val channel = com.oshi.desktop.lora.MeshCoreThread.isChannelKey(id)
+        val public = channel && client.meshCoreIsPublicChannel(id)
+        return MeshCoreThreadInfo(
+            isChannel = channel,
+            note = t("pc.meshcore.notE2e"),
+            detail = when {
+                !channel -> t("pc.meshcore.threadDetail")
+                public -> t("pc.meshcore.publicChannelDetail")
+                else -> t("pc.meshcore.privateChannelDetail")
+            },
+            maxBytes = if (channel) com.oshi.desktop.lora.MeshCoreText.channelMaxBytes(client.meshCoreLink()?.selfName)
+                else com.oshi.desktop.lora.MeshCoreText.DM_MAX_BYTES,
+            radioConnected = client.meshCoreReady,
+        )
+    }
 
     /** The reach badge as of [nowMs]: mesh peers (drops held a few seconds) and LoRa nodes. */
     fun networkBadge(nowMs: Long): NetworkBadge {
@@ -676,6 +696,7 @@ class ChatShellModel(
         worker.execute {
             val result = try {
                 if (group) groupSendResult(client.sendGroupText(target, text, quote, mentions))
+                else if (kindOf(target) == ConversationKind.MESHCORE) meshCoreSendResult(client.meshCoreSend(target, text))
                 else directSendResult(client.send(target, text, quote))
             } catch (e: Exception) {
                 synchronized(lock) {
@@ -725,9 +746,13 @@ class ChatShellModel(
     }
 
     /** Who a sender is, as THIS device names them: me, our contact alias, their nickname, or a short key. */
-    private fun senderLabel(key: String): String =
-        if (com.oshi.desktop.group.GroupIdentity.sameIdentity(key, client.address)) "me"
-        else client.contacts.get(key)?.label(short(key)) ?: short(key)
+    private fun senderLabel(key: String): String = when {
+        // __MESHCORE_INTEROP_DESKTOP_2026_11_25__ a channel author is only the name their app wrote.
+        key.startsWith(OshiClient.MESHCORE_NAME_PREFIX) -> key.removePrefix(OshiClient.MESHCORE_NAME_PREFIX)
+        com.oshi.desktop.lora.MeshCoreThread.isContactKey(key) -> client.meshCoreDisplayName(key)
+        com.oshi.desktop.group.GroupIdentity.sameIdentity(key, client.address) -> "me"
+        else -> client.contacts.get(key)?.label(short(key)) ?: short(key)
+    }
 
     private fun quoteRow(q: com.oshi.desktop.msg.ReplyEnvelope.Quote): QuoteRow = QuoteRow(
         messageId = q.originalMessageId,
@@ -2061,7 +2086,11 @@ class ChatShellModel(
                 ListPreview.of(m) { "" }.takeIf { it.kind == ListPreview.Kind.LOCATION || it.kind == ListPreview.Kind.ALIVE }?.text
             else null
             if (previewable) {
-                onIncomingNotification(senderLabel(m.senderAddress), text)
+                // __MESHCORE_INTEROP_DESKTOP_2026_11_25__ "Alice · #paris": who, and in which channel.
+                val who = if (com.oshi.desktop.lora.MeshCoreThread.isChannelKey(m.conversationId))
+                    senderLabel(m.senderAddress) + " · " + client.meshCoreDisplayName(m.conversationId)
+                else senderLabel(m.senderAddress)
+                onIncomingNotification(who, text)
             } else if (readable != null) {
                 onIncomingNotification(senderLabel(m.senderAddress), readable)
             } else {
@@ -2279,7 +2308,11 @@ class ChatShellModel(
         val summaryById = messageSummaries.associateBy { it.conversationId }
         val summaries = messageSummaries + client.groups.all()
             .filter { it.groupId !in summaryById }
-            .map { com.oshi.desktop.store.MessageStore.ConversationSummary(it.groupId, 0, null, it.lastActivityUnixMillis) }
+            .map { com.oshi.desktop.store.MessageStore.ConversationSummary(it.groupId, 0, null, it.lastActivityUnixMillis) } +
+            // __MESHCORE_INTEROP_DESKTOP_2026_11_25__ the attached MeshCore radio's channels are rooms you
+            // are already in: listed from the moment the radio is connected, before anyone speaks.
+            client.meshCoreChannelKeys().filter { it !in summaryById }
+                .map { com.oshi.desktop.store.MessageStore.ConversationSummary(it, 0, null, 0L) }
         val rows = summaries.sortedByDescending { it.lastActivityMs }.map { summary ->
             val kind = kindOf(summary.conversationId)
             val groupDef = if (kind == ConversationKind.GROUP) client.groups.get(summary.conversationId) else null
@@ -2290,7 +2323,8 @@ class ChatShellModel(
                 kind = kind,
                 messageCount = summary.messageCount,
                 lastActivityMs = summary.lastActivityMs,
-                lastActivity = stamp(summary.lastActivityMs),
+                // __MESHCORE_INTEROP_DESKTOP_2026_11_25__ a radio channel nobody has spoken in yet has no time.
+                lastActivity = if (summary.lastActivityMs <= 0L) "" else stamp(summary.lastActivityMs),
                 preview = summaryPreview.text,
                 previewKind = summaryPreview.kind,
                 unread = unread[summary.conversationId] ?: 0,
@@ -2443,6 +2477,7 @@ class ChatShellModel(
                 composer = composerFor(id),
                 // __BOT_E2E_2026_09_23__ BOT_SEAL_SPEC.md §3: say how the LATEST bot post was
                 // protected. Rows stored before bot-seal-v1 carry no bot transport = legacy.
+                meshCore = if (kind != ConversationKind.MESHCORE) null else meshCoreInfo(id),
                 botSealing = if (kind != ConversationKind.BOT) null else
                     client.history(id).lastOrNull { !it.fromMe }?.let {
                         com.oshi.desktop.bot.BotEnvelope.Sealing.fromTransport(it.transport)
@@ -2793,10 +2828,12 @@ class ChatShellModel(
         ConversationKind.GROUP -> client.groups.get(id)?.name ?: short(id)
         ConversationKind.BOT -> t("conv.label.bot", id.removePrefix(BOT_PREFIX))
         ConversationKind.LORA -> t("conv.label.radio", id.removePrefix(LoRaNodeBindings.FALLBACK_PREFIX))
+        ConversationKind.MESHCORE -> client.meshCoreDisplayName(id)
         ConversationKind.DIRECT -> client.contacts.get(id)?.label(short(id)) ?: short(id)
     }
 
     private fun kindOf(id: String): ConversationKind = when {
+        com.oshi.desktop.lora.MeshCoreThread.isMeshCoreKey(id) -> ConversationKind.MESHCORE
         id.startsWith(BOT_PREFIX) -> ConversationKind.BOT
         id.startsWith(LoRaNodeBindings.FALLBACK_PREFIX) -> ConversationKind.LORA
         client.groups.get(id) != null -> ConversationKind.GROUP
@@ -2850,6 +2887,32 @@ class ChatShellModel(
                 false,
                 null,
             )
+            // __MESHCORE_INTEROP_DESKTOP_2026_11_25__ text only, and only through a connected radio.
+            ConversationKind.MESHCORE -> when {
+                !client.meshCoreReady -> ComposerState(false, t("pc.meshcore.composer.offline"), false, null)
+                com.oshi.desktop.lora.MeshCoreThread.isChannelKey(id) && !client.meshCoreHasChannel(id) ->
+                    ComposerState(false, t("pc.meshcore.composer.channelGone"), false, null)
+                else -> ComposerState(true, null, false, t("pc.meshcore.textOnly"))
+            }
+        }
+    }
+
+    /** __MESHCORE_INTEROP_DESKTOP_2026_11_25__ The composer's answer to a MeshCore send. */
+    private fun meshCoreSendResult(o: OshiClient.MeshCoreSend) = when (o) {
+        OshiClient.MeshCoreSend.QUEUED -> SendResult(t("pc.meshcore.queued"), Severity.OK, keepDraft = false)
+        OshiClient.MeshCoreSend.NOT_CONNECTED -> SendResult(t("pc.meshcore.send.notConnected"), Severity.ERROR, keepDraft = true)
+        OshiClient.MeshCoreSend.UNKNOWN_CHANNEL -> SendResult(t("pc.meshcore.composer.channelGone"), Severity.ERROR, keepDraft = true)
+        OshiClient.MeshCoreSend.EMPTY -> SendResult(t("conv.n.nothing_to_send"), Severity.INFO, keepDraft = false)
+    }
+
+    /** __MESHCORE_INTEROP_DESKTOP_2026_11_25__ "Not delivered — Retry" on a MeshCore bubble. */
+    fun retryMeshCore(messageId: String) {
+        val id = synchronized(lock) { selectedId } ?: return
+        if (kindOf(id) != ConversationKind.MESHCORE) return
+        worker.execute {
+            val r = runCatching { client.meshCoreRetry(id, messageId) }.getOrDefault(OshiClient.MeshCoreSend.NOT_CONNECTED)
+            if (r == OshiClient.MeshCoreSend.NOT_CONNECTED) synchronized(lock) { notice = Notice(t("pc.meshcore.send.notConnected"), Severity.ERROR) }
+            publish()
         }
     }
 
@@ -2999,7 +3062,8 @@ enum class Destination { MESSAGES, AI, NEW, PLACES, MORE }
 /** DEVICES: __DEVSYNC_DIRECT_2026_09_22__ More → Linked devices (direct own-device sync). */
 enum class Pane { CONVERSATION, ACCOUNT, LIMITS, COVERT, MAIL, SCHEDULED, DEVICES, LORA, PEERS, DELETE_ACCOUNT, DISGUISE, DISCOVER_GROUPS }
 
-enum class ConversationKind { DIRECT, GROUP, BOT, LORA }
+/** __MESHCORE_INTEROP_DESKTOP_2026_11_25__ MESHCORE: a MeshCore user (`meshcore!`) or channel (`mcchan!`). */
+enum class ConversationKind { DIRECT, GROUP, BOT, LORA, MESHCORE }
 
 enum class Reach { UNKNOWN, CHECKING, REACHABLE, NO_BUNDLE, ERROR, NOT_APPLICABLE }
 
@@ -3181,6 +3245,34 @@ data class LocationCardRow(
     val remainingMs: Long? = null,
 )
 
+/**
+ * __MESHCORE_INTEROP_DESKTOP_2026_11_25__ A MeshCore thread's standing note ("not OSHI end-to-end
+ * encrypted", and for a public channel "anyone who knows the name can read it") and the radio's byte
+ * budget for one message, which the composer's counter measures against.
+ */
+data class MeshCoreThreadInfo(
+    val isChannel: Boolean,
+    val note: String,
+    val detail: String,
+    val maxBytes: Int,
+    val radioConnected: Boolean,
+) {
+    /** "128/133" while one message, or how many numbered messages the text will go as. */
+    data class Count(val chars: Int, val limit: Int, val parts: Int) {
+        val visible: Boolean get() = parts > 1 || chars >= limit - WARN_BEFORE
+        val over: Boolean get() = parts > 1
+    }
+
+    fun count(text: String): Count {
+        val parts = if (text.isBlank()) 0 else com.oshi.desktop.lora.MeshCoreText.split(text, maxBytes).size
+        return Count(text.codePointCount(0, text.length), com.oshi.desktop.lora.MeshCore.RECOMMENDED_TEXT_CHARS, parts)
+    }
+
+    companion object {
+        const val WARN_BEFORE = 20
+    }
+}
+
 data class ThreadView(
     val conversationId: String,
     val title: String,
@@ -3260,6 +3352,8 @@ data class ThreadView(
     val composer: ComposerState,
     /** __BOT_E2E_2026_09_23__ Bot threads only: how the latest post was protected; null elsewhere. */
     val botSealing: com.oshi.desktop.bot.BotEnvelope.Sealing? = null,
+    /** __MESHCORE_INTEROP_DESKTOP_2026_11_25__ set for a MeshCore user or channel thread. */
+    val meshCore: MeshCoreThreadInfo? = null,
     /**
      * __UNREAD_DIVIDER_2027__ How many messages were unread when this conversation was
      * opened — the phones' "Unread messages" divider (`chat_unread_divider`) sits above them.

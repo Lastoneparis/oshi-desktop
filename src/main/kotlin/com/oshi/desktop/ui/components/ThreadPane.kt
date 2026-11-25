@@ -366,6 +366,8 @@ fun ThreadPane(
                     onOpen = { aliveOpen = true },
                 )
                 thread.botSealing?.let { BotSealLabel(it) }
+                // __MESHCORE_INTEROP_DESKTOP_2026_11_25__ never mistaken for an OSHI conversation.
+                thread.meshCore?.let { MeshCoreNoteBar(it) }
               }
               },
               bottom = {
@@ -376,6 +378,8 @@ fun ThreadPane(
                 if (dissolved) DissolvedGroupBanner(onDeleteChat = onDeleteGroup)
                 if (thread.contactBlocked && onSetContactBlocked != null) BlockedContactBanner { onSetContactBlocked(false) }
                 if (replyingTo != null && thread.composer.enabled) ReplyBanner(replyingTo, onCancelReply)
+                // __MESHCORE_INTEROP_DESKTOP_2026_11_25__ "128/133", then "2 messages" once it will be split.
+                thread.meshCore?.takeIf { thread.composer.enabled }?.let { MeshCoreCounterRow(it, draft) }
                 // __CONVERSATION_BLOCK_2027__ the banner above already says why; no second, closed composer under it.
                 if (!(thread.contactBlocked && onSetContactBlocked != null) && !dissolved) Composer(thread.conversationId, thread.composer, busy, draft, onDraft, onSend, onAttach, onVoiceNote,
                     // __GROUP_GIF_2026_11_16__ Both phones now offer GIFs & stickers in groups
@@ -413,7 +417,8 @@ fun ThreadPane(
                     onDisguise = onDisguise?.takeIf { thread.kind == com.oshi.desktop.ui.state.ConversationKind.DIRECT },
                     // __VIEW_ONCE_DESKTOP_2027__ 1:1 only: iOS sends group media with isViewOnce false.
                     onAttachViewOnce = onAttachViewOnce?.takeIf { thread.kind == com.oshi.desktop.ui.state.ConversationKind.DIRECT },
-                    voiceViewOnceAllowed = thread.kind == com.oshi.desktop.ui.state.ConversationKind.DIRECT)
+                    voiceViewOnceAllowed = thread.kind == com.oshi.desktop.ui.state.ConversationKind.DIRECT,
+                    textOnly = thread.kind == com.oshi.desktop.ui.state.ConversationKind.MESHCORE)
               }
               },
             ) { insets ->
@@ -460,6 +465,7 @@ fun ThreadPane(
                         val reactionRule = thread.groupSettings?.settings
                         androidx.compose.runtime.CompositionLocalProvider(
                             LocalAllowedReactions provides reactionRule?.takeIf { it.reactions == com.oshi.desktop.group.GroupSettings.ReactionMode.SOME }?.allowedReactions,
+                            LocalFailedRetry provides LocalMeshCoreRetryAction.current?.takeIf { thread.kind == ConversationKind.MESHCORE },
                         ) {
                             MessageLog(thread, wallpaper, viewOnce, revealed, onReveal, onReact, onEditMessage, onDeleteMessage, today, onReply, onPin, onDeleteForMe, onForward, onVote, onCopy, onReplyPrivately,
                                 onOpenComments = commentActions?.onOpen, insets = insets)
@@ -689,7 +695,7 @@ private fun MessageLog(
                 // __REPLY_PRIVATELY_DESKTOP_2027__ someone else's message in a group (not deleted).
                 onReplyPrivately = if (thread.kind == ConversationKind.GROUP && !row.fromMe && !row.deleted &&
                     row.senderAddress.isNotBlank() && thread.groupMembers.none { it.self && it.address == row.senderAddress }) { { onReplyPrivately(row.id) } } else null,
-                showSender = thread.kind == ConversationKind.GROUP &&
+                showSender = (thread.kind == ConversationKind.GROUP || thread.meshCore?.isChannel == true) &&
                     (separator != null || previous == null || previous.fromMe || previous.who != row.who),
                 // __GROUP_COMMENTS_2026_11_21__ §2.12.6 "💬 N comments" under each post.
                 belowBubble = row.comments?.takeIf { onOpenComments != null && !row.deleted }?.let { n ->
@@ -780,6 +786,7 @@ private fun EmptyThread(kind: ConversationKind) {
                 ConversationKind.GROUP -> t("conv.thread.empty.group")
                 ConversationKind.BOT -> t("conv.thread.empty.bot")
                 ConversationKind.LORA -> t("conv.thread.empty.lora")
+                ConversationKind.MESHCORE -> t("pc.meshcore.empty")
             },
         )
     }
@@ -892,6 +899,8 @@ private fun Composer(
     onPickImage: (() -> java.io.File?)? = null,
     /** (file, discardAfterSend, viewOnce) — viewOnce only ever true when [onAttachViewOnce] is offered. */
     onAttachFile: ((java.io.File, Boolean, Boolean) -> Unit)? = null,
+    /** __MESHCORE_INTEROP_DESKTOP_2026_11_25__ a radio that carries text only: no "+", no microphone. */
+    textOnly: Boolean = false,
 ) {
     if (!composer.enabled && !busy) {
         DisabledComposer(composer)
@@ -1214,7 +1223,7 @@ private fun Composer(
             verticalAlignment = Alignment.Bottom,
             horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm),
         ) {
-            AttachButton(
+            if (!textOnly) AttachButton(
                 enabled = (composer.attachEnabled || onDisguise != null) && !busy,
                 open = whyOpen || panelOpen,
                 onClick = {
@@ -1233,7 +1242,7 @@ private fun Composer(
             }
 
             androidx.compose.animation.AnimatedVisibility(
-                visible = chrome.captureButtonsVisible,
+                visible = chrome.captureButtonsVisible && !textOnly,
                 enter = androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(180)) +
                     androidx.compose.animation.expandHorizontally(androidx.compose.animation.core.tween(220), expandFrom = Alignment.Start),
                 exit = androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(120)) +
@@ -2046,4 +2055,48 @@ private fun SlashMenu(
         onPick = { i -> commands.getOrNull(i)?.let(onPick) },
         onInsert = onInsert?.let { ins -> { i: Int -> commands.getOrNull(i)?.let(ins) } },
     )
+}
+
+// ---------------------------------------------------------------------------- MeshCore
+
+/**
+ * __MESHCORE_INTEROP_DESKTOP_2026_11_25__ The standing note of a MeshCore thread: a lock-less shield,
+ * "MeshCore · not OSHI end-to-end encrypted", and in one line what that means here (a public channel:
+ * anyone who knows its name reads it). Drawn under the header so it is never scrolled away.
+ */
+@Composable
+private fun MeshCoreNoteBar(info: com.oshi.desktop.ui.state.MeshCoreThreadInfo) {
+    Row(
+        Modifier.fillMaxWidth().background(OshiTheme.warning.copy(alpha = 0.12f)).padding(horizontal = OshiTheme.lg, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(OshiTheme.sm),
+    ) {
+        GlyphIcon(Glyph.ALERT, OshiTheme.warning, 14.dp)
+        Column(Modifier.weight(1f)) {
+            Text(info.note, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Ink.strong, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(info.detail, fontSize = 11.sp, color = Ink.soft, lineHeight = 14.sp)
+        }
+    }
+}
+
+/** "128/133" near the limit; "2 messages" (warning ink) once the text will go as numbered parts. */
+@Composable
+private fun MeshCoreCounterRow(info: com.oshi.desktop.ui.state.MeshCoreThreadInfo, draft: String) {
+    val count = info.count(draft)
+    if (!count.visible) return
+    Row(
+        Modifier.fillMaxWidth().padding(start = OshiTheme.lg, end = OshiTheme.lg, top = 4.dp),
+        horizontalArrangement = Arrangement.End,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        WithTooltip(t("pc.meshcore.counterHint")) {
+            Text(
+                if (count.over) t("pc.meshcore.parts", count.parts) else "${count.chars}/${count.limit}",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = if (count.over) OshiTheme.warning else Ink.soft,
+                maxLines = 1,
+            )
+        }
+    }
 }

@@ -995,6 +995,7 @@ private fun MessagesDestination(
                             ?: DisplaySettings.defaultWallpaper
                         androidx.compose.runtime.CompositionLocalProvider(
                             com.oshi.desktop.ui.components.LocalGroupDeliveryRetry provides { id -> model.retryGroupDelivery(id) },
+                            com.oshi.desktop.ui.components.LocalMeshCoreRetryAction provides { id -> model.retryMeshCore(id) },
                         ) {
                         ThreadPane(
                             thread = thread,

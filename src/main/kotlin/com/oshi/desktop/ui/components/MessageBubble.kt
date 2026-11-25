@@ -750,6 +750,15 @@ private val BUBBLE_TAIL = 5.dp
  */
 val LocalGroupDeliveryRetry = androidx.compose.runtime.staticCompositionLocalOf<((String) -> Unit)?> { null }
 
+/**
+ * __MESHCORE_INTEROP_DESKTOP_2026_11_25__ "Retry" on a FAILED bubble, where sending the same row again is
+ * a thing this thread can do (a MeshCore DM whose 4 attempts went unacknowledged). Null elsewhere.
+ */
+val LocalFailedRetry = androidx.compose.runtime.staticCompositionLocalOf<((String) -> Unit)?> { null }
+
+/** The window's MeshCore retry, handed to [LocalFailedRetry] by a MeshCore thread only. */
+val LocalMeshCoreRetryAction = androidx.compose.runtime.staticCompositionLocalOf<((String) -> Unit)?> { null }
+
 @Composable
 private fun Footer(row: MessageRow, onMedia: Boolean = false) {
     // __BUBBLE_MEDIA_2026_11_21__ On a media-only bubble the time sits ON the picture, white in
@@ -805,13 +814,15 @@ private fun Footer(row: MessageRow, onMedia: Boolean = false) {
             )
         }
         if (row.failed) {
+            val retryFailed = LocalFailedRetry.current
             Text(
-                t("desktop.bubble.not_delivered"),
+                if (retryFailed != null) t("desktop.bubble.not_delivered") + " · " + t("common.retry") else t("desktop.bubble.not_delivered"),
                 fontSize = 10.sp,
                 fontWeight = FontWeight.SemiBold,
                 // `danger` (#FF3B30) is 3.77:1 on white and is the phone's own failure hue.
                 // It is paired with a glyph and the word, never colour alone.
                 color = OshiTheme.danger,
+                modifier = if (retryFailed == null) Modifier else Modifier.clickable(onClickLabel = t("common.retry")) { retryFailed(row.id) },
             )
         }
     }

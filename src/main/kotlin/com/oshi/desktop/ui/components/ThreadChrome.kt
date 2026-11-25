@@ -527,7 +527,7 @@ fun ThreadHeaderBar(
                         modifier = Modifier.weight(1f, fill = false),
                     )
                     // Groups carry the avatar mark; only the unusual kinds say what they are.
-                    if (thread.kind == ConversationKind.BOT || thread.kind == ConversationKind.LORA) KindBadge(thread.kind)
+                    if (thread.kind == ConversationKind.BOT || thread.kind == ConversationKind.LORA || thread.kind == ConversationKind.MESHCORE) KindBadge(thread.kind)
                     if (thread.isMuted) GlyphIcon(Glyph.BELL_SLASH, Ink.soft, 14.dp)
                     // __CONVERSATION_VERIFY_2027__ a verified contact carries the shield, as on the phones.
                     if (!isGroup && thread.verified) ConvGlyphIcon(ConvGlyph.SHIELD_CHECK, OshiTheme.success, 15.dp)

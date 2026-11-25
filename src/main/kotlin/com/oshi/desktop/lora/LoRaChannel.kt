@@ -29,6 +29,13 @@ interface LoRaChannel {
     /** Open a connection, or throw. Never returns null — a failure is the exception. */
     fun open(): Conn
 
+    /**
+     * __MESHCORE_INTEROP_DESKTOP_2026_11_25__ False once the device is known to be gone (a USB
+     * radio unplugged: its `/dev` node disappears), so a link can say "unplugged" instead of
+     * "the radio stopped answering". A socket cannot tell, so the default is true.
+     */
+    fun stillThere(): Boolean = true
+
     class Conn(
         val input: InputStream,
         val output: OutputStream,
@@ -84,6 +91,8 @@ interface LoRaChannel {
     ) : LoRaChannel {
 
         override val label: String get() = path
+
+        override fun stillThere(): Boolean = java.io.File(path).exists()
 
         override fun open(): Conn {
             if (!LoRaSerial.isSupported()) throw IOException("serial attach is POSIX-only on this build")

@@ -677,6 +677,8 @@ fun KindBadge(kind: ConversationKind) {
         // the other 33 locales until somebody translates them into the iOS tree.
         ConversationKind.BOT -> t("conv.badge.bot") to OshiTheme.danger
         ConversationKind.LORA -> t("conv.badge.lora") to OshiTheme.warning
+        // __MESHCORE_INTEROP_DESKTOP_2026_11_25__ not OSHI end-to-end encrypted, said on the row too.
+        ConversationKind.MESHCORE -> t("pc.meshcore.badge") to OshiTheme.warning
     }
     Text(
         text,

@@ -25,6 +25,7 @@ import com.oshi.desktop.lora.LoRaSerial
 import com.oshi.desktop.ui.OshiTheme
 import com.oshi.desktop.ui.state.ContactRow
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * The radio, with a mouse — the desktop counterpart of iOS's `MeshtasticSettingsView`.
@@ -158,6 +159,18 @@ interface LoRaPaneHost {
 
     /** __DESKTOP_TOOLS_2027__ Battery, signal, airtime and config of the attached radio. */
     fun radioCard(): com.oshi.desktop.lora.LoRaRadioCard? = null
+
+    // __MESHCORE_INTEROP_DESKTOP_2026_11_25__ one Connect for any USB radio, and the MeshCore half.
+    /** Ask the board which firmware it runs and attach the matching link. Blocks ~6 s: call off the UI thread. */
+    fun attachAuto(path: String): OshiClient.RadioAttach = if (attachSerial(path)) OshiClient.RadioAttach.MESHTASTIC else OshiClient.RadioAttach.REFUSED
+    /** Device paths a link is attached to right now. */
+    fun attachedPaths(): Set<String> = emptySet()
+    fun meshCore(): MeshCoreRadioView? = null
+    fun meshCoreDetach() {}
+    fun meshCoreAdvert(): Boolean = false
+    fun meshCoreRefresh() {}
+    fun meshCoreJoinHashtag(name: String): com.oshi.desktop.lora.MeshCoreLink.JoinResult = com.oshi.desktop.lora.MeshCoreLink.JoinResult.NOT_READY
+    fun meshCoreJoinPrivate(name: String, secret: String): com.oshi.desktop.lora.MeshCoreLink.JoinResult = com.oshi.desktop.lora.MeshCoreLink.JoinResult.NOT_READY
 }
 
 /** The real radio. */
@@ -213,6 +226,14 @@ fun loRaPaneHost(client: OshiClient): LoRaPaneHost = object : LoRaPaneHost {
         ?.let { code -> com.oshi.desktop.lora.LoRaAdmin.Region.entries.firstOrNull { it.wire == code } }
     override fun blockedReason() = client.loraRadioState.blockedReason
     override fun radioCard() = client.loraRadioCard()
+    override fun attachAuto(path: String) = client.radioAttachAuto(path)
+    override fun attachedPaths() = client.radioAttachedPaths()
+    override fun meshCore() = client.meshCoreLink()?.let { MeshCoreRadioView.of(it, client.meshCoreLastJoin, client.meshCoreLastAdvert) }
+    override fun meshCoreDetach() = client.meshCoreDetach()
+    override fun meshCoreAdvert() = client.meshCoreAdvert()
+    override fun meshCoreRefresh() = client.meshCoreRefreshContacts()
+    override fun meshCoreJoinHashtag(name: String) = client.meshCoreJoinHashtag(name)
+    override fun meshCoreJoinPrivate(name: String, secret: String) = client.meshCoreJoinPrivate(name, secret)
 }
 
 /** The four pages of the radio screen. */
@@ -256,6 +277,10 @@ fun LoRaPane(
     var card by remember { mutableStateOf(runCatching { radio.radioCard() }.getOrNull()) }
     var tab by remember { mutableStateOf(RadioTab.OVERVIEW) }
     LocalRadioTab.current?.let { tab = it }
+    var meshCore by remember { mutableStateOf(runCatching { radio.meshCore() }.getOrNull()) }
+    var attachedPaths by remember { mutableStateOf(runCatching { radio.attachedPaths() }.getOrDefault(emptySet())) }
+    var detecting by remember { mutableStateOf<String?>(null) }
+    var lastAdvertSeen by remember { mutableStateOf(meshCore?.lastAdvert) }
 
     // Polled rather than pushed: the roster is folded on the radio's read thread and the
     // only thing this screen needs is to be roughly current. One second matches the header.
@@ -277,6 +302,11 @@ fun LoRaPane(
             blocked = runCatching { radio.blockedReason() }.getOrNull()
             card = runCatching { radio.radioCard() }.getOrNull()
             beaconOn = runCatching { radio.beaconEnabled }.getOrDefault(false)
+            meshCore = runCatching { radio.meshCore() }.getOrNull()
+            attachedPaths = runCatching { radio.attachedPaths() }.getOrDefault(emptySet())
+            meshCore?.lastAdvert?.let { a ->
+                if (a != lastAdvertSeen) { lastAdvertSeen = a; notice = if (a.second) t("pc.meshcore.advertSent") else t("pc.meshcore.advertFailed") }
+            }
             // __DESKTOP_LORA_BEACON_2026_10_28__ The beacon has no clock of its own; it rides
             // this poll. The policy — shared byte for byte with both phones — decides, so
             // ticking often is free. Nothing is transmitted unless the switch is on, a
@@ -288,7 +318,11 @@ fun LoRaPane(
 
     ToolScaffold(
         title = t("lora.node.title"),
-        subtitle = if (attached) (myName ?: card?.name ?: t("lora.status.ready")) else t("lora.error.not_connected"),
+        subtitle = when {
+            attached -> myName ?: card?.name ?: t("lora.status.ready")
+            meshCore != null -> meshCore?.selfName ?: t("meshcore.title")
+            else -> t("lora.error.not_connected")
+        },
         icon = ToolGlyph.RADIO,
         maxContentWidth = 1180.dp,
         actions = {
@@ -298,9 +332,37 @@ fun LoRaPane(
     ) {
         notice?.let { ToolNotice(it, ToolTone.INFO) { ToolIconButton(ToolGlyph.CLOSE, t("common.dismiss"), size = 28.dp) { notice = null } } }
 
+        // __MESHCORE_INTEROP_DESKTOP_2026_11_25__ a MeshCore radio (on its own or beside a Meshtastic one).
+        meshCore?.let { mc ->
+            MeshCoreSection(
+                mc,
+                onDetach = { radio.meshCoreDetach(); notice = t("pc.radio.detached") },
+                onMessage = onMessage,
+                onCopy = onCopy,
+                onAdvert = { radio.meshCoreAdvert() },
+                onRefresh = { radio.meshCoreRefresh() },
+                onJoinHashtag = { radio.meshCoreJoinHashtag(it) },
+                onJoinPrivate = { n, sec -> radio.meshCoreJoinPrivate(n, sec) },
+                onNotice = { notice = it },
+            )
+        }
+
         if (!attached) {
-            ConnectCard(radio, devices, onNotice = { notice = it })
-            ToolEmptyState(t("lora.error.not_connected"), t("pc.radio.notAttached.body"), mascot = "sleep", size = 96.dp) {
+            val scope = androidx.compose.runtime.rememberCoroutineScope()
+            ConnectCard(radio, devices, attachedPaths, detecting, onConnect = { path ->
+                detecting = path
+                notice = t("pc.radio.detecting", path)
+                scope.launch {
+                    val r = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        runCatching { radio.attachAuto(path) }.getOrDefault(OshiClient.RadioAttach.UNREACHABLE)
+                    }
+                    detecting = null
+                    notice = radioAttachNotice(r, path)
+                    meshCore = runCatching { radio.meshCore() }.getOrNull()
+                    attached = radio.attached
+                }
+            }, onNotice = { notice = it })
+            if (meshCore == null) ToolEmptyState(t("lora.error.not_connected"), t("pc.radio.notAttached.body2"), mascot = "sleep", size = 96.dp) {
                 ToolButton(t("lora.buy.node"), icon = ToolGlyph.LINK, style = ToolButtonStyle.QUIET) { openUrl("https://oshi-messenger.com/lora/") { notice = t("pc.radio.browserFailed") } }
             }
             return@ToolScaffold
@@ -340,7 +402,25 @@ fun LoRaPane(
         )
 
         when (tab) {
-            RadioTab.OVERVIEW -> NodesSection(radio, nodes, links, contacts, myPos, onCopy, onMessage) { notice = it }
+            RadioTab.OVERVIEW -> {
+                NodesSection(radio, nodes, links, contacts, myPos, onCopy, onMessage) { notice = it }
+                // __MESHCORE_INTEROP_DESKTOP_2026_11_25__ a second radio (MeshCore) beside this one.
+                if (meshCore == null && devices.any { it.path !in attachedPaths }) {
+                    val scope = androidx.compose.runtime.rememberCoroutineScope()
+                    ConnectCard(radio, devices, attachedPaths, detecting, onConnect = { path ->
+                        detecting = path
+                        notice = t("pc.radio.detecting", path)
+                        scope.launch {
+                            val r = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                runCatching { radio.attachAuto(path) }.getOrDefault(OshiClient.RadioAttach.UNREACHABLE)
+                            }
+                            detecting = null
+                            notice = radioAttachNotice(r, path)
+                            meshCore = runCatching { radio.meshCore() }.getOrNull()
+                        }
+                    }, onNotice = { notice = it })
+                }
+            }
             RadioTab.SEND -> SendSection(radio, attached, contacts) { notice = it }
             RadioTab.SETTINGS -> ToolColumns(
                 first = {
@@ -355,6 +435,15 @@ fun LoRaPane(
             RadioTab.TRAFFIC -> TrafficCard(traffic)
         }
     }
+}
+
+/** __MESHCORE_INTEROP_DESKTOP_2026_11_25__ What "Connect" found on a USB port, in words. */
+internal fun radioAttachNotice(r: OshiClient.RadioAttach, path: String): String = when (r) {
+    OshiClient.RadioAttach.MESHCORE -> t("pc.radio.detected.meshcore", path)
+    OshiClient.RadioAttach.MESHTASTIC -> t("pc.radio.detected.meshtastic", path)
+    OshiClient.RadioAttach.UNKNOWN_FIRMWARE -> t("pc.radio.detected.unknown", path)
+    OshiClient.RadioAttach.UNREACHABLE -> t("pc.radio.detected.unreachable", path)
+    OshiClient.RadioAttach.REFUSED -> t("pc.radio.pathRefused")
 }
 
 // ---------------------------------------------------------------------------- radio card
@@ -435,16 +524,27 @@ private fun RadioCard(card: com.oshi.desktop.lora.LoRaRadioCard?, myName: String
 // ---------------------------------------------------------------------------- connect
 
 @Composable
-private fun ConnectCard(radio: LoRaPaneHost, devices: List<LoRaSerial.Device>, onNotice: (String) -> Unit) {
+private fun ConnectCard(
+    radio: LoRaPaneHost,
+    devices: List<LoRaSerial.Device>,
+    attachedPaths: Set<String>,
+    detecting: String?,
+    onConnect: (String) -> Unit,
+    onNotice: (String) -> Unit,
+) {
     var host by remember { mutableStateOf("") }
     ToolCard(title = t("pc.radio.connect.title"), icon = ToolGlyph.USB) {
         ToolHint(t("lora.guide.footer"))
+        // __MESHCORE_INTEROP_DESKTOP_2026_11_25__ one Connect: OSHI asks the board what it runs.
+        ToolHint(t("pc.radio.autoDetect.hint"))
         if (devices.isEmpty()) {
             ToolHint(if (LoRaSerial.isSupported()) t("pc.radio.usb.none") else t("pc.radio.usb.unsupported"))
         } else for (device in devices) {
             ToolRow(device.name.ifBlank { device.path }, subtitle = device.path, icon = ToolGlyph.USB) {
-                ToolButton(t("peers.peer.connect"), style = ToolButtonStyle.PRIMARY) {
-                    onNotice(if (radio.attachSerial(device.path)) t("pc.radio.attaching", device.path) else t("pc.radio.pathRefused"))
+                when {
+                    device.path in attachedPaths -> ToolPill(t("pc.meshcore.status.ready"), OshiTheme.success)
+                    detecting == device.path -> ToolPill(t("pc.radio.checking"), OshiTheme.brand)
+                    else -> ToolButton(t("peers.peer.connect"), style = ToolButtonStyle.PRIMARY, enabled = detecting == null) { onConnect(device.path) }
                 }
             }
         }

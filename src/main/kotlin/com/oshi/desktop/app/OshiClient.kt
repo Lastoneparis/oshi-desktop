@@ -3260,6 +3260,8 @@ class OshiClient(
         ourPublicKeyBase64 = address,
     ).also { ratchetSessionStore.load(it.ratchet) }
     @Volatile private var lora: com.oshi.desktop.lora.LoRaLink? = null
+    /** __MESHCORE_INTEROP_DESKTOP_2026_11_25__ The serial device the Meshtastic link is on, if any. */
+    @Volatile private var loraAttachedPath: String? = null
 
     val loraAttached: Boolean get() = lora?.isConnected == true
 
@@ -3471,6 +3473,7 @@ class OshiClient(
         )
         link.onToRadio = { loraTraffic.observe("→", it) }
         lora = link
+        loraAttachedPath = path
         link.start()
         return true
     }
@@ -4081,6 +4084,7 @@ class OshiClient(
     fun loraDetach() {
         lora?.stop()
         lora = null
+        loraAttachedPath = null
         loraRoster.clear()
         // __DESKTOP_LORA_BEACON_2026_10_28__ Forget what was last beaconed. Without this,
         // detaching and re-attaching leaves `lastSentAtMs` set, so the first beacon of the
@@ -4094,16 +4098,36 @@ class OshiClient(
         loraTraffic.clear()
     }
 
+    // ------------------------------------------------ __MESHCORE_INTEROP_DESKTOP_2026_11_25__
+    //
+    // MeshCore USERS — people on plain MeshCore apps, not OSHI — reached through a MeshCore companion
+    // radio on USB (or its WiFi build on TCP). Port of Android feat/meshcore-interop-android
+    // (MeshCoreChats + MeshCoreLink): DMs with ACK → DELIVERED / FAILED + Retry, channels (Public,
+    // #hashtag, private), the radio's contacts, long text as "(i/n)" parts 1.5 s apart. Conversation
+    // keys are `meshcore!<hex>` and `mcchan!<name>` ([com.oshi.desktop.lora.MeshCoreThread]); none of
+    // it is OSHI end-to-end encrypted, and every surface that shows it says so.
+
     @Volatile private var meshCore: com.oshi.desktop.lora.MeshCoreLink? = null
     private val meshCoreRx = com.oshi.desktop.lora.OmpReassembler()
 
-    val meshCoreAttached: Boolean get() = meshCore?.isReady == true
+    /** A MeshCore radio is attached (connecting, syncing or ready). */
+    val meshCoreAttached: Boolean get() = meshCore != null
+    /** MeshCore users can be written to right now. */
+    val meshCoreReady: Boolean get() = meshCore?.isReady == true
+    fun meshCoreLink(): com.oshi.desktop.lora.MeshCoreLink? = meshCore
+
+    /** Repaint hook: status, contacts, channels or a message's state changed. */
+    @Volatile var onMeshCoreChanged: () -> Unit = {}
+
+    /** The radio's last answer to a channel join / an advert: (when, accepted). For the Radio screen. */
+    @Volatile var meshCoreLastJoin: Pair<Long, Boolean>? = null
+        private set
+    @Volatile var meshCoreLastAdvert: Pair<Long, Boolean>? = null
+        private set
 
     /**
-     * Attach to a MeshCore companion radio over TCP (its WiFi firmware; see
-     * [com.oshi.desktop.lora.MeshCoreLink]). The same receive lane as [loraAttach]: OSHI traffic rides
-     * the "#oshi-bridge" channel as OMP frames, and an envelope addressed to us is REPORTED, not opened —
-     * it is sealed with the legacy Double Ratchet this client does not implement.
+     * Attach to a MeshCore companion radio over TCP (its WiFi firmware). The USB companion is
+     * [meshCoreAttachSerial]; [radioAttachAuto] picks between MeshCore and Meshtastic by asking.
      */
     fun meshCoreAttach(host: String, port: Int = com.oshi.desktop.lora.MeshCoreLink.TCP_PORT): Boolean {
         val endpoint = com.oshi.desktop.lora.LoRaAttach.tcpEndpoint(host, port)
@@ -4111,32 +4135,234 @@ class OshiClient(
             onLoRa("meshcore: refused invalid TCP endpoint")
             return false
         }
-        meshCoreDetach()
-        val link = com.oshi.desktop.lora.MeshCoreLink(
-            host = endpoint.host,
-            port = endpoint.port,
-            onOmpFrame = { _, f -> onMeshCoreFrame(f) },
-            log = { log(it); onLoRa(it) },
-        )
-        meshCore = link
-        link.start()
+        startMeshCore(com.oshi.desktop.lora.LoRaChannel.Tcp(endpoint.host, endpoint.port))
         return true
     }
 
-    fun meshCoreDetach() {
-        meshCore?.stop()
-        meshCore = null
+    /** Attach to a MeshCore USB companion radio. macOS / Linux, like [loraAttachSerial]. */
+    fun meshCoreAttachSerial(device: String): Boolean {
+        if (!com.oshi.desktop.lora.LoRaSerial.isSupported()) {
+            onLoRa("meshcore: serial attach needs macOS or Linux")
+            return false
+        }
+        val path = com.oshi.desktop.lora.LoRaSerial.devicePath(device) ?: run {
+            onLoRa("meshcore: refused invalid serial device path")
+            return false
+        }
+        startMeshCore(com.oshi.desktop.lora.LoRaChannel.Serial(path))
+        return true
     }
 
+    enum class RadioAttach { MESHCORE, MESHTASTIC, UNKNOWN_FIRMWARE, UNREACHABLE, REFUSED }
+
+    /** Serial devices a radio link (Meshtastic or MeshCore) is attached to right now. */
+    fun radioAttachedPaths(): Set<String> = setOfNotNull(
+        loraAttachedPath?.takeIf { lora != null },
+        meshCore?.label?.takeIf { it.startsWith("/dev/") },
+    )
+
+    /**
+     * One "Connect" for a USB radio: ask the board which firmware it runs
+     * ([com.oshi.desktop.lora.RadioFirmwareProbe]) and attach the matching link. Blocks for up to ~6 s:
+     * call it off the UI thread. A radio that answers neither is NOT attached, so the person is told
+     * what is wrong instead of watching a link that never comes up.
+     */
+    fun radioAttachAuto(device: String): RadioAttach {
+        if (!com.oshi.desktop.lora.LoRaSerial.isSupported()) return RadioAttach.REFUSED
+        val path = com.oshi.desktop.lora.LoRaSerial.devicePath(device) ?: return RadioAttach.REFUSED
+        // The port is ours alone while we ask: an attached link on it would read the answers.
+        if (meshCore?.label == path) meshCoreDetach()
+        if (lora != null && loraAttachedPath == path) loraDetach()
+        val fw = com.oshi.desktop.lora.RadioFirmwareProbe.detect(
+            com.oshi.desktop.lora.LoRaChannel.Serial(path), log = { log(it) },
+        )
+        onLoRa("radio: $path answers as $fw")
+        return when (fw) {
+            com.oshi.desktop.lora.RadioFirmwareProbe.Firmware.MESHCORE ->
+                if (meshCoreAttachSerial(path)) RadioAttach.MESHCORE else RadioAttach.REFUSED
+            com.oshi.desktop.lora.RadioFirmwareProbe.Firmware.MESHTASTIC ->
+                if (loraAttachSerial(path)) RadioAttach.MESHTASTIC else RadioAttach.REFUSED
+            com.oshi.desktop.lora.RadioFirmwareProbe.Firmware.UNKNOWN -> RadioAttach.UNKNOWN_FIRMWARE
+            com.oshi.desktop.lora.RadioFirmwareProbe.Firmware.UNREACHABLE -> RadioAttach.UNREACHABLE
+        }
+    }
+
+    private fun startMeshCore(channel: com.oshi.desktop.lora.LoRaChannel) {
+        meshCoreDetach()
+        val link = com.oshi.desktop.lora.MeshCoreLink(channel, log = { log(it); onLoRa(it) })
+        link.onInbound = { onMeshCoreText(it) }
+        link.onSendState = { id, st -> onMeshCoreSendState(id, st) }
+        link.onOmpFrame = { e -> onMeshCoreFrame(e.parsed) }
+        link.onChanged = { runCatching { onMeshCoreChanged() } }
+        link.onJoin = { _, ok -> meshCoreLastJoin = System.currentTimeMillis() to ok; runCatching { onMeshCoreChanged() } }
+        link.onAdvert = { ok -> meshCoreLastAdvert = System.currentTimeMillis() to ok; runCatching { onMeshCoreChanged() } }
+        meshCore = link
+        link.start()
+        runCatching { onMeshCoreChanged() }
+    }
+
+    fun meshCoreDetach() {
+        val link = meshCore ?: return
+        meshCore = null
+        link.stop()
+        runCatching { onMeshCoreChanged() }
+    }
+
+    /**
+     * Names learned from the radio's contact table, kept after the radio is unplugged so a thread keeps
+     * its person's name. Public-key hex → advert name.
+     */
+    private val meshCoreNames = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /** What to call a MeshCore thread: the contact's advert name, the channel name, or "MeshCore a1b2c3". */
+    fun meshCoreDisplayName(key: String): String {
+        val link = meshCore
+        val contacts = link?.contacts.orEmpty()
+        contacts.forEach { c -> if (c.name.isNotBlank()) meshCoreNames[c.publicKeyHex] = c.name }
+        com.oshi.desktop.lora.MeshCoreThread.channelName(key)?.let { return it }
+        com.oshi.desktop.lora.MeshCoreThread.contactFor(key, contacts)?.name?.takeIf { it.isNotBlank() }?.let { return it }
+        val hex = key.removePrefix(com.oshi.desktop.lora.MeshCoreThread.CONTACT_PREFIX).lowercase()
+        meshCoreNames[hex]?.let { return it }
+        if (hex.length >= 12) meshCoreNames.entries.firstOrNull { it.key.startsWith(hex.take(12)) }?.let { return it.value }
+        return com.oshi.desktop.lora.MeshCoreThread.displayName(key, contacts)
+    }
+
+    /** `mcchan!<name>` keys of the attached radio's channels a person can talk in. */
+    fun meshCoreChannelKeys(): List<String> =
+        meshCore?.userChannels.orEmpty().map { com.oshi.desktop.lora.MeshCoreThread.channelKey(it.name) }
+
+    fun meshCoreHasChannel(key: String): Boolean =
+        com.oshi.desktop.lora.MeshCoreThread.channelIndexFor(key, meshCore?.userChannels.orEmpty()) != null
+
+    fun meshCoreIsPublicChannel(key: String): Boolean =
+        com.oshi.desktop.lora.MeshCoreThread.isPublicChannelKey(key, meshCore?.userChannels.orEmpty())
+
+    /** Join a channel by name (#hashtag) or name + secret (private). The answer comes on [onMeshCoreChanged]. */
+    fun meshCoreJoinHashtag(name: String): com.oshi.desktop.lora.MeshCoreLink.JoinResult =
+        meshCore?.joinHashtagChannel(name) ?: com.oshi.desktop.lora.MeshCoreLink.JoinResult.NOT_READY
+
+    fun meshCoreJoinPrivate(name: String, secretText: String): com.oshi.desktop.lora.MeshCoreLink.JoinResult {
+        val link = meshCore ?: return com.oshi.desktop.lora.MeshCoreLink.JoinResult.NOT_READY
+        val secret = com.oshi.desktop.lora.MeshCore.parseSecret(secretText) ?: return com.oshi.desktop.lora.MeshCoreLink.JoinResult.INVALID
+        return link.joinPrivateChannel(name, secret)
+    }
+
+    fun meshCoreAdvert(): Boolean = meshCore?.sendSelfAdvert() == true
+    fun meshCoreRefreshContacts() { meshCore?.refreshContacts() }
+
+    /** Outgoing MeshCore rows: message id → conversation, so a state from the radio finds its row. */
+    private val meshCoreOutgoing = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    enum class MeshCoreSend { QUEUED, NOT_CONNECTED, UNKNOWN_CHANNEL, EMPTY }
+
+    /**
+     * Text to a MeshCore user or channel. The row is stored at once as PENDING (a clock); the radio then
+     * moves it to SENT, DELIVERED (a DM the recipient's radio acknowledged) or FAILED (no ACK after 4
+     * attempts, or the link went away) — and FAILED offers Retry ([meshCoreRetry]).
+     */
+    fun meshCoreSend(conversationKey: String, text: String, messageId: String = UUID.randomUUID().toString()): MeshCoreSend {
+        val body = text.trim()
+        if (body.isEmpty()) return MeshCoreSend.EMPTY
+        val link = meshCore
+        if (link == null || !link.isReady) return MeshCoreSend.NOT_CONNECTED
+        val channel = com.oshi.desktop.lora.MeshCoreThread.isChannelKey(conversationKey)
+        if (channel && com.oshi.desktop.lora.MeshCoreThread.channelIndexFor(conversationKey, link.userChannels) == null) {
+            return MeshCoreSend.UNKNOWN_CHANNEL
+        }
+        val row = Message(
+            id = messageId, conversationId = conversationKey, senderAddress = address, recipientAddress = conversationKey,
+            fromMe = true, content = body, sentAtMs = System.currentTimeMillis(), sentAtSource = TimestampSource.LOCAL_CLOCK,
+            deliveryStatus = DeliveryStatus.PENDING, transport = MESHCORE_TRANSPORT,
+        )
+        meshCoreOutgoing[messageId] = conversationKey
+        messages.append(row)
+        runCatching { onMessage(row) }
+        val ok = if (channel) link.sendChannelText(messageId, conversationKey, body)
+            else link.sendDirectText(messageId, conversationKey, body)
+        if (!ok) {
+            meshCoreSetStatus(conversationKey, messageId, DeliveryStatus.FAILED)
+            return MeshCoreSend.NOT_CONNECTED
+        }
+        return MeshCoreSend.QUEUED
+    }
+
+    /** Send a FAILED MeshCore message again, same row (it goes back to the clock). */
+    fun meshCoreRetry(conversationKey: String, messageId: String): MeshCoreSend {
+        val m = messages.message(conversationKey, messageId) ?: return MeshCoreSend.EMPTY
+        if (!m.fromMe || m.deliveryStatus != DeliveryStatus.FAILED) return MeshCoreSend.EMPTY
+        val link = meshCore
+        if (link == null || !link.isReady) return MeshCoreSend.NOT_CONNECTED
+        val text = m.content?.takeIf { it.isNotBlank() } ?: return MeshCoreSend.EMPTY
+        meshCoreOutgoing[messageId] = conversationKey
+        messages.append(m.copy(deliveryStatus = DeliveryStatus.PENDING))
+        onMessage(messages.message(conversationKey, messageId) ?: m)
+        val ok = if (com.oshi.desktop.lora.MeshCoreThread.isChannelKey(conversationKey)) link.sendChannelText(messageId, conversationKey, text)
+            else link.sendDirectText(messageId, conversationKey, text)
+        if (!ok) { meshCoreSetStatus(conversationKey, messageId, DeliveryStatus.FAILED); return MeshCoreSend.NOT_CONNECTED }
+        return MeshCoreSend.QUEUED
+    }
+
+    private fun onMeshCoreSendState(messageId: String, state: com.oshi.desktop.lora.MeshCoreSession.SendState) {
+        val key = meshCoreOutgoing[messageId] ?: return
+        val status = when (state) {
+            com.oshi.desktop.lora.MeshCoreSession.SendState.SENT -> DeliveryStatus.SENT
+            com.oshi.desktop.lora.MeshCoreSession.SendState.DELIVERED -> DeliveryStatus.DELIVERED
+            com.oshi.desktop.lora.MeshCoreSession.SendState.FAILED -> DeliveryStatus.FAILED
+        }
+        meshCoreSetStatus(key, messageId, status)
+    }
+
+    /**
+     * MeshCore's states are not the relay's: a FAILED DM can still be DELIVERED by a late ACK (the
+     * radio's proof it arrived wins), and a retried FAILED row goes back to PENDING. So this writes the
+     * status directly instead of through [MessageStore.advanceDeliveryStatus], which never un-fails.
+     */
+    private fun meshCoreSetStatus(conversationKey: String, messageId: String, status: DeliveryStatus) {
+        val current = messages.message(conversationKey, messageId) ?: return
+        val next = when {
+            status == DeliveryStatus.DELIVERED -> DeliveryStatus.DELIVERED
+            current.deliveryStatus == DeliveryStatus.DELIVERED -> return
+            status == DeliveryStatus.FAILED -> DeliveryStatus.FAILED
+            current.deliveryStatus == DeliveryStatus.FAILED -> return
+            status.rank <= current.deliveryStatus.rank -> return
+            else -> status
+        }
+        if (next == current.deliveryStatus) return
+        val updated = current.copy(deliveryStatus = next)
+        messages.append(updated)
+        runCatching { onMessage(updated) }
+    }
+
+    /**
+     * Text a MeshCore user wrote. Persisted under its MeshCore key and NEVER beside an OSHI contact's
+     * messages: nothing authenticated it as anyone OSHI knows. In a channel the author is only the name
+     * their app put in front of the text, kept as `mcname!<name>` so the bubble can show it.
+     */
+    private fun onMeshCoreText(t: com.oshi.desktop.lora.MeshCoreLink.Inbound) {
+        val sender = if (t.channelKey != null) MESHCORE_NAME_PREFIX + (t.senderName ?: "?") else t.conversationKey
+        val stored = Message(
+            id = UUID.randomUUID().toString(),
+            conversationId = t.conversationKey,
+            senderAddress = sender,
+            recipientAddress = address,
+            fromMe = false,
+            content = t.text,
+            sentAtMs = System.currentTimeMillis(),
+            sentAtSource = TimestampSource.LOCAL_CLOCK,
+            deliveryStatus = DeliveryStatus.DELIVERED,
+            transport = MESHCORE_TRANSPORT,
+        )
+        if (messages.append(stored) != MessageStore.AppendOutcome.DUPLICATE) onMessage(stored)
+        onLoRa("meshcore: text ${if (t.channelKey != null) "on ${t.channelKey}" else "from ${t.conversationKey.take(21)}…"} (MeshCore encryption, not OSHI end-to-end)")
+    }
+
+    /** OSHI over MeshCore ("#oshi-bridge"): reassembled and opened like any other offline envelope. */
     private fun onMeshCoreFrame(f: com.oshi.desktop.lora.OshiMeshProtocol.DataFrame) {
         val body = meshCoreRx.accept(f) ?: return
         val json = com.oshi.desktop.lora.OshiMeshProtocol.decodeBody(body) ?: return
         val message = com.oshi.desktop.lora.LoRaSecureMessage.fromWireJson(json) ?: return
         if (!com.oshi.desktop.lora.LoRaSecureMessage.isAddressedToMe(message, address)) return
-        onLoRa(
-            "OSHI envelope via MeshCore from ${f.origin.toString(16)} — UNREADABLE by this client " +
-                "(legacy Double Ratchet, PARITY.md rows 0.16 / 0.27)"
-        )
+        openOshiEnvelope(message, transport = "lora", nodeNum = null) { onLoRa(it) }
     }
 
     /**
@@ -6228,6 +6454,10 @@ class OshiClient(
     }
 
     companion object {
+        /** __MESHCORE_INTEROP_DESKTOP_2026_11_25__ `Message.transport` of a MeshCore user's row (local only). */
+        const val MESHCORE_TRANSPORT = "meshcore"
+        /** A MeshCore channel author: only the name their app put in front of the text, unauthenticated. */
+        const val MESHCORE_NAME_PREFIX = "mcname!"
         /** __GROUP_INFO_SETTINGS_2026_11_20__ §4.2: re-PUT at most once per 7 days while public. */
         const val PUBLIC_HANDLE_REFRESH_MS = 7L * 24 * 60 * 60 * 1000
 
