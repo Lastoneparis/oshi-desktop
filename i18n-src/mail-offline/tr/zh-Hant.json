@@ -1,0 +1,4 @@
+{
+  "pc.mail.offline.unreachable": "無法連線至郵件。請檢查你的網路連線。",
+  "pc.mail.offline.refreshFailed": "無法重新整理郵件。請檢查你的網路連線。"
+}

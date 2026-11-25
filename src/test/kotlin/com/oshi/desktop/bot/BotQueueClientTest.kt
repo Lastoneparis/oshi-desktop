@@ -157,6 +157,59 @@ class BotQueueClientTest {
         }
     }
 
+    /**
+     * __BOT_E2E_2026_09_23__ End to end: the server holds only the `bot-seal-v1` vector
+     * envelope; the client announces `X-OSHI-Caps: bot-seal-v1`, opens it with the recipient's
+     * identity key, gets the legacy-shaped message, and acks it by its short id. A second
+     * member's queue holds the same string and opens for that member too; a device whose key
+     * has no wrap drops it — and still acks it, so it does not cycle.
+     */
+    @Test
+    fun `a sealed envelope is served, opened with the identity key, and acked`() {
+        val v = BotSealFixtures.vectors()
+        val envelope = v.getString("envelope")
+        val messageId = v.getString("messageId")
+        val alice = v.getJSONArray("recipients").getJSONObject(0)
+        val bob = v.getJSONArray("recipients").getJSONObject(1)
+        fun key(o: org.json.JSONObject, f: String) = Base64.getDecoder().decode(o.getString(f))
+        server.seedRaw(alice.getString("publicKeyB64"), envelope)
+        server.seedRaw(bob.getString("publicKeyB64"), envelope)
+        server.seedCid(alice.getString("publicKeyB64"), "QmUntouched")
+
+        val aliceClient = BotQueueClient(alice.getString("publicKeyB64"), "dev-a", baseUrl = server.baseUrl)
+        val got = mutableListOf<BotEnvelope.Decoded>()
+        val n = aliceClient.drainBots(key(alice, "privateKeyB64"), key(alice, "publicKeyB64")) { got += it }.getOrThrow()
+
+        assertEquals(1, n)
+        assertEquals(listOf<String?>("bot-seal-v1"), server.pendingCaps.toList())
+        val m = (got.single() as BotEnvelope.Decoded.Message).message
+        assertEquals("héllo 🔐 vectors", m.content)
+        assertEquals("Vector Bot", m.botName)
+        assertEquals(BotEnvelope.Sealing.SERVER, m.sealing)
+        assertEquals(messageId, m.envelopeMessageId)
+        val ackPath = server.requestedPaths.last()
+        assertTrue(ackPath, ackPath.startsWith("/api/bot-received/"))
+        assertEquals(
+            "the bot entry is acked, the CID is left alone",
+            listOf("QmUntouched"),
+            aliceClient.pending().getOrThrow().map { it.raw },
+        )
+
+        // Bob's device, but with a key the envelope was not sealed to: dropped AND acked.
+        val stranger = org.bouncycastle.crypto.params.X25519PrivateKeyParameters(java.security.SecureRandom())
+        val bobClient = BotQueueClient(bob.getString("publicKeyB64"), "dev-b1", baseUrl = server.baseUrl)
+        val dropped = mutableListOf<BotEnvelope.Decoded>()
+        bobClient.drainBots(stranger.encoded, stranger.generatePublicKey().encoded) { dropped += it }.getOrThrow()
+        assertTrue(dropped.single() is BotEnvelope.Decoded.Dropped)
+        assertTrue("a dropped envelope is acked too", bobClient.pending().getOrThrow().isEmpty())
+
+        // Bob's other device, with his real key, still reads it (the ack is per device).
+        val bob2 = BotQueueClient(bob.getString("publicKeyB64"), "dev-b2", baseUrl = server.baseUrl)
+        val bobGot = mutableListOf<BotEnvelope.Decoded>()
+        bob2.drainBots(key(bob, "privateKeyB64"), key(bob, "publicKeyB64")) { bobGot += it }.getOrThrow()
+        assertEquals("héllo 🔐 vectors", (bobGot.single() as BotEnvelope.Decoded.Message).message.content)
+    }
+
     private fun botEnvelope(messageId: String): String {
         val payload = """{"type":"bot_message","messageId":"$messageId","botToken":"a1b2c3d4...",""" +
             """"botName":"B","groupId":"G","groupName":"N","content":"hi",""" +

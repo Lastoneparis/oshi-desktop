@@ -584,3 +584,33 @@ class QrMatrix internal constructor(
         }
     }
 }
+
+/**
+ * __GROUP_QR_SAVE_2027__ A QR code as a PNG a person can send or print — black on white, a
+ * four-module quiet zone, whole pixels per module so no scanner meets a blurred edge. The
+ * group's invite QR is saved this way, and [QrImageDecoder] reads it back (tested).
+ */
+object QrPng {
+    fun image(payload: String, modulePx: Int = 10): java.awt.image.BufferedImage {
+        val m = QrMatrix.encode(payload)
+        val quiet = 4
+        val side = (m.size + 2 * quiet) * modulePx
+        val img = java.awt.image.BufferedImage(side, side, java.awt.image.BufferedImage.TYPE_INT_RGB)
+        val g = img.createGraphics()
+        try {
+            g.color = java.awt.Color.WHITE
+            g.fillRect(0, 0, side, side)
+            g.color = java.awt.Color.BLACK
+            for (r in 0 until m.size) for (c in 0 until m.size) {
+                if (m.dark(r, c)) g.fillRect((c + quiet) * modulePx, (r + quiet) * modulePx, modulePx, modulePx)
+            }
+        } finally {
+            g.dispose()
+        }
+        return img
+    }
+
+    fun write(payload: String, target: java.io.File) {
+        javax.imageio.ImageIO.write(image(payload), "png", target)
+    }
+}

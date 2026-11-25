@@ -1,0 +1,56 @@
+{
+  "description": "LAN: u16be(len) || noise message (<= 65535). Relay (inside the WebSocket binary message): [16-byte deviceId][u8 kind][noise message]; client->relay carries the DESTINATION id, relay->client the SOURCE id; kind 1/2/3 = handshake message 1/2/3, 4 = transport. Record = u8 type | u8 flags | u32be seq | body; flags bit0 = CONTINUED (body continues in the next record of the same type). MEDIA_CHUNK body = sha256[32] || u64be offset || u8 last || data.",
+  "records": [
+    {
+      "type": 17,
+      "flags": 0,
+      "seq": 1,
+      "body": "{\"conversations\":[]}",
+      "bytes": "1100000000017b22636f6e766572736174696f6e73223a5b5d7d"
+    },
+    {
+      "type": 2,
+      "flags": 0,
+      "seq": 0,
+      "body": "{\"upTo\":31}",
+      "bytes": "0200000000007b227570546f223a33317d"
+    },
+    {
+      "type": 23,
+      "flags": 1,
+      "seq": 4294967295,
+      "body": "{\"conversati",
+      "bytes": "1701ffffffff7b22636f6e76657273617469"
+    }
+  ],
+  "lanFrame": {
+    "noise": "00112233445566778899aabbccddeeff",
+    "bytes": "001000112233445566778899aabbccddeeff"
+  },
+  "relayOutbound": {
+    "destination": "e3ab5fca521294a7c856de7367bd1bae",
+    "kind": 4,
+    "noise": "00112233445566778899aabbccddeeff",
+    "bytes": "e3ab5fca521294a7c856de7367bd1bae0400112233445566778899aabbccddeeff"
+  },
+  "relayInbound": {
+    "source": "0fe3cd484d463b601afefc0a7025bdde",
+    "kind": 1,
+    "noise": "00112233445566778899aabbccddeeff",
+    "bytes": "0fe3cd484d463b601afefc0a7025bdde0100112233445566778899aabbccddeeff"
+  },
+  "mediaChunk": {
+    "sha256": "b6acae78c76442a73a94762eb91711a59c642ac3cfdaad636a061bdb7fad6975",
+    "offset": 61440,
+    "last": true,
+    "data": "010203",
+    "body": "b6acae78c76442a73a94762eb91711a59c642ac3cfdaad636a061bdb7fad6975000000000000f00001010203",
+    "record": "210000000009b6acae78c76442a73a94762eb91711a59c642ac3cfdaad636a061bdb7fad6975000000000000f00001010203"
+  },
+  "limits": {
+    "maxNoiseMessage": 65535,
+    "maxRecordPlaintext": 65519,
+    "maxMediaChunkData": 61440,
+    "relayMaxFrame": 65552
+  }
+}

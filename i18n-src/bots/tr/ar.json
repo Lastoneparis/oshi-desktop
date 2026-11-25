@@ -1,0 +1,9 @@
+{
+  "pc.bot.commands": "الأوامر",
+  "pc.bot.add_command": "إضافة أمر",
+  "pc.bot.command_rule": "من 1 إلى 32 حرفًا: أحرف صغيرة وأرقام و _",
+  "pc.bot.duplicate": "هذا الأمر موجود بالفعل في القائمة",
+  "pc.bot.publish": "النشر على خادم OSHI",
+  "pc.bot.published": "الأوامر مفعّلة في مجموعات الروبوت",
+  "pc.bot.publish_failed": "تعذّر النشر: %@"
+}

@@ -180,6 +180,12 @@ object BotEnvelope {
         val mediaType: String?,
         val mediaFileName: String?,
         val mediaData: ByteArray?,
+        /** __BOT_E2E_2026_09_23__ How this post reached the queue — drives the honest label. */
+        val sealing: Sealing = Sealing.NONE,
+        /** __BOTS_PHASE1_2026_11_24__ the bot's PUBLIC id (server-stamped, `BotIds.publicIdFor`); "" on legacy posts. */
+        val botId: String = "",
+        /** __BOTS_PHASE1_2026_11_24__ the raw `replyMarkup` (inline keyboard) JSON, or null. */
+        val replyMarkup: String? = null,
     ) {
         /**
          * The synthetic sender string, `bot:<8 hex>` — iOS's by-content form. See the class
@@ -213,12 +219,134 @@ object BotEnvelope {
                 botName == other.botName && groupId == other.groupId &&
                 groupName == other.groupName && content == other.content &&
                 unixMillis == other.unixMillis && mediaType == other.mediaType &&
-                mediaFileName == other.mediaFileName &&
+                mediaFileName == other.mediaFileName && sealing == other.sealing &&
                 (mediaData?.contentEquals(other.mediaData ?: ByteArray(0)) ?: (other.mediaData == null))
 
         override fun hashCode(): Int =
             (((envelopeMessageId.hashCode() * 31 + botToken.hashCode()) * 31 +
                 groupId.hashCode()) * 31 + content.hashCode()) * 31 + (mediaData?.size ?: 0)
+    }
+
+    /**
+     * __BOT_E2E_2026_09_23__ How a bot post was protected on its way here (BOT_SEAL_SPEC.md §3).
+     * [transport] is what [com.oshi.desktop.store.Message.transport] persists, so the label
+     * survives a restart without a schema change.
+     */
+    enum class Sealing(val transport: String) {
+        /** Legacy `bot:` envelope: base64 JSON, readable by the server. */
+        NONE("bot-legacy"),
+        /** `bot-seal-v1`, sealed by the OSHI server at ingestion (`sealedBy:"server"` / `e2e:false`). */
+        SERVER("bot-seal-server"),
+        /** `bot-seal-v1`, sealed by the bot itself (`sealedBy:"bot"` / `e2e:true`). */
+        BOT("bot-seal-bot");
+
+        companion object {
+            fun fromTransport(raw: String?): Sealing? = entries.firstOrNull { it.transport == raw }
+        }
+    }
+
+    /** The outer `type` of a callback answer (BOT_SEAL_SPEC.md §1). */
+    const val CALLBACK_ANSWER_TYPE = "bot_callback_answer"
+
+    /**
+     * __BOT_E2E_2026_09_23__ One `bot:` queue entry, decoded — legacy or sealed alike.
+     *
+     * [envelopeMessageId] is the ack key; it is null only when the entry is so broken that
+     * not even the middle field exists, and then there is nothing to ack.
+     */
+    sealed class Decoded {
+        abstract val envelopeMessageId: String?
+
+        data class Message(val message: BotMessage) : Decoded() {
+            override val envelopeMessageId: String get() = message.envelopeMessageId
+        }
+
+        data class CallbackAnswer(
+            override val envelopeMessageId: String,
+            val callbackQueryId: String,
+            val text: String,
+            val showAlert: Boolean,
+            val sealing: Sealing,
+            /** __BOTS_PHASE1_2026_11_24__ S6: the group of the tapped post ("" from older servers). */
+            val groupId: String = "",
+        ) : Decoded()
+
+        /**
+         * __BOTS_PHASE1_2026_11_24__ S5: a bot's edit / delete / pin of one of its earlier posts.
+         * [op] is null when the payload is unusable (it is still acked).
+         */
+        data class Action(
+            override val envelopeMessageId: String,
+            val groupId: String,
+            val op: BotPostOp?,
+            val sealing: Sealing,
+        ) : Decoded()
+
+        /**
+         * Undeliverable. [reason] names what failed and NEVER carries content — it may be
+         * logged as is. A sealed envelope that fails to open lands here, so its outer
+         * placeholder ("Update OSHI to read it") is never shown.
+         */
+        data class Dropped(override val envelopeMessageId: String?, val reason: String) : Decoded()
+    }
+
+    /**
+     * Decode a `bot:` queue entry, opening a `bot-seal-v1` envelope with this identity's
+     * X25519 key pair ([ownPriv] / [ownPub], the pair whose public half is the account's
+     * OSHI public key), and hand back the same shape a legacy envelope produces.
+     *
+     * Never throws; never returns the outer placeholder of a sealed envelope.
+     */
+    fun decode(queueEntry: String, ownPriv: ByteArray, ownPub: ByteArray): Decoded {
+        val envelopeId = messageIdOf(queueEntry)
+        val outer = try {
+            outerJson(queueEntry)
+        } catch (e: MalformedBotEnvelopeException) {
+            return Decoded.Dropped(envelopeId, "malformed envelope")
+        }
+        val id = envelopeId ?: return Decoded.Dropped(null, "malformed envelope")
+        val type = outer.optString("type", "")
+        if (type != TYPE && type != CALLBACK_ANSWER_TYPE && type != BotPostOp.OUTER_TYPE) return Decoded.Dropped(id, "unknown bot payload type")
+
+        val sealed = BotSealedEnvelope.isSealed(outer)
+        val (payload, sealing) = if (sealed) {
+            // The server writes one id into both places; a sealed payload moved under another
+            // envelope id would otherwise be stored (and deduplicated) twice.
+            if (!outer.optString("messageId", "").equals(id, ignoreCase = true)) {
+                return Decoded.Dropped(id, "envelope id does not match the sealed messageId")
+            }
+            val inner = try {
+                BotSealedEnvelope.open(outer, ownPriv, ownPub)
+            } catch (e: BotSealedEnvelope.SealOpenException) {
+                return Decoded.Dropped(id, "sealed envelope did not open: ${e.message}")
+            }
+            val by = inner.optString("sealedBy", "")
+            val s = when {
+                by == "bot" -> Sealing.BOT
+                by.isEmpty() && outer.optBoolean("e2e", false) -> Sealing.BOT
+                else -> Sealing.SERVER
+            }
+            inner to s
+        } else {
+            outer to Sealing.NONE
+        }
+
+        return if (type == TYPE) {
+            Decoded.Message(fromJson(id, payload, sealing))
+        } else if (type == BotPostOp.OUTER_TYPE) {
+            // S5: match on the OUTER botId (the server's stamp), fall back to the inner one.
+            val botId = outer.optString("botId", "").ifEmpty { payload.optString("botId", "") }
+            Decoded.Action(id, outer.optString("groupId", "").ifEmpty { payload.optString("groupId", "") }, BotPostOp.of(payload, botId), sealing)
+        } else {
+            Decoded.CallbackAnswer(
+                envelopeMessageId = id,
+                callbackQueryId = payload.optString("callbackQueryId", ""),
+                text = payload.optString("text", ""),
+                showAlert = payload.optBoolean("showAlert", false),
+                sealing = sealing,
+                groupId = payload.optString("groupId", "").ifEmpty { outer.optString("groupId", "") },
+            )
+        }
     }
 
     /** Cheap prefix test, so a caller can route without paying for a base64 decode. */
@@ -262,6 +390,19 @@ object BotEnvelope {
      * one is a foreign producer, and refusing it would drop traffic an iPhone displays.
      */
     fun parse(queueEntry: String): BotMessage {
+        val json = outerJson(queueEntry)
+        val type = json.optString("type", "")
+        if (type != TYPE) {
+            throw MalformedBotEnvelopeException(
+                "bot payload type is \"$type\", expected \"$TYPE\" " +
+                    "(message_queue_server.js:585)"
+            )
+        }
+        return fromJson(queueEntry.split(":", limit = 3)[1], json, Sealing.NONE)
+    }
+
+    /** Prefix, three parts, non-empty id, standard base64, a JSON object. No type check. */
+    private fun outerJson(queueEntry: String): JSONObject {
         if (!looksLikeBotEnvelope(queueEntry)) {
             throw MalformedBotEnvelopeException(
                 "not a bot envelope: expected the literal prefix \"$PREFIX\""
@@ -291,20 +432,15 @@ object BotEnvelope {
             )
         }
 
-        val json = try {
+        return try {
             JSONObject(String(payloadBytes, Charsets.UTF_8))
         } catch (e: Exception) {
-            throw MalformedBotEnvelopeException("bot payload is not a JSON object: ${e.message}")
+            throw MalformedBotEnvelopeException("bot payload is not a JSON object")
         }
+    }
 
-        val type = json.optString("type", "")
-        if (type != TYPE) {
-            throw MalformedBotEnvelopeException(
-                "bot payload type is \"$type\", expected \"$TYPE\" " +
-                    "(message_queue_server.js:585)"
-            )
-        }
-
+    /** The legacy field mapping, shared by a plaintext envelope and an opened sealed one. */
+    private fun fromJson(envelopeMessageId: String, json: JSONObject, sealing: Sealing): BotMessage {
         val tsRaw = json.optString("timestamp", "")
         val unixMillis = if (tsRaw.isEmpty()) null else com.oshi.desktop.msg.WireClock.fromIso8601(tsRaw)
 
@@ -331,6 +467,9 @@ object BotEnvelope {
             mediaType = normaliseMediaType(json.optString("mediaType", "")),
             mediaFileName = json.optString("mediaFileName", "").ifEmpty { null },
             mediaData = mediaData,
+            sealing = sealing,
+            botId = json.optString("botId", ""),
+            replyMarkup = (json.optJSONObject("replyMarkup") ?: json.optJSONObject("reply_markup"))?.toString(),
         )
     }
 

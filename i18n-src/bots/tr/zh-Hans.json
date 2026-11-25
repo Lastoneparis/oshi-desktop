@@ -1,0 +1,9 @@
+{
+  "pc.bot.commands": "命令",
+  "pc.bot.add_command": "添加命令",
+  "pc.bot.command_rule": "1–32 个字符：小写字母、数字和 _",
+  "pc.bot.duplicate": "此命令已在列表中",
+  "pc.bot.publish": "发布到 OSHI 服务器",
+  "pc.bot.published": "命令已在机器人的群组中生效",
+  "pc.bot.publish_failed": "无法发布：%@"
+}

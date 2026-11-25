@@ -79,6 +79,74 @@ class V2BlobClientTest {
         assertTrue("decrypted bytes do not match the original plaintext", out.readBytes().contentEquals(plaintext))
     }
 
+    /** __MEDIA_PADDING_2026_11_10__ a padded blob: the file on disk is exactly `size` bytes. */
+    @Test
+    fun `round trip - a padded blob lands on disk unpadded`() {
+        val plaintext = ByteArray(200 * 1024 + 777) { (it % 251).toByte() }
+        val enc = OSHICryptoV2.encryptFile(plaintext, "movie.mp4", "video/mp4", chunkSize = 64 * 1024, pad = true)
+        assertEquals(OSHICryptoV2.mediaChunkCount(plaintext.size.toLong(), padded = true, chunkSize = 64 * 1024), enc.chunks.size)
+        val blobId = client.uploadBlob("peer-recipient-key", enc.chunks)!!
+        val out = File(dir, "padded.bin")
+        val written = client.downloadAndDecryptToFile(blobId, enc.chunks.size, enc.fileKey, enc.fileNonce, enc.manifest, out)
+        assertEquals(plaintext.size.toLong(), written)
+        assertTrue(out.readBytes().contentEquals(plaintext))
+    }
+
+    /** __MEDIA_PADDING_2026_11_10__ non-zero padding: refused, and no partial file is left. */
+    @Test
+    fun `streaming receive rejects non-zero padding and removes the partial file`() {
+        val fileKey = ByteArray(32) { 3 }
+        val fileNonce = ByteArray(8) { 4 }
+        val sealed = ByteArray(4096).also { it[0] = 1; it[4095] = 7 }       // size 1, last byte not zero
+        val chunk = OSHICryptoV2.aesGcmSeal(fileKey, OSHICryptoV2.chunkNonce(fileNonce, 0), sealed, ByteArray(0))
+        val info = OSHICryptoV2.manifestJson("f.bin", "application/octet-stream", 1, 1, OSHICryptoV2.DEFAULT_CHUNK_SIZE, 4096)
+        val manifest = OSHICryptoV2.aesGcmSeal(fileKey, OSHICryptoV2.chunkNonce(fileNonce, OSHICryptoV2.MANIFEST_COUNTER), info, ByteArray(0))
+        val blobId = client.uploadBlob("peer-recipient-key", listOf(chunk))!!
+        val out = File(dir, "bad-padding.bin")
+        assertNull(client.downloadAndDecryptToFile(blobId, 1, fileKey, fileNonce, manifest, out))
+        assertFalse(out.exists())
+    }
+
+    @Test
+    fun `streaming receive refuses plaintext over its cap and removes any partial file`() {
+        val plaintext = ByteArray(64 * 1024) { (it % 251).toByte() }
+        val enc = OSHICryptoV2.encryptFile(plaintext, "large.bin", "application/octet-stream", chunkSize = 32 * 1024)
+        val blobId = client.uploadBlob("peer-recipient-key", enc.chunks)!!
+        relay.clear()
+        val out = File(dir, "over-cap.bin")
+
+        val written = client.downloadAndDecryptToFile(
+            blobId, enc.chunks.size, enc.fileKey, enc.fileNonce, enc.manifest, out,
+            maxPlaintextBytes = plaintext.size.toLong() - 1,
+        )
+
+        assertNull(written)
+        assertFalse("oversized receive must leave no destination file", out.exists())
+        assertEquals("manifest rejection must happen before a chunk GET", 0,
+            relay.requests().count { it.method == "GET" })
+    }
+
+    @Test
+    fun `streaming receive rejects an authenticated manifest with phantom chunks before download`() {
+        val fileKey = ByteArray(32) { 7 }
+        val fileNonce = ByteArray(8) { 9 }
+        val bogusInfo = OSHICryptoV2.manifestJson(
+            filename = "one-byte.bin", mime = "application/octet-stream",
+            size = 1, chunkCount = 2, chunkSize = OSHICryptoV2.DEFAULT_CHUNK_SIZE,
+        )
+        val manifest = OSHICryptoV2.aesGcmSeal(
+            fileKey, OSHICryptoV2.chunkNonce(fileNonce, OSHICryptoV2.MANIFEST_COUNTER), bogusInfo, ByteArray(0),
+        )
+        val out = File(dir, "phantom-chunks.bin")
+
+        assertNull(client.downloadAndDecryptToFile(
+            "blob-123e4567-e89b-12d3-a456-426614174000", 2, fileKey, fileNonce, manifest, out,
+        ))
+        assertFalse(out.exists())
+        assertEquals("manifest geometry must be rejected before any chunk GET", 0,
+            relay.requests().count { it.method == "GET" })
+    }
+
     // ------------------------------------------------------------------ signing rules
 
     @Test
@@ -186,6 +254,33 @@ class V2BlobClientTest {
         assertEquals("must refuse locally, never even reach the relay", before, relay.requests().size)
     }
 
+    @Test
+    fun `peer supplied blob ids cannot choose a signed relay path`() {
+        val id = "../../account/delete?as=peer"
+        val before = relay.requests().size
+
+        assertFalse(client.uploadChunk(id, 0, byteArrayOf(1)))
+        assertNull(client.status(id))
+        assertFalse(client.commit(id))
+        assertNull(client.downloadChunk(id, 0))
+        assertFalse(client.delete(id))
+        assertNull(client.downloadBlob(id, 1))
+        assertNull(client.downloadAndDecryptToFile(
+            id, 1, ByteArray(32), ByteArray(12), byteArrayOf(1), File(dir, "blocked"),
+        ))
+
+        assertEquals("invalid IDs must be rejected before any signed HTTP request", before, relay.requests().size)
+    }
+
+    @Test
+    fun `blob id grammar accepts server ids and rejects path syntax`() {
+        assertTrue(V2BlobClient.isValidBlobId("blob-123e4567-e89b-12d3-a456-426614174000"))
+        assertTrue(V2BlobClient.isValidBlobId("A_b.c-9"))
+        for (bad in listOf("", "..", "../blob", "blob/part", "blob?query", "blob%2Fpart", "x".repeat(129))) {
+            assertFalse("must reject $bad", V2BlobClient.isValidBlobId(bad))
+        }
+    }
+
     // ------------------------------------------------------------------ resume
 
     /**
@@ -223,6 +318,58 @@ class V2BlobClientTest {
 
     // ------------------------------------------------------------------ fake blob relay
 
+    // ------------------------------------------------------------------ __GROUP_BLOB_2026_11_25__
+
+    @Test
+    fun `group media - one reservation listing every member, shared when the server echoes recipients`() {
+        val enc = OSHICryptoV2.encryptFile(ByteArray(150 * 1024) { it.toByte() }, "p.jpg", "image/jpeg", chunkSize = 64 * 1024)
+        val members = listOf("m1", "m2", "m3")
+        val up = client.uploadGroupBlob(members, enc.chunks)
+        assertNotNull(up)
+        assertTrue(up!!.shared)
+        val bodies = relay.reserveBodies()
+        assertEquals(1, bodies.size)
+        assertEquals("m1", bodies[0].getString("recipientKey"))
+        assertEquals(members, bodies[0].getJSONArray("recipientKeys").let { a -> (0 until a.length()).map { a.getString(it) } })
+        assertEquals(true, relay.isCommitted(up.blobId))
+    }
+
+    @Test
+    fun `group media - an older blob store (no echo) is reported as not shared`() {
+        relay.listAware = false
+        val enc = OSHICryptoV2.encryptFile(ByteArray(10_000) { 7 }, "p.jpg", "image/jpeg", chunkSize = 4096)
+        val up = client.uploadGroupBlob(listOf("m1", "m2"), enc.chunks)
+        assertNotNull(up)
+        assertFalse(up!!.shared)
+    }
+
+    @Test
+    fun `the 1-1 reservation body is unchanged - no recipientKeys`() {
+        val enc = OSHICryptoV2.encryptFile(ByteArray(1000) { 1 }, "a.bin", "application/octet-stream")
+        assertNotNull(client.uploadBlob("peer", enc.chunks))
+        assertFalse(relay.reserveBodies().single().has("recipientKeys"))
+    }
+
+    @Test
+    fun `a download cut mid-way resumes from the chunks it already has`() {
+        val plaintext = ByteArray(5 * 4096 + 33) { (it * 7).toByte() }
+        val enc = OSHICryptoV2.encryptFile(plaintext, "v.mp4", "video/mp4", chunkSize = 4096)
+        val blobId = client.uploadBlob("peer", enc.chunks)!!
+        val partial = File(dir, "partial")
+        val out = File(dir, "v.out")
+        relay.failGetsFrom = 3
+        assertNull(client.downloadAndDecryptToFile(blobId, enc.chunks.size, enc.fileKey, enc.fileNonce, enc.manifest, out, partialRoot = partial))
+        assertFalse(out.exists())
+        assertEquals(3, V2PartialChunks(partial, blobId).count())
+        relay.failGetsFrom = null
+        relay.chunkGets.clear()
+        val written = client.downloadAndDecryptToFile(blobId, enc.chunks.size, enc.fileKey, enc.fileNonce, enc.manifest, out, partialRoot = partial)
+        assertEquals(plaintext.size.toLong(), written)
+        assertEquals((3 until enc.chunks.size).toList(), relay.chunkGets.toList().sorted())
+        assertTrue(out.readBytes().contentEquals(plaintext))
+        assertEquals(0, V2PartialChunks(partial, blobId).count())
+    }
+
     /**
      * A minimal, real implementation of the `/v2/blobs` routes: reserve creates a record,
      * PUT stores raw bytes at an index, GET returns raw bytes, status reports real gaps,
@@ -250,6 +397,13 @@ class V2BlobClientTest {
         }
 
         override fun close() = server.stop(0)
+
+        /** __GROUP_BLOB_2026_11_25__ false = an older blob store that ignores `recipientKeys`. */
+        @Volatile var listAware = true
+        /** Chunk GETs at or past this index fail with 503 (a dropped download). */
+        @Volatile var failGetsFrom: Int? = null
+        val chunkGets = ConcurrentLinkedQueue<Int>()
+        fun reserveBodies(): List<JSONObject> = recorded.filter { it.method == "POST" && it.path == "/v2/blobs" }.map { JSONObject(it.bodyText) }
 
         fun requests(): List<FakeRelay.Recorded> = recorded.toList()
         fun last(): FakeRelay.Recorded = recorded.last()
@@ -297,6 +451,7 @@ class V2BlobClientTest {
                 .put("blobId", id)
                 .put("chunkSize", OSHICryptoV2.DEFAULT_CHUNK_SIZE)
                 .put("missing", JSONArray((0 until chunkCount).toList()))
+            if (listAware && json.has("recipientKeys")) resp.put("recipients", json.getJSONArray("recipientKeys").length())
             respond(exchange, 200, resp.toString())
         }
 
@@ -316,6 +471,8 @@ class V2BlobClientTest {
                 respond(exchange, 401, "{}"); return
             }
             val record = blobs[id] ?: run { respond(exchange, 404, "{}"); return }
+            failGetsFrom?.let { if (index >= it) { respond(exchange, 503, "{}"); return } }
+            chunkGets.add(index)
             val data = record.chunks[index] ?: run { respond(exchange, 404, "{}"); return }
             exchange.responseHeaders.add("Content-Type", "application/octet-stream")
             exchange.sendResponseHeaders(200, data.size.toLong())

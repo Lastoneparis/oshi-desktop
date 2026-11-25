@@ -1,0 +1,9 @@
+{
+  "pc.bot.commands": "Komutlar",
+  "pc.bot.add_command": "Komut ekle",
+  "pc.bot.command_rule": "1–32 karakter: küçük harf, rakam ve _",
+  "pc.bot.duplicate": "Bu komut zaten listede",
+  "pc.bot.publish": "OSHI sunucusunda yayınla",
+  "pc.bot.published": "Komutlar botunuzun gruplarında etkin",
+  "pc.bot.publish_failed": "Yayınlanamadı: %@"
+}

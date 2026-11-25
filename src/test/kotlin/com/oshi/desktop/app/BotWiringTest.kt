@@ -28,6 +28,21 @@ class BotWiringTest {
     /** The queue is addressed by the LEGACY path key, not by the raw address. */
     private fun subscribe(c: OshiClient) {
         fx.relay.botSubscribers.add(SyncProtocol.legacyPathKey(c.address))
+        // __BOTS_PHASE1_2026_11_24__ server amendment S8: a bot post for a group this account is
+        // not in is dropped, so the client must actually be in grp-1.
+        val now = System.currentTimeMillis()
+        c.groups.put(com.oshi.desktop.group.GroupDefinition("grp-1", "Group", com.oshi.desktop.group.GroupType.COLLABORATIVE, c.address,
+            listOf(com.oshi.desktop.group.GroupMember(c.address, joinedAtUnixMillis = now, isAdmin = true)), now, now))
+    }
+
+    @Test
+    fun `a bot post for a group we are not in is dropped and acked`() {
+        val a = fx.client("a")
+        subscribe(a)
+        a.sendBotMessage("tok12345", "grp-other", "not your group").getOrThrow()
+        assertEquals(0, a.pollBots())
+        assertTrue(a.messages.messages("bot!grp-other").isEmpty())
+        assertEquals("the dropped entry was never acked", 0, a.pollBots())
     }
 
     @Test

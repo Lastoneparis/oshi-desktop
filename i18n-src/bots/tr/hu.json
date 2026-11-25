@@ -1,0 +1,9 @@
+{
+  "pc.bot.commands": "Parancsok",
+  "pc.bot.add_command": "Parancs hozzáadása",
+  "pc.bot.command_rule": "1–32 karakter: kisbetűk, számjegyek és _",
+  "pc.bot.duplicate": "Ez a parancs már szerepel a listában",
+  "pc.bot.publish": "Közzététel az OSHI-szerveren",
+  "pc.bot.published": "A parancsok élnek a botod csoportjaiban",
+  "pc.bot.publish_failed": "A közzététel nem sikerült: %@"
+}

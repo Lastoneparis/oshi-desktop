@@ -1,0 +1,9 @@
+{
+  "pc.bot.commands": "Ordres",
+  "pc.bot.add_command": "Afegeix una ordre",
+  "pc.bot.command_rule": "D'1 a 32 caràcters: minúscules, xifres i _",
+  "pc.bot.duplicate": "Aquesta ordre ja és a la llista",
+  "pc.bot.publish": "Publica al servidor d'OSHI",
+  "pc.bot.published": "Les ordres ja funcionen als grups del bot",
+  "pc.bot.publish_failed": "No s'ha pogut publicar: %@"
+}

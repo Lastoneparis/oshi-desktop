@@ -1,0 +1,14 @@
+{
+"pc.help.subtitle": "Questions and answers, and where to get help",
+"pc.help.more": "Support",
+"pc.help.add.q": "How do I add a contact on a computer?",
+"pc.help.add.a": "Open New chat. Paste the person's OSHI code or invite link, choose a picture of their QR code, or scan their code with this computer's camera. Your own QR code is on the same screen for them to scan.",
+"pc.help.same_account.q": "Is OSHI on my computer the same account as on my phone?",
+"pc.help.same_account.a": "Only if you choose it. On the first screen, import your phone's recovery key and this computer becomes the same identity. Create a new identity instead and the computer is a separate account with its own address.",
+"pc.help.offline.q": "Does OSHI work without internet on a computer?",
+"pc.help.offline.a": "On a local network, yes: OSHI computers and phones on the same Wi-Fi find each other and exchange messages directly. A computer has no Bluetooth mesh. With a LoRa radio connected, short texts can also travel by radio.",
+"pc.help.groups.q": "How do I join a group?",
+"pc.help.groups.a": "Paste the group's invite link in New chat, or choose a picture of its QR code. Public groups announced by OSHI devices on your network appear in Discover groups.",
+"pc.help.passcode.q": "I forgot my passcode. What now?",
+"pc.help.passcode.a": "On the lock screen choose \"Forgot your passcode?\" and paste your recovery key. OSHI opens and removes the passcode; you can set a new one in Settings › Security. Wrong passcodes never delete anything."
+}

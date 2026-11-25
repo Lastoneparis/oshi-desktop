@@ -1,0 +1,9 @@
+{
+  "pc.bot.commands": "فرمان‌ها",
+  "pc.bot.add_command": "افزودن فرمان",
+  "pc.bot.command_rule": "۱ تا ۳۲ نویسه: حروف کوچک، ارقام و _",
+  "pc.bot.duplicate": "این فرمان از قبل در فهرست هست",
+  "pc.bot.publish": "انتشار در سرور OSHI",
+  "pc.bot.published": "فرمان‌ها در گروه‌های ربات شما فعال‌اند",
+  "pc.bot.publish_failed": "انتشار ممکن نشد: %@"
+}

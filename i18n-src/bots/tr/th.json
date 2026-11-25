@@ -1,0 +1,9 @@
+{
+  "pc.bot.commands": "คำสั่ง",
+  "pc.bot.add_command": "เพิ่มคำสั่ง",
+  "pc.bot.command_rule": "1–32 อักขระ: ตัวพิมพ์เล็ก ตัวเลข และ _",
+  "pc.bot.duplicate": "คำสั่งนี้มีอยู่ในรายการแล้ว",
+  "pc.bot.publish": "เผยแพร่ไปยังเซิร์ฟเวอร์ OSHI",
+  "pc.bot.published": "คำสั่งใช้งานได้ในกลุ่มของบอตแล้ว",
+  "pc.bot.publish_failed": "เผยแพร่ไม่สำเร็จ: %@"
+}

@@ -1,0 +1,4 @@
+{
+  "pc.mail.offline.unreachable": "메일에 연결할 수 없습니다. 연결 상태를 확인하세요.",
+  "pc.mail.offline.refreshFailed": "메일을 새로 고칠 수 없습니다. 연결 상태를 확인하세요."
+}

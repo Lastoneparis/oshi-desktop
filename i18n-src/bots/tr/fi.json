@@ -1,0 +1,9 @@
+{
+  "pc.bot.commands": "Komennot",
+  "pc.bot.add_command": "Lisää komento",
+  "pc.bot.command_rule": "1–32 merkkiä: pienet kirjaimet, numerot ja _",
+  "pc.bot.duplicate": "Tämä komento on jo listalla",
+  "pc.bot.publish": "Julkaise OSHI-palvelimelle",
+  "pc.bot.published": "Komennot ovat käytössä bottisi ryhmissä",
+  "pc.bot.publish_failed": "Julkaisu epäonnistui: %@"
+}

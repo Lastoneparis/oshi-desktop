@@ -9,10 +9,31 @@ PARITY.md row 2.5.
 | `llama_jni.cpp` | the JNI shim. Implements the three `external fun`s declared in `OSHI-Android/.../service/LlamaCpp.kt`, which this project compiles as **shared source** |
 | `CMakeLists.txt` | builds it against a llama.cpp checkout, statically, into ONE file |
 
-**Nothing here has ever been compiled.** It is built by the `native-llama` job in
-`.github/workflows/desktop-ci.yml`, on `windows-latest` and `ubuntu-latest`, and that job
-has never run. The development machine for this project is a Mac and cannot produce a
-Windows DLL; a hand-made stand-in would be worse than an absent one.
+**It has now been compiled — on macOS, 2026-10-28.** This paragraph used to read "Nothing
+here has ever been compiled", and the reason given was that "the development machine for
+this project is a Mac and cannot produce a Windows DLL". That is true and it is also not a
+reason to have no macOS build: the Mac cannot produce a Windows DLL, but it is the only
+machine here that can produce the `.dylib` the Mac app needs, and nobody had asked it to.
+
+What was measured:
+
+* `libllama_jni.dylib`, arm64, **3.7 MB**, one statically linked file as the CMake recipe
+  intends (`BUILD_SHARED_LIBS OFF`).
+* `nm -gU` exports exactly the three symbols of the ABI contract below, and no others.
+* The JVM loads it: `LlamaNativeTest` with `OSHI_EXPECT_LLAMA_NATIVE=1` and
+  `-PllamaLibDir=<build dir>` passes, and the same run against an EMPTY directory fails —
+  so the pass is the library loading, not the test tolerating its absence.
+* Staged into a `packageAppImage` build it lands at `OSHI.app/Contents/app/`, and
+  `System.loadLibrary("llama_jni")` with `java.library.path` set to that directory answers
+  `LOADED_OK`. That directory is what jpackage's `$APPDIR` resolves to, which is what the
+  launcher now passes (see `--java-options` in `build.gradle.kts`).
+
+Still missing for an actual answer on screen: a **GGUF model file**. `loadModel(path)` wants
+one, and nothing here downloads it.
+
+Windows and Linux remain unbuilt, for the original reason: this machine cannot produce
+those binaries and a hand-made stand-in would be worse than an absent one. The
+`native-llama` job in `.github/workflows/desktop-ci.yml` still has never run.
 
 ## Why the Kotlin is not copied
 
@@ -42,6 +63,37 @@ git clone --depth 1 https://github.com/ggml-org/llama.cpp
 cmake -S OSHI-Desktop/platform/llama-jni -B build-native \
       -DLLAMA_CPP_DIR="$PWD/llama.cpp" -DCMAKE_BUILD_TYPE=Release
 cmake --build build-native --config Release --parallel
+```
+
+### `JAVA_HOME` has to be the JDK HOME, not the Homebrew prefix
+
+This repository's own convention for Gradle is `JAVA_HOME=/opt/homebrew/opt/openjdk@21`,
+and with that exported the `cmake` configure step above fails:
+
+```
+CMake Error ... Could NOT find JNI (missing: AWT JVM)
+```
+
+which reads as "no JDK" and is nothing of the sort — `jni.h` is sitting right there. CMake's
+`FindJNI` wants the real JDK home, so on a Homebrew JDK it is:
+
+```sh
+export JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
+```
+
+Worth the two lines: the convention that works everywhere else in this project is the thing
+that breaks this build, and the error message points away from the cause.
+
+### Putting it in the installer
+
+`-PllamaLibDir=<dir>` is read by `jpackageInput`, which stages this platform's spelling of
+the library (`System.mapLibraryName`) into the same flat directory as the jars — the
+directory that becomes `$APPDIR` in the installed app. The launcher is given
+`-Djava.library.path=$APPDIR` unconditionally, because the shared `LlamaCpp.kt` calls
+`System.loadLibrary` BY NAME and an absolute path cannot be substituted for that.
+
+```sh
+./gradlew packageNative -PappVersion=1.0.0 -PllamaLibDir=build-native
 ```
 
 Produces exactly one file — `libllama_jni.so`, `llama_jni.dll` or `libllama_jni.dylib` —

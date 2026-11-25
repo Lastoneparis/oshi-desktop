@@ -200,16 +200,60 @@ class VideoReceiveTest {
     @Test
     fun `a frame that loses a fragment is counted as lost, not waited for for ever`() {
         val s = Sender(key)
-        val session = VideoReceiveSession(key)
+        var now = 1_000L
+        val session = VideoReceiveSession(key, clock = { now })
         feed(session, s.send(nal(5, ByteArray(8) { 1 }), true, sps, pps))
 
         val torn = s.send(nal(1, ByteArray(2600) { 2 }), false, null, null)
         session.onPacket(torn[0])            // fragment 1 of 3 — the rest never arrive
         feed(session, s.send(nal(1, ByteArray(8) { 3 }), false, null, null))
+        // __VIDEO_REORDER_2026_09_23__ the next frame is held for the torn one (it might be
+        // reordering) — at most 100 ms, then the torn frame is given up.
+        assertEquals(1L, session.delivered)
+        now += 100
+        val released = session.poll()
+        assertTrue(released.delivered)
+        assertTrue("the next P-frame references the lost one", released.requestKeyframe)
 
         assertEquals(2L, session.delivered)
         assertEquals("the torn frame", 1L, session.lostFrames)
         assertEquals(66.66, session.completionRate(), 0.01)
+    }
+
+    // ============================================================== loss meter (__VIDEO_ABR_2026_09_23__)
+
+    private fun datagrams(n: Int): List<ByteArray> {
+        val s = Sender(key)
+        val out = ArrayList<ByteArray>()
+        out += s.send(nal(5, ByteArray(8) { 1 }), true, sps, pps)
+        while (out.size < n) out += s.send(nal(1, ByteArray(20) { 2 }), false, null, null)
+        return out.take(n)
+    }
+
+    @Test
+    fun `datagram loss is measured from the nonce counter`() {
+        val session = VideoReceiveSession(key)
+        datagrams(400).forEachIndexed { i, d -> if (i % 10 != 5) session.onPacket(d) }
+        val loss = session.takeLossSample()!!
+        assertEquals(10.0, loss, 1.0)
+    }
+
+    /** Reordering is not loss: a datagram overtaken by a few others still counts as received. */
+    @Test
+    fun `reordered datagrams are not counted as lost`() {
+        val session = VideoReceiveSession(key)
+        val d = datagrams(400).toMutableList()
+        var i = 3
+        while (i + 6 < d.size) { val x = d.removeAt(i); d.add(i + 6, x); i += 20 } // ~5 % held back 6 places
+        d.forEach { session.onPacket(it) }
+        assertEquals(0.0, session.takeLossSample()!!, 0.001)
+    }
+
+    @Test
+    fun `too few datagrams say nothing`() {
+        val session = VideoReceiveSession(key)
+        datagrams(30).forEach { session.onPacket(it) }
+        assertNull(session.takeLossSample())
     }
 
     // ============================================================== the sink

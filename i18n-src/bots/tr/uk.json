@@ -1,0 +1,9 @@
+{
+  "pc.bot.commands": "Команди",
+  "pc.bot.add_command": "Додати команду",
+  "pc.bot.command_rule": "1–32 символи: малі латинські літери, цифри та _",
+  "pc.bot.duplicate": "Ця команда вже є у списку",
+  "pc.bot.publish": "Опублікувати на сервері OSHI",
+  "pc.bot.published": "Команди працюють у групах вашого бота",
+  "pc.bot.publish_failed": "Не вдалося опублікувати: %@"
+}

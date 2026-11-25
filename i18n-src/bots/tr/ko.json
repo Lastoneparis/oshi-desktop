@@ -1,0 +1,9 @@
+{
+  "pc.bot.commands": "명령어",
+  "pc.bot.add_command": "명령어 추가",
+  "pc.bot.command_rule": "1–32자: 영문 소문자, 숫자, _",
+  "pc.bot.duplicate": "이미 목록에 있는 명령어입니다",
+  "pc.bot.publish": "OSHI 서버에 게시",
+  "pc.bot.published": "봇의 그룹에서 명령어가 활성화되었습니다",
+  "pc.bot.publish_failed": "게시하지 못했습니다: %@"
+}

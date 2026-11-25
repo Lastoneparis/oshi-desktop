@@ -1,0 +1,9 @@
+{
+  "pc.bot.commands": "Príkazy",
+  "pc.bot.add_command": "Pridať príkaz",
+  "pc.bot.command_rule": "1 – 32 znakov: malé písmená, číslice a _",
+  "pc.bot.duplicate": "Tento príkaz už v zozname je",
+  "pc.bot.publish": "Zverejniť na serveri OSHI",
+  "pc.bot.published": "Príkazy fungujú v skupinách vášho bota",
+  "pc.bot.publish_failed": "Zverejnenie zlyhalo: %@"
+}
