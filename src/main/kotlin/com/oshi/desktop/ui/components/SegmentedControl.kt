@@ -59,11 +59,12 @@ fun <T> SegmentedControl(
     modifier: Modifier = Modifier,
     badge: (T) -> Int = { 0 },
     compact: Boolean = false,
+    /** OLED only: a soft violet glow under the selected segment (the destination strip). */
+    glow: Boolean = false,
 ) {
     Row(
         modifier
-            .clip(OshiTheme.pill)
-            .background(OshiTheme.surface)
+            .glassTrack(OshiTheme.pill, OshiTheme.surface)
             .padding(2.dp),
         horizontalArrangement = Arrangement.spacedBy(2.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -74,6 +75,7 @@ fun <T> SegmentedControl(
                 selected = option == selected,
                 badgeCount = badge(option),
                 compact = compact,
+                glow = glow,
                 modifier = if (compact) Modifier else Modifier.weight(1f),
                 onClick = { if (option != selected) onSelect(option) },
             )
@@ -87,6 +89,7 @@ private fun Segment(
     selected: Boolean,
     badgeCount: Int,
     compact: Boolean,
+    glow: Boolean,
     modifier: Modifier,
     onClick: () -> Unit,
 ) {
@@ -96,8 +99,17 @@ private fun Segment(
     Box(
         modifier
             .height(if (compact) 28.dp else 32.dp)
-            .clip(OshiTheme.pill)
-            .background(if (selected) OshiTheme.surfaceElevated.copy(alpha = lift) else Color.Transparent)
+            .then(
+                // OLED: the chosen segment is raised glass inside the glass track, with a
+                // violet glow when it is a destination.
+                if (selected && OshiTheme.glass != null) Modifier
+                    // Half strength: the glow shows THROUGH the translucent segment, so a full one
+                    // would read as a violet fill rather than glass catching violet light.
+                    .brandGlow(OshiTheme.pill, radius = 10.dp, active = glow, strength = 0.45f)
+                    .glass(OshiTheme.pill, Color.Transparent, raised = true)
+                else Modifier.clip(OshiTheme.pill)
+                    .background(if (selected) OshiTheme.selectedFill.copy(alpha = lift) else Color.Transparent)
+            )
             .focusRing(OshiTheme.pill)
             .clickable(onClick = onClick)
             .padding(horizontal = if (compact) OshiTheme.md else OshiTheme.lg),
@@ -142,6 +154,7 @@ fun DestinationStrip(
             label = { options[it] },
             onSelect = onSelect,
             compact = true,
+            glow = true,
         )
     }
 }

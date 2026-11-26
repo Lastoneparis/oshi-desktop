@@ -1,0 +1,131 @@
+package com.oshi.desktop.ui
+
+import com.oshi.desktop.call.media.CallDevices
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
+import org.junit.Test
+import java.io.File
+import java.nio.file.Files
+
+class SleepInhibitorTest {
+
+    @Test
+    fun `each OS asks its own tool, tied to this process`() {
+        val mac = SleepInhibitor(os = "Mac OS X", pid = 4242).command()!!
+        assertEquals(listOf("/usr/bin/caffeinate", "-d", "-i", "-w", "4242"), mac)
+
+        val linux = SleepInhibitor(os = "Linux", pid = 1, desktop = "XFCE").command()!!
+        assertEquals("systemd-inhibit", linux.first())
+        assertTrue(linux.contains("--what=idle:sleep"))
+
+        val win = SleepInhibitor(os = "Windows 11", pid = 777).command()!!
+        // By absolute path on a real Windows host (eeadaabd), bare name elsewhere.
+        assertTrue(win.first(), win.first().lowercase().endsWith("powershell.exe"))
+        val script = win.last()
+        assertTrue("ES_CONTINUOUS|ES_SYSTEM_REQUIRED|ES_DISPLAY_REQUIRED", script.contains("0x80000003"))
+        assertTrue("exits with us", script.contains("Get-Process -Id 777"))
+    }
+
+    @Test
+    fun `hold launches once, release destroys, a failed launch is harmless`() {
+        val launched = ArrayList<List<String>>()
+        val inhibitor = SleepInhibitor(os = "Linux", pid = 1, launch = { cmd ->
+            launched += cmd
+            ProcessBuilder("sleep", "30").start()
+        })
+        inhibitor.hold(); inhibitor.hold()
+        assertEquals(1, launched.size)
+        assertTrue(inhibitor.active)
+        inhibitor.release()
+        assertFalse(inhibitor.active)
+
+        val broken = SleepInhibitor(os = "Linux", pid = 1, launch = { null })
+        broken.hold()
+        assertFalse(broken.active)
+        broken.release()
+    }
+
+    @Test
+    fun `on this Mac, caffeinate really holds and really lets go`() {
+        assumeTrue(System.getProperty("os.name").lowercase().contains("mac") && File("/usr/bin/caffeinate").canExecute())
+        val inhibitor = SleepInhibitor()
+        inhibitor.hold()
+        Thread.sleep(300)
+        assertTrue("caffeinate is running", inhibitor.active)
+        inhibitor.release()
+        Thread.sleep(300)
+        assertFalse(inhibitor.active)
+    }
+
+    /**
+     * The NAMING and ORDERING rule, which is pure logic over a directory listing and so is
+     * worth running on every platform the suite runs on — not only Linux.
+     *
+     * __WIN_SEPARATOR_IN_TEST_2026_10_29__ This read `it.first.substringAfterLast('/')`, and
+     * `linuxCameras` returns `File.path`, which uses the PLATFORM separator. On Windows that
+     * is a backslash, so the split found nothing and every entry stayed a full
+     * `C:\…\dev\video0` — the assertion then compared absolute paths against bare node
+     * names and failed. The production code was right and portable all along; the test was
+     * the thing that assumed Unix, which is why it failed only on the `windows-latest` leg
+     * and passed here and on Linux forever. `File(...).name` is the separator the platform
+     * actually uses.
+     */
+    @Test
+    fun `linux cameras are the video nodes, in numeric order, named from sysfs when it can`() {
+        val dev = Files.createTempDirectory("dev").toFile()
+        listOf("video10", "video2", "video0", "vhci", "videoX").forEach { File(dev, it).createNewFile() }
+        val noSysfs = File(dev, "no-sysfs")
+        val cams = CallDevices.linuxCameras(dev, noSysfs).map { File(it.first).name }
+        assertEquals(listOf("video0", "video2", "video10"), cams)
+        dev.deleteRecursively()
+    }
+
+    /** __V4L2_METADATA_NODES_2026_11_21__ a UVC webcam's metadata node (sysfs index 1) is not a camera. */
+    @Test
+    fun `linux cameras skip the metadata node every UVC webcam adds`() {
+        val dev = Files.createTempDirectory("dev").toFile()
+        val sys = Files.createTempDirectory("sys").toFile()
+        listOf("video0", "video1", "video2", "video3", "video4").forEach { File(dev, it).createNewFile() }
+        fun node(n: String, name: String, index: String?) {
+            File(sys, n).mkdirs(); File(sys, "$n/name").writeText("$name\n"); index?.let { File(sys, "$n/index").writeText("$it\n") }
+        }
+        node("video0", "Integrated Camera", "0"); node("video1", "Integrated Camera", "1")
+        node("video2", "USB Cam", "0"); node("video3", "USB Cam", "1")
+        node("video4", "OBS Virtual Camera", null)
+        val cams = CallDevices.linuxCameras(dev, sys)
+        assertEquals(listOf("video0", "video2", "video4"), cams.map { File(it.first).name })
+        assertEquals("Integrated Camera (video0)", cams[0].second)
+        dev.deleteRecursively(); sys.deleteRecursively()
+    }
+
+    @Test
+    fun `the Linux inhibitor dies with OSHI, never sleep infinity`() {
+        val cmd = SleepInhibitor(os = "Linux", pid = 4242).command()!!
+        assertTrue("an orphaned `sleep infinity` kept the machine awake after a crash", !cmd.contains("infinity"))
+        assertTrue(cmd.last().contains("kill -0 4242"))
+    }
+
+    @Test
+    fun `open at login writes the registry value through an environment variable, not reg add argv`() {
+        val script = LoginItem.windowsRegistryScript()
+        assertTrue(script.contains("\$env:OSHI_RUN_VALUE"))
+        assertTrue("New-Item -Force recreates the Run key and drops other programs", !script.contains("New-Item"))
+        val line = LoginItem.windowsCommandLine(listOf("C:\\Users\\Jean Dupont\\AppData\\Local\\OSHI\\OSHI.exe", "--hidden"))
+        assertEquals("\"C:\\Users\\Jean Dupont\\AppData\\Local\\OSHI\\OSHI.exe\" --hidden", line)
+    }
+
+    /** __GNOME_IGNORES_LOGIND_IDLE_2026_11_21__ GNOME's own inhibitor where GNOME runs, logind elsewhere. */
+    @Test
+    fun `GNOME gets gnome-session-inhibit, other desktops systemd-inhibit`() {
+        val gnome = SleepInhibitor(os = "Linux", pid = 9, desktop = "ubuntu:GNOME", which = { "/usr/bin/$it" }).command()!!
+        assertEquals("/usr/bin/gnome-session-inhibit", gnome[0])
+        assertTrue(gnome.containsAll(listOf("--inhibit", "idle:suspend")))
+        assertTrue(gnome.last().contains("kill -0 9"))
+        val kde = SleepInhibitor(os = "Linux", pid = 9, desktop = "KDE", which = { "/usr/bin/$it" }).command()!!
+        assertEquals("systemd-inhibit", kde[0])
+        val noTool = SleepInhibitor(os = "Linux", pid = 9, desktop = "GNOME", which = { null }).command()!!
+        assertEquals("systemd-inhibit", noTool[0])
+    }
+}

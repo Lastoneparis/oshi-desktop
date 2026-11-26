@@ -106,6 +106,16 @@ object ControlPrefix {
     const val LINKS_VISIBILITY = "🔗LINKS_VISIBILITY🔗"
     const val PROFILE_REQUEST = "📸PROFILE_REQUEST📸"
     const val GROUP_UPDATE = "📢GROUP_UPDATE📢"
+    /**
+     * __GROUP_RECEIPTS_2026_11_02__ (N8) Per-message, per-member "received" and
+     * "read" for a GROUP message, sent to the sender alone.
+     *
+     * The desktop neither emits these nor keeps per-member state — the feature
+     * is a phone one. It is in this catalog because a sentinel missing from the
+     * catalog is a sentinel that renders as RAW JSON in the conversation, and
+     * iPhones and Androids in a shared group are already sending them.
+     */
+    const val GROUP_RECEIPT = "📑GROUP_RECEIPT📑"
     const val SESSION_RESET = "__SESSION_RESET__"
 
     const val CALL_SUMMARY = "📱CALL_SUMMARY📱"
@@ -114,10 +124,62 @@ object ControlPrefix {
     const val SCHEDULED_CALL = "📅SCHEDULED_CALL📅"
     const val CHECK_IN = "🛡️CHECK_IN🛡️"
     const val CHECKIN = "🛡️CHECKIN🛡️"
+
+    /**
+     * __ALIVE_CHECK_IN_2026_11_04__ `💓ALIVE💓` — a recurring liveness
+     * confirmation scoped to one conversation, carrying one timestamp and no location.
+     *
+     * A SEPARATE sentinel from the two above, and the distinction matters here as much
+     * as on the phones: `🛡️CHECK_IN🛡️` is a journey with an ETA and a position,
+     * this is a heartbeat with neither. Sharing a prefix would route these through
+     * [com.oshi.desktop.place.CheckInPayload]'s seven-type renderer.
+     *
+     * RENDERED, like its siblings. Without the entry this client has no idea the text
+     * is a control payload at all, and a check-in from a phone prints as raw JSON in
+     * the conversation — the exact failure __DESKTOP_CATALOG_DRIFT_2026_10_27__ names.
+     */
+    const val ALIVE_CHECK_IN = "💓ALIVE💓"
     const val PROFILE_UPDATE = "📸PROFILE_UPDATE📸"
     const val WALLPAPER_UPDATE = "🎨WALLPAPER_UPDATE🎨"
     const val KEY_ROTATION = "🔑KEY_ROTATION🔑"
+    /** A rate-limited delivery refusal, rendered in the receiving device's language. */
+    const val BLOCKED_NOTICE = "🚫BLOCKED🚫"
     const val MEDIA_MARKER = "MEDIA|||"
+
+    /**
+     * __DESKTOP_CATALOG_DRIFT_2026_10_27__ Three sentinels iOS has carried since
+     * 2026-10-23 and this catalog never gained. `ControlPayloadWireFormatTest` has
+     * been red over exactly these: 28 entries on the phones, 25 here.
+     *
+     * Not cosmetic. The catalog is what tells this client "this text is a control
+     * payload, not something to print", so a poll or an offline-only marker sent
+     * from a phone rendered as RAW JSON in the desktop conversation — the failure
+     * the test's own message names.
+     *
+     * Kinds copied from `OSHIControlPayload.swift:92,107,111`, not guessed:
+     * POLL_VOTE is silent (a ballot is not an event), POLL is rendered (the poll
+     * card itself), and OFFLINE_ONLY is rendered — iOS's comment is explicit that
+     * the CHANGE is meant to be visible, so making it silent here would hide a
+     * conversation switching to offline-only.
+     */
+    const val POLL = "📊POLL📊"
+    const val POLL_VOTE = "📊POLL_VOTE📊"
+    const val OFFLINE_ONLY = "🔒OFFLINE_ONLY🔒"
+
+    /**
+     * __ADV_CHAT_PRIVACY_2026_11_26__ `🛡ADV_PRIVACY🛡` — "advanced chat privacy" switched on or
+     * off in this conversation (iOS `OSHIControlPayload.advancedPrivacyPrefix`, Android
+     * `OSHIControlPayload.ADV_PRIVACY_WIRE`). Body: [AdvancedPrivacyPayload] JSON.
+     *
+     * Canonical WITHOUT U+FE0F, exactly as iOS's catalog lists it and as both phones send it.
+     * The REVERSE of the usual problem: a keyboard-typed spelling may carry the selector after
+     * each shield, so [variants] adds that spelling as a receive-only twin (iOS does the same,
+     * `shieldWithSelector`). Nothing here ever emits it.
+     *
+     * RENDERED (a centred notice naming who switched it), but never unread, never a banner and
+     * never a push — see [isQuietNotice] and [silentNoPushPrefixes].
+     */
+    const val ADV_PRIVACY = "\uD83D\uDEE1ADV_PRIVACY\uD83D\uDEE1"
 
     const val REPLY = "💬REPLY💬"
     const val FORWARDED = "➡️FORWARDED➡️"
@@ -138,6 +200,8 @@ object ControlPrefix {
         Entry(PROFILE_REQUEST, Kind.SILENT),
         Entry(ACTION, Kind.SILENT),
         Entry(GROUP_UPDATE, Kind.SILENT),
+        Entry(POLL_VOTE, Kind.SILENT),
+        Entry(GROUP_RECEIPT, Kind.SILENT),
         Entry(SESSION_RESET, Kind.SILENT),
 
         Entry(CALL_SUMMARY, Kind.RENDERED),
@@ -146,11 +210,16 @@ object ControlPrefix {
         Entry(SCHEDULED_CALL, Kind.RENDERED),
         Entry(CHECK_IN, Kind.RENDERED),
         Entry(CHECKIN, Kind.RENDERED),
+        Entry(ALIVE_CHECK_IN, Kind.RENDERED),
         Entry(PROFILE_UPDATE, Kind.RENDERED),
         Entry(WALLPAPER_UPDATE, Kind.RENDERED),
         Entry(REACTION, Kind.RENDERED),
         Entry(REACTION_LEGACY, Kind.RENDERED),
         Entry(KEY_ROTATION, Kind.RENDERED),
+        Entry(BLOCKED_NOTICE, Kind.RENDERED),
+        Entry(POLL, Kind.RENDERED),
+        Entry(OFFLINE_ONLY, Kind.RENDERED),
+        Entry(ADV_PRIVACY, Kind.RENDERED),
         Entry(MEDIA_MARKER, Kind.RENDERED),
 
         Entry(REPLY, Kind.ENVELOPE),
@@ -170,7 +239,18 @@ object ControlPrefix {
     val silentNoPushPrefixes: List<String> = listOf(
         DELIVERY_RECEIPT, READ_RECEIPT, PROFILE_UPDATE, PROFILE_REQUEST,
         LINKS_VISIBILITY, WALLPAPER_UPDATE, TYPING_IOS, TYPING_ANDROID,
+        // __ADV_CHAT_PRIVACY_2026_11_26__ iOS `renderedButNotWorthWaking` (→ `pushSilentPrefixes`):
+        // a settings change wakes nobody.
+        ADV_PRIVACY,
     )
+
+    /**
+     * __ADV_CHAT_PRIVACY_2026_11_26__ iOS `isQuietNotice`, Android `neverNotifies`: a row of the
+     * thread that is NOT counted as unread and raises NO notification. Drawn, and the list may
+     * show it as the last line, but nobody is told — a banner reading "X turned on advanced
+     * chat privacy" would itself leak that the conversation exists.
+     */
+    fun isQuietNotice(text: String?): Boolean = text != null && match(text) == ADV_PRIVACY
 
     private data class Variant(val spelling: String, val canonical: String, val kind: Kind)
 
@@ -186,12 +266,17 @@ object ControlPrefix {
      */
     const val VS16 = "\uFE0F"
 
+    /** U+1F6E1 SHIELD, bare. */
+    private const val SHIELD = "\uD83D\uDEE1"
+
     private val variants: List<Variant> = buildList {
         for (e in catalog) {
             add(Variant(e.prefix, e.prefix, e.kind))
             val stripped = e.prefix.replace(VS16, "")
             if (stripped != e.prefix) add(Variant(stripped, e.prefix, e.kind))
         }
+        // __ADV_CHAT_PRIVACY_2026_11_26__ the selector spelling of the bare shield, receive-only.
+        add(Variant(ADV_PRIVACY.replace(SHIELD, SHIELD + VS16), ADV_PRIVACY, Kind.RENDERED))
     }.sortedByDescending { it.spelling.length }
 
     /**

@@ -149,6 +149,11 @@ object GroupUpdateWire {
             // Pinned false: iOS overwrites it locally anyway (swift:1028) and Android
             // pins it too. Muting is a personal preference, not group state.
             .bool("isMuted", false)
+        // __GROUP_E2E_V2_2026_09_23__ spec §5.1.
+        // __GROUP_INFO_SETTINGS_2026_11_20__ spec §2.2: once a group has had a description the key
+        // is ALWAYS emitted, `""` meaning "cleared" (null = never had one = omitted).
+        json.optional("description", group.description)
+        if (group.evictedMemberKeys.isNotEmpty()) json.strArr("evictedMemberKeys", group.evictedMemberKeys)
         group.groupPictureBase64?.takeIf { it.isNotEmpty() }?.let {
             json.str("groupPictureData", it)
             json.optional("groupPictureUpdatedBy", group.groupPictureUpdatedBy?.takeIf(String::isNotEmpty))
@@ -169,6 +174,8 @@ object GroupUpdateWire {
         }
         json.optional("avatar", group.avatar?.takeIf { it.isNotEmpty() })
         json.optionalInt("stateVersion", group.stateVersion)
+        // __GROUP_INFO_SETTINGS_2026_11_20__ §2.1 sender rule: emitted by a device that ever held one.
+        group.settings?.let { json.obj("settings", GroupSettings.encode(it)) }
         return json.build()
     }
 
@@ -225,11 +232,28 @@ object GroupUpdateWire {
      * Read [MinimalGroupUpdate.MemberSyncRequest]'s doc before sending one: on iOS this
      * payload AUTO-ADDS the requester to the group.
      */
-    fun encodeMemberSyncRequest(groupId: String, requesterPublicKey: String): String =
+    fun encodeMemberSyncRequest(groupId: String, requesterPublicKey: String, inviteToken: String? = null): String =
         GroupJson()
             .str("type", "member_sync_request")
             .str("groupId", GroupIdentity.canonicalGroupId(groupId))
             .str("requesterPublicKey", requesterPublicKey)
+            // __GROUP_INFO_SETTINGS_2026_11_20__ §3.2: only when the link carried `t=`.
+            .optional("inviteToken", inviteToken)
+            .build()
+
+    /** __GROUP_INFO_SETTINGS_2026_11_20__ §3.1 step 4 — a public-link join. */
+    fun encodeJoinRequest(handle: String, requesterPublicKey: String): String =
+        GroupJson()
+            .str("type", "join_request")
+            .str("handle", handle)
+            .str("requesterPublicKey", requesterPublicKey)
+            .build()
+
+    /** __GROUP_INFO_SETTINGS_2026_11_20__ §2.9: the Android-compatible "deleted" companion. */
+    fun encodeDeleted(groupId: String): String =
+        GroupJson()
+            .str("type", "deleted")
+            .str("groupId", GroupIdentity.canonicalGroupId(groupId))
             .build()
 
     /** `{"type":"sync_request","requesterKey":…}` — iOS `swift:1147`. No groupId. */
@@ -353,6 +377,11 @@ object GroupUpdateWire {
                 pinnedBy = o.opt("pinnedBy") as? String,
                 avatar = o.opt("avatar") as? String,
                 stateVersion = (o.opt("stateVersion") as? Number)?.toInt(),
+                // __GROUP_INFO_SETTINGS_2026_11_20__ §2.2: `""` is "cleared" (kept as ""), absent is null;
+                // longer than 500 is truncated on receive.
+                description = (o.opt("description") as? String)?.let { GroupSettings.truncateUtf16(it, GroupSettings.MAX_DESCRIPTION) },
+                evictedMemberKeys = stringArray(o.opt("evictedMemberKeys")),
+                settings = GroupSettings.parse(o.opt("settings")),
             ),
         )
     }
@@ -431,6 +460,28 @@ object GroupUpdateWire {
     fun decodeMinimalFramed(content: String): MinimalGroupUpdate? =
         decodeMinimal(content.removePrefix(PREFIX))
 
+    /**
+     * __GROUP_COMPAT_IGNORE_2026_09_23__ The `type` of a well-formed state frame that
+     * [decodeMinimalFramed] does not model — `updated` (Android's legacy rename/description
+     * companion), `read_receipt_batch` (spec §5.2, optional), `deleted`, `key_rotation`… — or null
+     * when the body is not a JSON object with a non-empty string `type` (that stays malformed).
+     * Spec header: new `type` values are ones old receivers IGNORE, not reject.
+     */
+    fun ignorableMinimalType(content: String): String? {
+        val o = runCatching { JSONObject(content.removePrefix(PREFIX)) }.getOrNull() ?: return null
+        val type = (o.opt("type") as? String)?.takeIf { it.isNotBlank() } ?: return null
+        // A group-type word here means a definition that failed decoding — not ignorable.
+        if (GroupType.fromRaw(type) != null) return null
+        // A modelled type that failed decoding (missing groupId, name…) IS malformed.
+        if (type in MODELLED_MINIMAL_TYPES) return null
+        return type
+    }
+
+    private val MODELLED_MINIMAL_TYPES = setOf(
+        "member_added", "member_removed", "group_renamed", "member_sync_request", "sync_request", "created",
+        "join_request",
+    )
+
     /** iOS's fallback switch (`swift:1071-1157`), plus the `created` shape it emits. */
     fun decodeMinimal(body: String): MinimalGroupUpdate? {
         val o = runCatching { JSONObject(body) }.getOrNull() ?: return null
@@ -454,7 +505,12 @@ object GroupUpdateWire {
             "member_sync_request" -> {
                 val g = gid() ?: return null
                 val r = o.opt("requesterPublicKey") as? String ?: return null
-                MinimalGroupUpdate.MemberSyncRequest(g, r)
+                MinimalGroupUpdate.MemberSyncRequest(g, r, (o.opt("inviteToken") as? String)?.takeIf { it.isNotEmpty() && it.length <= 128 })
+            }
+            "join_request" -> {
+                val h = (o.opt("handle") as? String)?.takeIf { it.isNotEmpty() && it.length <= 64 } ?: return null
+                val r = (o.opt("requesterPublicKey") as? String)?.takeIf { it.isNotEmpty() } ?: return null
+                MinimalGroupUpdate.JoinRequest(h, r)
             }
             "sync_request" -> {
                 val r = (o.opt("requesterKey") as? String)?.takeIf { it.isNotEmpty() } ?: return null

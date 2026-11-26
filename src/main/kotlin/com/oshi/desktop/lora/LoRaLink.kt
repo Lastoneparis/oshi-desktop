@@ -9,7 +9,12 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * The TCP attachment to a Meshtastic node — PARITY.md row 0.27's missing half.
+ * The attachment to a Meshtastic node — PARITY.md row 0.27's missing half.
+ *
+ * Transport-agnostic since 2026-10-28: see [LoRaChannel] for TCP and USB serial. Everything
+ * below — the handshake order, the buffer that outlives the read, the drain loop, the
+ * desync resync, the backoff — is identical on both, which is why there is one of each and
+ * not one per transport.
  *
  * [LoRaAttach] argued the transport choice and then deliberately stopped short of writing
  * one: *"No socket, no serial port and no reconnect loop is implemented here."* This is
@@ -28,7 +33,12 @@ import java.util.concurrent.atomic.AtomicInteger
  * three transports). BLE is a PHONE constraint, not a protocol one: a node exposes the
  * same `ToRadio`/`FromRadio` protobufs on BLE, USB serial and TCP :4403, and the bytes
  * [LoRaProto.toRadioPacket] produces are identical on all three. So this reaches the same
- * radio an iPhone reaches, over the one transport that costs no dependency.
+ * radio an iPhone reaches, over a transport that costs no dependency.
+ *
+ * On macOS and Linux that transport is **USB serial** ([LoRaChannel.Serial]) — the radio is
+ * plugged into the machine, which is the desktop equivalent of a phone's BLE pairing and
+ * needs no WiFi-capable board. TCP stays for a networked node, a `meshtasticd` bridge, and
+ * for Windows, where a `COM` port is not a file.
  *
  * ============================================================ THE HANDSHAKE IS NOT OPTIONAL
  *
@@ -54,23 +64,38 @@ import java.util.concurrent.atomic.AtomicInteger
  * sending noise.
  */
 class LoRaLink(
-    private val host: String,
-    private val port: Int = LoRaAttach.TCP_PORT,
+    /** Where the radio is. See [LoRaChannel] for why this is not a host and a port. */
+    private val channel: LoRaChannel,
     /** Called with each complete `FromRadio` protobuf, on the read thread. */
     private val onFromRadio: (ByteArray) -> Unit,
     private val log: (String) -> Unit = {},
-    /** Injectable for tests; production opens a real socket. */
-    private val dial: (String, Int, Int) -> Socket = { h, p, timeoutMs ->
-        Socket().apply { connect(InetSocketAddress(h, p), timeoutMs) }
-    },
-    private val connectTimeoutMs: Int = 8_000,
     /** Sleep between reconnect attempts. Injectable so a test does not wait in real time. */
     private val sleeper: (Long) -> Unit = { Thread.sleep(it) },
 ) {
 
+    /**
+     * The TCP form this class had before serial existed.
+     *
+     * Kept with the parameter NAMES unchanged so every existing caller and test constructs
+     * it exactly as before: the transport refactor must not be able to hide behind an
+     * edited test. `dial` stays here rather than moving to the call sites because that is
+     * where `FakeMeshtasticNode` is injected.
+     */
+    constructor(
+        host: String,
+        port: Int = LoRaAttach.TCP_PORT,
+        onFromRadio: (ByteArray) -> Unit,
+        log: (String) -> Unit = {},
+        dial: (String, Int, Int) -> Socket = { h, p, timeoutMs ->
+            Socket().apply { connect(InetSocketAddress(h, p), timeoutMs) }
+        },
+        connectTimeoutMs: Int = 8_000,
+        sleeper: (Long) -> Unit = { Thread.sleep(it) },
+    ) : this(LoRaChannel.Tcp(host, port, connectTimeoutMs, dial), onFromRadio, log, sleeper)
+
     private val running = AtomicBoolean(false)
     private val connected = AtomicBoolean(false)
-    @Volatile private var socket: Socket? = null
+    @Volatile private var conn: LoRaChannel.Conn? = null
     @Volatile private var out: OutputStream? = null
     private var thread: Thread? = null
 
@@ -87,7 +112,7 @@ class LoRaLink(
      */
     fun start() {
         if (!running.compareAndSet(false, true)) return
-        thread = Thread({ runLoop() }, "oshi-lora-$host").apply { isDaemon = true; start() }
+        thread = Thread({ runLoop() }, "oshi-lora-${channel.label}").apply { isDaemon = true; start() }
     }
 
     fun stop() {
@@ -104,11 +129,24 @@ class LoRaLink(
      *         [com.oshi.desktop.mesh.MeshFraming] records for the mesh. It means the bytes
      *         left this process.
      */
+    /**
+     * __DESKTOP_LORA_TRAFFIC_2026_10_29__ Every frame that leaves, for the traffic log.
+     *
+     * One hook here rather than at each of the five senders (interop text, OSHI envelope,
+     * media, admin, position): a call site added later is recorded without anyone
+     * remembering to, which is the failure mode a per-caller hook always eventually has.
+     * Called only on a write that SUCCEEDED, so the log says what left rather than what
+     * was attempted.
+     */
+    @Volatile
+    var onToRadio: (ByteArray) -> Unit = {}
+
     fun send(toRadio: ByteArray): Boolean {
         val o = out ?: return false
         return try {
             val framed = LoRaAttach.StreamFraming.encode(toRadio)
             synchronized(o) { o.write(framed); o.flush() }
+            runCatching { onToRadio(toRadio) }
             true
         } catch (e: IOException) {
             log("lora: write failed: ${e.message}")
@@ -124,19 +162,18 @@ class LoRaLink(
         var backoffMs = INITIAL_BACKOFF_MS
         while (running.get()) {
             try {
-                val s = dial(host, port, connectTimeoutMs)
-                s.tcpNoDelay = true
-                socket = s
-                out = s.getOutputStream()
+                val c = channel.open()
+                conn = c
+                out = c.output
                 connected.set(true)
                 backoffMs = INITIAL_BACKOFF_MS
-                log("lora: attached to $host:$port")
+                log("lora: attached to ${channel.label}")
 
                 // The node is silent until asked. See the class doc.
                 val configId = (System.nanoTime().toInt() and 0x7FFFFFFF).toUInt()
                 if (!send(LoRaProto.wantConfig(configId))) throw IOException("handshake write failed")
 
-                pump(s.getInputStream())
+                pump(c.input)
             } catch (e: Exception) {
                 if (running.get()) log("lora: ${e.javaClass.simpleName}: ${e.message}")
             } finally {
@@ -182,8 +219,8 @@ class LoRaLink(
     }
 
     private fun closeQuietly() {
-        try { socket?.close() } catch (_: Exception) {}
-        socket = null
+        try { conn?.close() } catch (_: Exception) {}
+        conn = null
         out = null
     }
 

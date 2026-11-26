@@ -1,0 +1,9 @@
+{
+  "pc.bot.commands": "Kommandoer",
+  "pc.bot.add_command": "Legg til kommando",
+  "pc.bot.command_rule": "1–32 tegn: små bokstaver, sifre og _",
+  "pc.bot.duplicate": "Denne kommandoen står allerede på listen",
+  "pc.bot.publish": "Publiser på OSHI-serveren",
+  "pc.bot.published": "Kommandoene er aktive i botens grupper",
+  "pc.bot.publish_failed": "Kunne ikke publisere: %@"
+}

@@ -234,13 +234,25 @@ object LoRaFrame {
  * The clock is a PARAMETER, never `System.currentTimeMillis()` read inside. A reassembler
  * whose TTL cannot be driven from a test is a TTL nobody has watched expire.
  */
-class LoRaReassembler(private val ttlMs: Long = LoRaFrame.REASSEMBLY_TTL_MS) {
+class LoRaReassembler(
+    private val ttlMs: Long = LoRaFrame.REASSEMBLY_TTL_MS,
+    private val maxPending: Int = MAX_PENDING,
+) {
+
+    init { require(maxPending > 0) { "maxPending must be positive" } }
+
+    companion object {
+        /** 64 × 40 chunks × 180 B is under 0.5 MiB before map overhead. */
+        const val MAX_PENDING = 64
+    }
 
     private class Entry(val total: Int, val startedAtMs: Long) {
         val parts = HashMap<Int, ByteArray>()
     }
 
-    private val pending = HashMap<UInt, Entry>()
+    // Insertion order makes capacity eviction deterministic: discard the oldest incomplete
+    // message, never whichever bucket a HashMap happens to yield on this JVM.
+    private val pending = LinkedHashMap<UInt, Entry>()
 
     /** Partial messages currently held — for tests and for a diagnostics line. */
     val pendingCount: Int get() = pending.size
@@ -261,6 +273,12 @@ class LoRaReassembler(private val ttlMs: Long = LoRaFrame.REASSEMBLY_TTL_MS) {
         val it = pending.entries.iterator()
         while (it.hasNext()) {
             if (nowMs - it.next().value.startedAtMs >= ttlMs) it.remove()
+        }
+
+        // The radio naturally limits new ids, but the TCP bridge is an unauthenticated
+        // byte stream. A peer can otherwise mint unbounded ids inside one TTL window.
+        while (pending.size > maxPending) {
+            pending.entries.iterator().apply { next(); remove() }
         }
 
         if (entry.parts.size != entry.total) return null

@@ -1,0 +1,9 @@
+{
+  "pc.bot.commands": "कमांड",
+  "pc.bot.add_command": "कमांड जोड़ें",
+  "pc.bot.command_rule": "1–32 अक्षर: छोटे अक्षर, अंक और _",
+  "pc.bot.duplicate": "यह कमांड सूची में पहले से है",
+  "pc.bot.publish": "OSHI सर्वर पर प्रकाशित करें",
+  "pc.bot.published": "कमांड आपके बॉट के समूहों में चालू हैं",
+  "pc.bot.publish_failed": "प्रकाशित नहीं हो सका: %@"
+}

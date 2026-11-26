@@ -1,0 +1,4 @@
+{
+  "pc.mail.offline.unreachable": "メールに接続できません。接続を確認してください。",
+  "pc.mail.offline.refreshFailed": "メールを更新できませんでした。接続を確認してください。"
+}

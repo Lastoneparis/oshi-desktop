@@ -103,6 +103,16 @@ object Strings {
         offer(available.firstOrNull { it.equals(norm, ignoreCase = true) })
         offer(ALIASES[lower])
 
+        // 1b. __SYSTEM_LANGUAGE_LIST_2027__ language + SCRIPT, the region dropped. macOS lists
+        // Traditional Chinese as `zh-Hant-TW` and the JVM reports the same tag; without this
+        // step the bare `zh` below won and Taiwan got Simplified Chinese.
+        val parts = lower.split('-')
+        if (parts.size >= 3 && parts[1].length == 4) {
+            val ls = "${parts[0]}-${parts[1]}"
+            offer(available.firstOrNull { it.equals(ls, ignoreCase = true) })
+            offer(ALIASES[ls])
+        }
+
         // 2. the language alone, then ITS alias
         val lang = lower.substringBefore('-')
         offer(available.firstOrNull { it.equals(lang, ignoreCase = true) })
@@ -212,6 +222,14 @@ object Strings {
  * is the test that fails if `t` is ever dropped from that list.
  */
 fun t(key: String): String = Strings.get(key)
+
+/**
+ * A catalog key held as DATA and rendered later with [t] — a call summary written on the
+ * wire as `📞↗️call.outgoing|0:12`, or the reason a call ended kept in UI state. It returns
+ * [key] unchanged; it exists so `SourceKeys.ACCESSORS` sees the key and the catalog audit
+ * holds every locale to it, exactly as if it were a `t("…")` call.
+ */
+fun catalogKey(key: String): String = key
 
 /** `t` with arguments. Same wrapper caveat, same scanner entry. */
 fun t(key: String, vararg args: Any?): String = Strings.format(key, *args)

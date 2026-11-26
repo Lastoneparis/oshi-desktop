@@ -1,5 +1,7 @@
 package com.oshi.desktop.ui.components
 
+import com.oshi.desktop.i18n.t
+
 import com.oshi.desktop.ui.state.ConversationKind
 import com.oshi.desktop.ui.state.ConversationRow
 
@@ -33,12 +35,13 @@ object ConversationFilter {
      * A blank query returns the input list UNCHANGED — same order, same rows — so typing and
      * then clearing the box cannot reorder the sidebar.
      */
-    fun apply(rows: List<ConversationRow>, query: String): List<ConversationRow> {
+    fun apply(rows: List<ConversationRow>, query: String, textHits: Set<String> = emptySet()): List<ConversationRow> {
         val q = query.trim()
         if (q.isEmpty()) return rows
         val needle = q.lowercase()
         return rows.filter { row ->
-            row.label.lowercase().contains(needle) ||
+            row.id in textHits ||
+                row.label.lowercase().contains(needle) ||
                 row.preview.lowercase().contains(needle) ||
                 row.id.lowercase().contains(needle)
         }
@@ -67,7 +70,7 @@ object ConversationFilter {
      * searches both, and this one filters a list the model already published. Borrowing
      * that key would have been a capability claim in 34 languages. So it is a desktop key.
      */
-    val PLACEHOLDER: String get() = com.oshi.desktop.i18n.dt("desktop.filter.placeholder")
+    val PLACEHOLDER: String get() = t("conv.filter.placeholder")
 
     /**
      * The `Messages | Groups` split from the shipped macOS list, applied to the same rows.

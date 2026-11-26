@@ -1,0 +1,4 @@
+{
+  "pc.mail.offline.unreachable": "无法连接邮件。请检查你的网络连接。",
+  "pc.mail.offline.refreshFailed": "无法刷新邮件。请检查你的网络连接。"
+}

@@ -1,0 +1,9 @@
+{
+  "pc.bot.commands": "コマンド",
+  "pc.bot.add_command": "コマンドを追加",
+  "pc.bot.command_rule": "1〜32文字：英小文字・数字・_",
+  "pc.bot.duplicate": "このコマンドはすでにリストにあります",
+  "pc.bot.publish": "OSHI サーバーに公開",
+  "pc.bot.published": "コマンドはボットのグループで有効です",
+  "pc.bot.publish_failed": "公開できませんでした：%@"
+}

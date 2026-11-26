@@ -1,0 +1,4 @@
+{
+  "pc.mail.offline.unreachable": "Impossible de joindre la messagerie. Vérifiez votre connexion.",
+  "pc.mail.offline.refreshFailed": "Impossible d'actualiser la messagerie. Vérifiez votre connexion."
+}

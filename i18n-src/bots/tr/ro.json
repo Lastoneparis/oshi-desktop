@@ -1,0 +1,9 @@
+{
+  "pc.bot.commands": "Comenzi",
+  "pc.bot.add_command": "Adaugă o comandă",
+  "pc.bot.command_rule": "1–32 caractere: litere mici, cifre și _",
+  "pc.bot.duplicate": "Această comandă este deja în listă",
+  "pc.bot.publish": "Publică pe serverul OSHI",
+  "pc.bot.published": "Comenzile sunt active în grupurile botului",
+  "pc.bot.publish_failed": "Publicarea a eșuat: %@"
+}

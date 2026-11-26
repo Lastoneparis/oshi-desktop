@@ -23,6 +23,12 @@ import java.util.UUID
  *       ./gradlew run --args="--ui"        (the window — PARITY.md row 1.1, first slice)
  */
 fun main(args: Array<String>) {
+    // __DESKTOP_CERT_PINNING_2026_11_20__ before any client exists: every TLS connection to
+    // oshi-messenger.com must match the phones' pins.
+    com.oshi.desktop.net.CertificatePins.installDefault()
+    // __LINUX_HIDPI_2026_11_21__ before ANY AWT class loads (linuxWindowClass starts the toolkit).
+    runCatching { com.oshi.desktop.ui.LinuxUiScale.applyIfNeeded() }
+    linuxWindowClass()
     // BEFORE the --mesh branch, deliberately: `--ui --mesh` means "the window, with the
     // mesh node running underneath it", not "the mesh CLI". A flag that silently means a
     // different program depending on what else is on the line is a flag nobody can reason
@@ -30,8 +36,28 @@ fun main(args: Array<String>) {
     //
     // The window is an ADDITIONAL entry point. `--client` is unchanged and is still the
     // surface that reaches every capability; see UiLauncher's note.
-    if (args.contains("--ui")) {
-        com.oshi.desktop.ui.runUiCli(args)
+    //
+    // `--hidden` implies the window too. The packaged launchers (jpackage OSHI.exe, the
+    // macOS .app) bake `--ui` in as DEFAULT arguments, and jpackage REPLACES the defaults
+    // when any argument is given — so the "Open at login" entry `OSHI.exe --hidden`
+    // arrives here as `["--hidden"]` alone. Without this it fell through to the protocol
+    // walkthrough, printed a demo and exited: login start silently did nothing.
+    // __OSHI_LINKS_ON_PC_2026_11_20__ Windows (HKCU\Software\Classes\oshi) and Linux
+    // (x-scheme-handler/oshi) start `OSHI "oshi://add?key=…"`. jpackage REPLACES the baked-in
+    // `--ui` when any argument is given, so a link used to fall through to the protocol demo
+    // below, print, and exit. A link means the window.
+    val linkArgs = com.oshi.desktop.store.InstanceActivation.linkLaunchArgs(args)
+    // `--client` is not an escape hatch either: an injected `--client --server …` would otherwise
+    // start the console client on attacker flags.
+    if (linkArgs != null) {
+        // __PROTOCOL_ARG_INJECTION_2026_11_20__ only the link, never the flags around it.
+        try { com.oshi.desktop.ui.runUiCli(linkArgs) } finally { com.oshi.desktop.ui.LaunchSplash.dismiss() }
+        return
+    }
+    if (args.contains("--ui") || args.contains(com.oshi.desktop.ui.LoginItem.HIDDEN_FLAG)) {
+        // The launch splash closes itself when a window opens; this covers the paths that
+        // end without opening one (e.g. a profile that refuses restoration).
+        try { com.oshi.desktop.ui.runUiCli(args) } finally { com.oshi.desktop.ui.LaunchSplash.dismiss() }
         return
     }
 
@@ -307,3 +333,19 @@ private fun hex(s: String): ByteArray =
     ByteArray(s.length / 2) { ((s[it * 2].digitToInt(16) shl 4) or s[it * 2 + 1].digitToInt(16)).toByte() }
 
 private fun hexStr(d: ByteArray): String = d.joinToString("") { "%02x".format(it.toInt() and 0xFF) }
+
+/**
+ * __LINUX_WM_CLASS_2026_11_19__ AWT names every window's X11 WM_CLASS after the main class
+ * ("com-oshi-desktop-MainKt"), so the dock showed the running OSHI as a separate generic icon
+ * that could not be pinned. Set before the toolkit loads; needs the `--add-opens` the Linux
+ * package passes, and is a silent no-op without it (e.g. `./gradlew run`).
+ */
+private fun linuxWindowClass() {
+    if (!com.oshi.desktop.store.DesktopPaths.isLinux) return
+    runCatching {
+        val tk = java.awt.Toolkit.getDefaultToolkit()
+        val f = tk.javaClass.getDeclaredField("awtAppClassName")
+        f.isAccessible = true
+        f.set(null, "OSHI")
+    }
+}

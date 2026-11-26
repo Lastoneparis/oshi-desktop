@@ -103,7 +103,15 @@ class BotApi(
         .build()
 
     /** One group as `register` / `update-groups` carry it (`message_queue_server.js:487`). */
-    data class BotGroup(val id: String, val name: String, val members: List<String>)
+    data class BotGroup(
+        val id: String,
+        val name: String,
+        val members: List<String>,
+        /** __BOTS_PHASE1_2026_11_24__ S4: "group" | "channel"; null = not sent (legacy). */
+        val kind: String? = null,
+        /** S4: what the admin allowed; null = not sent (server default for legacy groups). */
+        val permissions: BotPermissions? = null,
+    )
 
     /** What `GET /api/bot/list` says about the caller's own bot (`:888-895`). */
     data class BotListEntry(
@@ -284,6 +292,26 @@ class BotApi(
         }
     }
 
+    /**
+     * __DESKTOP_BOT_COMMANDS_2026_11_24__ `POST /api/bot/setMyCommands` — the owner publishes
+     * the bot's `/` menu (`bot_platform.js:457`). An empty list clears it. The list is
+     * validated with the server's own rules first, so a refusal here never costs a request.
+     * Needs a REGISTERED token (`auth()` answers 401 otherwise).
+     */
+    fun setMyCommands(token: String, commands: List<BotCommand>): Result<List<BotCommand>> {
+        requireToken(token)
+        val problem = BotCommands.problemOf(commands)
+        if (problem != BotCommands.Problem.None) return Result.failure(IllegalArgumentException("invalid command list: $problem"))
+        val body = "{\"token\":\"" + esc(token) + "\",\"commands\":" + BotCommands.toJson(commands).toString() + "}"
+        return postJson("/api/bot/setMyCommands", body).map { BotCommands.fromJson(it.optJSONArray("commands")) }
+    }
+
+    /** `GET /api/bot/getMyCommands?token=` (`bot_platform.js:479`) — owner-only, like every route. */
+    fun getMyCommands(token: String): Result<List<BotCommand>> {
+        requireToken(token)
+        return getJson("/api/bot/getMyCommands?token=${enc(token)}").map { BotCommands.fromJson(it.optJSONArray("commands")) }
+    }
+
     /** `DELETE /api/bot/unregister?token=`. A 404 means the token was already gone. */
     fun unregister(token: String): Result<Unit> {
         requireToken(token)
@@ -336,7 +364,10 @@ class BotApi(
                 if (j > 0) append(',')
                 append('"').append(esc(m)).append('"')
             }
-            append("]}")
+            append(']')
+            if (g.kind != null) append(",\"kind\":\"").append(esc(g.kind)).append('"')
+            if (g.permissions != null) append(",\"permissions\":").append(g.permissions.toJson().toString())
+            append('}')
         }
         append(']')
     }

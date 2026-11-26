@@ -4,6 +4,7 @@ import com.oshi.desktop.DesktopIdentity
 import com.oshi.desktop.DesktopV2Signer
 import com.oshi.desktop.store.PrekeyStore
 import com.oshi.messenger.network.v2.FetchedBundle
+import com.oshi.messenger.network.v2.V2PaddingPeers
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Base64
@@ -34,10 +35,98 @@ class V2KeysClient(
     private val http: V2Http,
     private val identity: DesktopIdentity,
     private val prekeys: PrekeyStore,
+    /**
+     * __ADV_CHAT_PRIVACY_2026_11_26__ every `caps` a peer's bundle or the server's `accountCaps`
+     * tells us, for the per-feature gates that read one bit of it (advanced chat privacy, bit 16).
+     */
+    private val onPeerCaps: (peer: String, caps: Int?) -> Unit = { _, _ -> },
 ) {
 
     /** Publish (or republish) our bundle. Returns the server's remaining OPK count, or null on failure. */
     fun publish(oneTimeCount: Int = 20): Int? {
+        val bytes = bundleBody(prekeys, oneTimeCount, deviceId = null)
+        val resp = http.postJson("/v2/keys/publish", bytes)
+        if (!resp.isSuccess) return null
+        prekeys.markPublished()
+        return runCatching { JSONObject(resp.body).optInt("remaining", oneTimeCount) }.getOrNull() ?: oneTimeCount
+    }
+
+    /**
+     * __PER_DEVICE_MAILBOX_2026_09_23__ Publish THIS DEVICE's bundle (CLIENT_SPEC.md §3.2
+     * step 4): the same body as the account bundle plus `deviceId`, from this install's own
+     * signed pre-key and one-time pre-keys ([devicePrekeys], a separate vault entry), sent
+     * account-signed AND device-signed. It never touches the account bundle server-side.
+     */
+    fun publishDevice(deviceId: String, devicePrekeys: PrekeyStore, oneTimeCount: Int): V2DeviceCall<Int> {
+        val bytes = bundleBody(devicePrekeys, oneTimeCount, deviceId)
+        val resp = http.postJson("/v2/keys/publish", bytes, device = true)
+        if (!resp.isSuccess) return V2DeviceCall(resp.code, null, resp.body)
+        devicePrekeys.markPublished()
+        return V2DeviceCall(resp.code, runCatching { JSONObject(resp.body).optInt("remaining", oneTimeCount) }.getOrDefault(oneTimeCount), resp.body)
+    }
+
+    /** One-time pre-keys the server still holds for [deviceId]'s bundle. Null on failure. */
+    fun deviceRemainingCount(deviceId: String): Int? {
+        val path = "/v2/keys/${DesktopV2Signer.encodeIdentity(identity.userKey)}/count"
+        val resp = http.get(path, query = "device=$deviceId")
+        if (!resp.isSuccess) return null
+        return runCatching { JSONObject(resp.body).optInt("remaining", 0) }.getOrNull()
+    }
+
+    /**
+     * `GET /v2/keys/<peer>/devices` → the peer's devices holding a bundle. Null = the request
+     * failed (NOT "no devices": a caller that conflated them would send one account envelope
+     * to a peer whose devices then never see it). `enabled:false` ⇒ empty list.
+     */
+    fun peerDevices(peerUserKey: String): List<String>? {
+        val resp = http.get("/v2/keys/${DesktopV2Signer.encodeIdentity(peerUserKey)}/devices")
+        if (!resp.isSuccess) return null
+        // __ACCOUNT_CAPS_IN_DEVICE_LIST_2026_11_10__ shared rule (V2Padding.kt): accountCaps + device caps.
+        com.oshi.messenger.network.v2.V2PaddingPeers.learnFromDeviceList(peerUserKey, resp.body)
+        runCatching { notePeerCapsFromDeviceList(peerUserKey, resp.body) }
+        return runCatching {
+            val o = JSONObject(resp.body)
+            if (!o.optBoolean("enabled", false)) return emptyList()
+            val a = o.optJSONArray("devices") ?: JSONArray()
+            (0 until a.length()).mapNotNull { i -> a.optJSONObject(i)?.optString("deviceId")?.takeIf(DeviceAuth::isDeviceId) }
+        }.getOrNull()
+    }
+
+    /**
+     * One device's bundle (`?device=`), verified exactly like the account bundle: the SPK
+     * signature, and TOFU — the identity key must be the address asked for. Pops one of that
+     * device's one-time pre-keys. Null = no usable bundle for that device (treat it as stale).
+     */
+    fun fetchDeviceBundle(peerUserKey: String, deviceId: String): FetchedBundle? {
+        val path = "/v2/keys/${DesktopV2Signer.encodeIdentity(peerUserKey)}"
+        val resp = http.get(path, query = "device=$deviceId")
+        if (!resp.isSuccess) return null
+        return parseBundle(resp.body, peerUserKey, deviceId)?.takeIf {
+            runCatching { JSONObject(resp.body).optString("deviceId") }.getOrNull() == deviceId
+        }
+    }
+
+    /**
+     * The account bundle's live signed pre-key, as the server hands it out. Used to decide
+     * whether THIS install is the one whose account generation is live (`holdsAccountBundle`)
+     * before it publishes over it. NOTE it pops one account one-time pre-key, so callers
+     * throttle it.
+     */
+    sealed class LiveSpk {
+        object None : LiveSpk()                      // 404: nobody publishes an account bundle
+        data class Key(val keyB64: String) : LiveSpk()
+        object Unknown : LiveSpk()                   // could not ask
+    }
+
+    fun liveAccountSignedPreKey(): LiveSpk {
+        val resp = http.get("/v2/keys/${DesktopV2Signer.encodeIdentity(identity.userKey)}")
+        if (resp.code == 404) return LiveSpk.None
+        if (!resp.isSuccess) return LiveSpk.Unknown
+        return runCatching { LiveSpk.Key(JSONObject(resp.body).getJSONObject("signedPreKey").getString("key")) as LiveSpk }
+            .getOrDefault(LiveSpk.Unknown)
+    }
+
+    private fun bundleBody(prekeys: PrekeyStore, oneTimeCount: Int, deviceId: String?): ByteArray {
         val spk = prekeys.currentSignedPreKey()
         val body = JSONObject().apply {
             put("userKey", identity.userKey)
@@ -55,21 +144,77 @@ class V2KeysClient(
                     put(JSONObject().apply { put("keyId", id); put("key", b64(pub)) })
                 }
             })
+            deviceId?.let { put("deviceId", it) }
+            // __LEGACY_COMPAT_2026_09_23__ "reads v2 groups": phones skip the legacy group copy for us.
+            // __V2_PADDING_2026_11_09__ + "strips v2 plaintext padding".
+            put("caps", V2ConfigGate.MY_CAPS)
         }
-        val bytes = body.toString().toByteArray(Charsets.UTF_8)
-        val resp = http.postJson("/v2/keys/publish", bytes)
-        if (!resp.isSuccess) return null
-        prekeys.markPublished()
-        return runCatching { JSONObject(resp.body).optInt("remaining", oneTimeCount) }.getOrNull() ?: oneTimeCount
+        return body.toString().toByteArray(Charsets.UTF_8)
     }
 
-    /** Fetch a peer's bundle, verified. Null means "do not start a V2 session with them". */
-    fun fetchBundle(peerUserKey: String): FetchedBundle? {
+    /**
+     * The three answers `/v2/keys/<peer>` can give, kept apart.
+     *
+     * __NO_BUNDLE_IS_NOT_A_TIMEOUT_2026_11_02__ [fetchBundle] collapses them to
+     * `null`, and a caller that turns `null` into a sentence shown to a user
+     * ends up writing **"<name> must update OSHI"** about somebody whose only
+     * crime was that the relay did not answer in time. That is not theoretical:
+     * the production relay was rewriting a 347 MB state file on every message,
+     * so `/v2/keys` timed out constantly, and a user reported the group naming
+     * all five of its members when every one of them was up to date.
+     *
+     * [Missing] — the server answered 404 — is the ONLY one that may be shown.
+     */
+    sealed interface BundleFetch {
+        data class Found(val bundle: FetchedBundle) : BundleFetch
+        /** The server answered, and it holds no bundle for this key. */
+        data object Missing : BundleFetch
+        /** Transient: no network, a 5xx, a timeout, or an unusable body. */
+        data object Unknown : BundleFetch
+    }
+
+    /** Fetch a peer's bundle, keeping "there is none" apart from "I could not ask". */
+    fun fetchBundleOutcome(peerUserKey: String): BundleFetch {
         val path = "/v2/keys/${DesktopV2Signer.encodeIdentity(peerUserKey)}"
         val resp = http.get(path)
-        if (!resp.isSuccess) return null
+        if (resp.code == 404) return BundleFetch.Missing
+        if (!resp.isSuccess) return BundleFetch.Unknown
+        // A body we cannot verify is Unknown, never Missing: the peer may be
+        // perfectly current and the server may be the thing at fault.
+        return parseBundle(resp.body, peerUserKey)?.let { BundleFetch.Found(it) } ?: BundleFetch.Unknown
+    }
+
+    /**
+     * Fetch a peer's bundle, verified. Null means "do not start a V2 session
+     * with them" — and says nothing about WHY, so anything that turns the
+     * answer into words for a user must call [fetchBundleOutcome] instead.
+     */
+    fun fetchBundle(peerUserKey: String): FetchedBundle? =
+        (fetchBundleOutcome(peerUserKey) as? BundleFetch.Found)?.bundle
+
+    /** @param deviceId the device whose bundle this is, null for the account bundle. */
+    /**
+     * __ADV_CHAT_PRIVACY_2026_11_26__ `accountCaps` and every listed device's `caps`, ANDed: a
+     * bit counts for the peer only when every install we know of announces it. A payload sent to
+     * a peer whose OTHER install is an old build would print as raw JSON there, so the
+     * conservative reading is the one that costs nothing visible.
+     */
+    private fun notePeerCapsFromDeviceList(peerUserKey: String, body: String?) {
+        val o = JSONObject(body ?: return)
+        var merged: Int? = null
+        if (o.has("accountCaps") && !o.isNull("accountCaps")) o.optInt("accountCaps", -1).takeIf { it >= 0 }?.let { merged = it }
+        o.optJSONArray("devices")?.let { a ->
+            for (i in 0 until a.length()) {
+                val d = a.optJSONObject(i) ?: continue
+                if (d.has("caps") && !d.isNull("caps")) merged = (merged ?: -1) and d.optInt("caps", 0)
+            }
+        }
+        if (merged != null) onPeerCaps(peerUserKey, merged)
+    }
+
+    private fun parseBundle(body: String, peerUserKey: String, deviceId: String? = null): FetchedBundle? {
         return try {
-            val json = JSONObject(resp.body)
+            val json = JSONObject(body)
             val identityKey = unb64(json.getString("identityKey"))
             val signingKey = unb64(json.getString("signingKey"))
             val spk = json.getJSONObject("signedPreKey")
@@ -80,6 +225,9 @@ class V2KeysClient(
             if (b64(identityKey) != peerUserKey) return null      // TOFU, exact string
 
             val opk = json.optJSONObject("oneTimePreKey")
+            // __V2_PADDING_2026_11_09__ the session slot this bundle builds (absent caps ⇒ not capable).
+            V2PaddingPeers.noteBundle(peerUserKey, deviceId, if (json.has("caps")) json.optInt("caps", 0) else null)
+            if (json.has("caps")) runCatching { onPeerCaps(peerUserKey, json.optInt("caps", 0)) }
             FetchedBundle(
                 identityKey = identityKey,
                 signingKey = signingKey,

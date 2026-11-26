@@ -337,8 +337,8 @@ class MediaViewerTest {
     fun `a French machine does not get a comma inside an English sentence`() {
         // This is not hypothetical: the first run of this suite was on a fr_FR machine and
         // printed "1,0 KB" and "2,5 megapixels" in otherwise English text, which also made
-        // the ceiling the message states unsearchable. The window is not localised at all
-        // (PARITY.md row 1.5), so its numbers must not be either.
+        // the ceiling the message states unsearchable. This media viewer's prose remains
+        // desktop-only English (PARITY.md row 1.5), so its numbers must not be either.
         val was = java.util.Locale.getDefault()
         try {
             java.util.Locale.setDefault(java.util.Locale.FRANCE)

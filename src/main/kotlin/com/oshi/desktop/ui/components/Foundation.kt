@@ -20,7 +20,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -63,13 +65,27 @@ import com.oshi.desktop.ui.OshiTheme
  * (`OshiTheme.textSecondary` is still correct as a token — it is what the phone resolves —
  * and nothing here changes it.)
  */
-object Ink {
-    val strong: Color = OshiTheme.textPrimary
-    val soft: Color = OshiTheme.textPrimary.copy(alpha = 0.60f)
+/**
+ * __GLASS_HOVER_ALPHA_2026_11_21__ [this] at no more than [alpha] — never MORE opaque than the
+ * token already is. `copy(alpha = x)` SETS the alpha, and the glass palettes' `surface` and every
+ * palette's `separator` are already translucent (Light glass `surface` = 7 % indigo, OLED = 8 %
+ * white): `surface.copy(alpha = 0.6f)` made a settings row's hover a 60 % slate slab in Light
+ * glass and a 60 % white slab in Extra dark (seen in the running app, 21/11). On an opaque token
+ * (flat Light/Dark `surface`) this is exactly `copy(alpha = x)`.
+ */
+fun Color.atMostAlpha(alpha: Float): Color = if (this.alpha <= alpha) this else copy(alpha = alpha)
 
-    /** On the brand-filled outgoing bubble. White on `#5616EC` measures 7.74:1. */
-    val onBrandStrong: Color = OshiTheme.bubbleOutgoingText
-    val onBrandSoft: Color = OshiTheme.bubbleOutgoingText.copy(alpha = 0.78f)
+object Ink {
+    // Getters, not stored values (__OLED_BLACK_2026_11_16__): the palette changes at runtime,
+    // and a `val` captured at class-init would keep painting black text on a black window.
+    val strong: Color get() = OshiTheme.textPrimary
+    val soft: Color get() = OshiTheme.textPrimary.copy(alpha = 0.60f)
+
+    /** On a brand-FILLED surface (buttons, badges). White on `#5616EC` measures 7.74:1. */
+    // __BUBBLE_MEDIA_2026_11_21__ No longer read from the outgoing bubble's text colour, which
+    // is near-black in Light now; brand fills keep white.
+    val onBrandStrong: Color = Color.White
+    val onBrandSoft: Color = Color.White.copy(alpha = 0.78f)
 }
 
 /**
@@ -85,7 +101,9 @@ object Metrics {
     val hairline = 1.dp
 
     /** `MessagesListView` caps its content at 700pt; a desktop sidebar wants a fixed column. */
-    val sidebar = 344.dp
+    // __DESKTOP_1_6_PARITY__ 344 → 360: the four filter chips fit on one line in English
+    // and French (measured, ConversationListPane.MergedFilterChips) and previews show more.
+    val sidebar = 360.dp
 
     /** `ConversationRow`: 44×44. */
     val avatarList = 44.dp
@@ -110,6 +128,15 @@ object Metrics {
     /** Send is a 44pt circle on the phone; 40 reads right against a desktop text field. */
     val sendButton = 40.dp
 
+    /**
+     * __COMPOSER_PILL_2026_11_23__ The chat composer pill and the round mic/send beside it.
+     * 56dp on Android; 44 sits right next to a 36dp glyph button and the desktop's type size.
+     */
+    val composerPill = 44.dp
+
+    /** Inset of the pill's content: (44 − 36) / 2, so a 36dp glyph button sits centred on one line. */
+    val composerPillInset = 4.dp
+
     /** The visible keyboard-focus ring. Two points is what stays visible on a hairline row. */
     val focusRing = 2.dp
 
@@ -132,11 +159,16 @@ fun Hairline(modifier: Modifier = Modifier, inset: Dp = 0.dp) {
 /**
  * The circular gradient monogram from the capture.
  *
- * `OshiTheme.avatarBrush` derives the hue from the address, so the same peer is the same
- * colour on every launch and on every machine with nothing stored. The shipped app indexes a
- * six-entry palette by `publicKey.hashValue.magnitude % 6`; `hashValue` is salted per process
- * on Apple platforms, so that palette is stable within a launch and not across them. The
- * theme's function is the deterministic version of the same idea and is what this draws.
+ * `OshiTheme.avatarBrush` derives the colour from the address, so the same peer is the same
+ * colour on every launch, on every machine — and, since
+ * `__ONE_AVATAR_NOT_THREE_2026_11_07__`, on every PLATFORM: it is the same
+ * palette and the same slot the iPhone and Android apps use (v2: SHA-256, sixteen soft
+ * gradients, `docs/avatar-palette.json`), pinned by shared test vectors in `AvatarParityTest`.
+ *
+ * (The text here used to say the shipped app indexed "a six-entry palette by
+ * `publicKey.hashValue.magnitude % 6`", salted per process. That was true of a version of
+ * iOS two revisions old and had quietly stopped being true. A note describing another
+ * platform is not a check of it — this one was wrong for weeks.)
  *
  * There is no profile photo here and there is not going to be one: PARITY.md row 0.18 records
  * that an Android peer's picture rides the legacy lane and never arrives.
@@ -148,12 +180,26 @@ fun Monogram(
     size: Dp = Metrics.avatarList,
     modifier: Modifier = Modifier,
 ) {
-    val brush = remember(address) { OshiTheme.avatarBrush(address) }
+    val entry = remember(address) { OshiTheme.avatarEntry(address) }
     val text = remember(name, address) { OshiTheme.monogram(name, address) }
-    Box(modifier.size(size).clip(CircleShape).background(brush), contentAlignment = Alignment.Center) {
+    // __AVATAR_PALETTE_V2_2026_11_17__ the diagonal gradient plus the soft top-left light
+    // blob, brushes built once per size by drawWithCache; the slot's own ink.
+    val fill = Modifier.drawWithCache {
+        val linear = Brush.linearGradient(listOf(entry.start, entry.end), Offset.Zero, Offset(this.size.width, this.size.height))
+        val light = Brush.radialGradient(
+            listOf(Color.White.copy(alpha = OshiTheme.AVATAR_HIGHLIGHT_ALPHA), Color.White.copy(alpha = 0f)),
+            center = Offset(this.size.width * OshiTheme.AVATAR_HIGHLIGHT_X, this.size.height * OshiTheme.AVATAR_HIGHLIGHT_Y),
+            radius = this.size.minDimension * OshiTheme.AVATAR_HIGHLIGHT_RADIUS,
+        )
+        onDrawBehind {
+            drawCircle(linear)
+            drawCircle(light)
+        }
+    }
+    Box(modifier.size(size).clip(CircleShape).then(fill), contentAlignment = Alignment.Center) {
         Text(
             text,
-            color = Color.White,
+            color = entry.ink,
             fontSize = (size.value * 0.36f).sp,
             fontWeight = FontWeight.SemiBold,
             textAlign = TextAlign.Center,
@@ -228,11 +274,25 @@ fun Modifier.focusRing(shape: Shape): Modifier {
  *
  * **There is no phone and no video glyph in this enum and there must never be one.** The
  * shipped `ChatView` has a four-button action bar with `phone.fill` and `video.fill` in it;
- * PARITY.md row 2.1 is unambiguous that no audio flows on this client, so those two buttons
- * are the one part of that screen this window deliberately does not port. See
+ * PARITY.md row 2.1 records only loopback proof for the opt-in audio lane, with no TURN and
+ * no real-device call. Those two buttons are therefore the one part of that screen this
+ * window deliberately does not port. See
  * `DesktopLimits.MISSING`.
  */
-enum class Glyph { SEARCH, PLUS, ARROW_UP, CHEVRON_RIGHT, CHECK, DOUBLE_CHECK, CLOCK, ALERT, LOCK, PALETTE, EYE_SLASH, FILE, CLOSE, COPY }
+/** __RTL_2027__ glyphs whose meaning has a direction, flipped in RTL by [GlyphIcon]. */
+private val DIRECTIONAL_GLYPHS = setOf(Glyph.CHEVRON_RIGHT, Glyph.REPLY, Glyph.FORWARD, Glyph.LEAVE)
+
+enum class Glyph {
+    SEARCH, PLUS, ARROW_UP, CHEVRON_RIGHT, CHECK, DOUBLE_CHECK, CLOCK, ALERT, LOCK, PALETTE, EYE_SLASH, FILE, CLOSE, COPY,
+    // __ATTACH_PANEL_2027__ / __MERGED_CHATS_2026_11_18__ the "+" panel tiles and the "New…" menu.
+    PEOPLE, PERSON, IMAGE, POLL, CAMERA, MIC, QR, MASK, COMPOSE,
+    // __THREAD_CHROME_2027__ the conversation header's overflow menu and the message hover toolbar.
+    MORE, REPLY, FORWARD, PIN, SMILE, TRASH, INFO, BELL, BELL_SLASH, BLOCK, FLAG, LEAVE, PENCIL, LINK, TEXT_LINES,
+    // __DESKTOP_1_6_PARITY__ a place (location ping), the safety check-in, a video file.
+    MAP_PIN, HEART, VIDEO,
+    // __CHANNEL_WEB_2026_11_26__ a post's / a channel's public web copy.
+    GLOBE,
+}
 
 @Composable
 fun GlyphIcon(
@@ -241,7 +301,11 @@ fun GlyphIcon(
     size: Dp = 18.dp,
     modifier: Modifier = Modifier,
 ) {
-    Canvas(modifier.size(size)) {
+    // __RTL_2027__ Arrows that point "forward" or "back" are mirrored in a right-to-left
+    // window, like SF Symbols and Material icons do; symmetric glyphs are left alone.
+    val mirror = glyph in DIRECTIONAL_GLYPHS &&
+        androidx.compose.ui.platform.LocalLayoutDirection.current == androidx.compose.ui.unit.LayoutDirection.Rtl
+    Canvas(modifier.size(size).then(if (mirror) Modifier.graphicsLayer(scaleX = -1f) else Modifier)) {
         val s = this.size.minDimension
         val w = s * 0.085f
         val stroke = Stroke(width = w, cap = StrokeCap.Round, join = StrokeJoin.Round)
@@ -322,9 +386,190 @@ fun GlyphIcon(
                 drawLine(tint, p(0.24f, 0.24f), p(0.76f, 0.76f), strokeWidth = w, cap = StrokeCap.Round)
                 drawLine(tint, p(0.76f, 0.24f), p(0.24f, 0.76f), strokeWidth = w, cap = StrokeCap.Round)
             }
+            Glyph.PERSON -> {
+                drawCircle(tint, radius = s * 0.16f, center = p(0.5f, 0.34f), style = stroke)
+                drawPath(Path().apply {
+                    moveTo(0.20f * s, 0.84f * s); cubicTo(0.22f * s, 0.58f * s, 0.78f * s, 0.58f * s, 0.80f * s, 0.84f * s)
+                }, tint, style = stroke)
+            }
+            Glyph.PEOPLE -> {
+                drawCircle(tint, radius = s * 0.13f, center = p(0.38f, 0.36f), style = stroke)
+                drawPath(Path().apply {
+                    moveTo(0.12f * s, 0.82f * s); cubicTo(0.14f * s, 0.60f * s, 0.62f * s, 0.60f * s, 0.64f * s, 0.82f * s)
+                }, tint, style = stroke)
+                drawCircle(tint, radius = s * 0.11f, center = p(0.68f, 0.30f), style = stroke)
+                drawPath(Path().apply {
+                    moveTo(0.70f * s, 0.54f * s); cubicTo(0.82f * s, 0.55f * s, 0.88f * s, 0.62f * s, 0.90f * s, 0.74f * s)
+                }, tint, style = stroke)
+            }
+            Glyph.IMAGE -> {
+                drawRoundRect(tint, topLeft = p(0.14f, 0.20f), size = Size(s * 0.72f, s * 0.60f), cornerRadius = CornerRadius(s * 0.10f), style = stroke)
+                drawCircle(tint, radius = s * 0.07f, center = p(0.36f, 0.40f))
+                drawPath(Path().apply {
+                    moveTo(0.18f * s, 0.74f * s); lineTo(0.42f * s, 0.54f * s); lineTo(0.56f * s, 0.66f * s)
+                    lineTo(0.66f * s, 0.56f * s); lineTo(0.82f * s, 0.72f * s)
+                }, tint, style = stroke)
+            }
+            Glyph.POLL -> {
+                drawLine(tint, p(0.24f, 0.30f), p(0.76f, 0.30f), strokeWidth = w * 1.4f, cap = StrokeCap.Round)
+                drawLine(tint, p(0.24f, 0.50f), p(0.56f, 0.50f), strokeWidth = w * 1.4f, cap = StrokeCap.Round)
+                drawLine(tint, p(0.24f, 0.70f), p(0.66f, 0.70f), strokeWidth = w * 1.4f, cap = StrokeCap.Round)
+            }
+            Glyph.CAMERA -> {
+                drawRoundRect(tint, topLeft = p(0.12f, 0.30f), size = Size(s * 0.54f, s * 0.42f), cornerRadius = CornerRadius(s * 0.08f), style = stroke)
+                drawPath(Path().apply {
+                    moveTo(0.66f * s, 0.44f * s); lineTo(0.88f * s, 0.32f * s); lineTo(0.88f * s, 0.70f * s); lineTo(0.66f * s, 0.58f * s)
+                }, tint, style = stroke)
+            }
+            Glyph.MIC -> {
+                drawRoundRect(tint, topLeft = p(0.38f, 0.12f), size = Size(s * 0.24f, s * 0.44f), cornerRadius = CornerRadius(s * 0.12f), style = stroke)
+                drawPath(Path().apply {
+                    moveTo(0.26f * s, 0.46f * s); cubicTo(0.26f * s, 0.74f * s, 0.74f * s, 0.74f * s, 0.74f * s, 0.46f * s)
+                }, tint, style = stroke)
+                drawLine(tint, p(0.5f, 0.70f), p(0.5f, 0.86f), strokeWidth = w, cap = StrokeCap.Round)
+            }
+            Glyph.QR -> {
+                for ((x, y) in listOf(0.16f to 0.16f, 0.58f to 0.16f, 0.16f to 0.58f)) {
+                    drawRoundRect(tint, topLeft = p(x, y), size = Size(s * 0.26f, s * 0.26f), cornerRadius = CornerRadius(s * 0.04f), style = stroke)
+                }
+                drawCircle(tint, radius = w * 0.8f, center = p(0.66f, 0.66f))
+                drawCircle(tint, radius = w * 0.8f, center = p(0.82f, 0.82f))
+                drawCircle(tint, radius = w * 0.8f, center = p(0.82f, 0.62f))
+            }
+            Glyph.MASK -> {
+                // A photo frame with a lock in it: "Disguise as photo".
+                drawRoundRect(tint, topLeft = p(0.12f, 0.18f), size = Size(s * 0.76f, s * 0.64f), cornerRadius = CornerRadius(s * 0.10f), style = stroke)
+                drawRoundRect(tint, topLeft = p(0.38f, 0.48f), size = Size(s * 0.24f, s * 0.18f), cornerRadius = CornerRadius(s * 0.04f))
+                drawPath(Path().apply {
+                    moveTo(0.43f * s, 0.48f * s); lineTo(0.43f * s, 0.42f * s)
+                    cubicTo(0.43f * s, 0.32f * s, 0.57f * s, 0.32f * s, 0.57f * s, 0.42f * s); lineTo(0.57f * s, 0.48f * s)
+                }, tint, style = stroke)
+            }
+            Glyph.COMPOSE -> {
+                drawRoundRect(tint, topLeft = p(0.14f, 0.20f), size = Size(s * 0.62f, s * 0.66f), cornerRadius = CornerRadius(s * 0.10f), style = stroke)
+                drawLine(tint, p(0.46f, 0.54f), p(0.84f, 0.16f), strokeWidth = w, cap = StrokeCap.Round)
+            }
+            Glyph.MORE -> {
+                for (x in listOf(0.24f, 0.5f, 0.76f)) drawCircle(tint, radius = w * 0.95f, center = p(x, 0.5f))
+            }
+            Glyph.REPLY -> {
+                drawPath(Path().apply { moveTo(0.40f * s, 0.24f * s); lineTo(0.16f * s, 0.46f * s); lineTo(0.40f * s, 0.68f * s) }, tint, style = stroke)
+                drawPath(Path().apply {
+                    moveTo(0.18f * s, 0.46f * s); lineTo(0.56f * s, 0.46f * s)
+                    cubicTo(0.76f * s, 0.46f * s, 0.86f * s, 0.58f * s, 0.86f * s, 0.80f * s)
+                }, tint, style = stroke)
+            }
+            Glyph.FORWARD -> {
+                drawPath(Path().apply { moveTo(0.60f * s, 0.24f * s); lineTo(0.84f * s, 0.46f * s); lineTo(0.60f * s, 0.68f * s) }, tint, style = stroke)
+                drawPath(Path().apply {
+                    moveTo(0.82f * s, 0.46f * s); lineTo(0.44f * s, 0.46f * s)
+                    cubicTo(0.24f * s, 0.46f * s, 0.14f * s, 0.58f * s, 0.14f * s, 0.80f * s)
+                }, tint, style = stroke)
+            }
+            Glyph.PIN -> {
+                drawPath(Path().apply {
+                    moveTo(0.36f * s, 0.14f * s); lineTo(0.64f * s, 0.14f * s); lineTo(0.60f * s, 0.40f * s)
+                    lineTo(0.74f * s, 0.56f * s); lineTo(0.26f * s, 0.56f * s); lineTo(0.40f * s, 0.40f * s); close()
+                }, tint, style = stroke)
+                drawLine(tint, p(0.5f, 0.56f), p(0.5f, 0.88f), strokeWidth = w, cap = StrokeCap.Round)
+            }
+            Glyph.SMILE -> {
+                drawCircle(tint, radius = s * 0.38f, center = p(0.5f, 0.5f), style = stroke)
+                drawCircle(tint, radius = w * 0.75f, center = p(0.37f, 0.42f))
+                drawCircle(tint, radius = w * 0.75f, center = p(0.63f, 0.42f))
+                drawArc(tint, 25f, 130f, false, topLeft = p(0.32f, 0.38f), size = Size(s * 0.36f, s * 0.28f), style = stroke)
+            }
+            Glyph.TRASH -> {
+                drawLine(tint, p(0.18f, 0.26f), p(0.82f, 0.26f), strokeWidth = w, cap = StrokeCap.Round)
+                drawPath(Path().apply { moveTo(0.40f * s, 0.26f * s); lineTo(0.40f * s, 0.16f * s); lineTo(0.60f * s, 0.16f * s); lineTo(0.60f * s, 0.26f * s) }, tint, style = stroke)
+                drawPath(Path().apply { moveTo(0.26f * s, 0.26f * s); lineTo(0.30f * s, 0.86f * s); lineTo(0.70f * s, 0.86f * s); lineTo(0.74f * s, 0.26f * s) }, tint, style = stroke)
+                drawLine(tint, p(0.44f, 0.42f), p(0.44f, 0.72f), strokeWidth = w * 0.8f, cap = StrokeCap.Round)
+                drawLine(tint, p(0.56f, 0.42f), p(0.56f, 0.72f), strokeWidth = w * 0.8f, cap = StrokeCap.Round)
+            }
+            Glyph.INFO -> {
+                drawCircle(tint, radius = s * 0.40f, center = p(0.5f, 0.5f), style = stroke)
+                drawLine(tint, p(0.5f, 0.46f), p(0.5f, 0.74f), strokeWidth = w, cap = StrokeCap.Round)
+                drawCircle(tint, radius = w * 0.62f, center = p(0.5f, 0.30f))
+            }
+            Glyph.BELL, Glyph.BELL_SLASH -> {
+                drawPath(Path().apply {
+                    moveTo(0.20f * s, 0.72f * s); lineTo(0.28f * s, 0.60f * s); lineTo(0.28f * s, 0.44f * s)
+                    cubicTo(0.28f * s, 0.18f * s, 0.72f * s, 0.18f * s, 0.72f * s, 0.44f * s)
+                    lineTo(0.72f * s, 0.60f * s); lineTo(0.80f * s, 0.72f * s); close()
+                }, tint, style = stroke)
+                drawLine(tint, p(0.43f, 0.84f), p(0.57f, 0.84f), strokeWidth = w, cap = StrokeCap.Round)
+                if (glyph == Glyph.BELL_SLASH) drawLine(tint, p(0.14f, 0.14f), p(0.86f, 0.86f), strokeWidth = w, cap = StrokeCap.Round)
+            }
+            Glyph.BLOCK -> {
+                drawCircle(tint, radius = s * 0.38f, center = p(0.5f, 0.5f), style = stroke)
+                drawLine(tint, p(0.24f, 0.76f), p(0.76f, 0.24f), strokeWidth = w, cap = StrokeCap.Round)
+            }
+            Glyph.FLAG -> {
+                drawLine(tint, p(0.24f, 0.14f), p(0.24f, 0.88f), strokeWidth = w, cap = StrokeCap.Round)
+                drawPath(Path().apply {
+                    moveTo(0.24f * s, 0.18f * s); lineTo(0.78f * s, 0.18f * s); lineTo(0.66f * s, 0.36f * s)
+                    lineTo(0.78f * s, 0.54f * s); lineTo(0.24f * s, 0.54f * s)
+                }, tint, style = stroke)
+            }
+            Glyph.LEAVE -> {
+                drawPath(Path().apply {
+                    moveTo(0.50f * s, 0.16f * s); lineTo(0.20f * s, 0.16f * s); lineTo(0.20f * s, 0.84f * s); lineTo(0.50f * s, 0.84f * s)
+                }, tint, style = stroke)
+                drawLine(tint, p(0.40f, 0.50f), p(0.86f, 0.50f), strokeWidth = w, cap = StrokeCap.Round)
+                drawPath(Path().apply { moveTo(0.70f * s, 0.34f * s); lineTo(0.86f * s, 0.50f * s); lineTo(0.70f * s, 0.66f * s) }, tint, style = stroke)
+            }
+            Glyph.PENCIL -> {
+                drawPath(Path().apply {
+                    moveTo(0.18f * s, 0.82f * s); lineTo(0.22f * s, 0.64f * s); lineTo(0.66f * s, 0.20f * s)
+                    lineTo(0.80f * s, 0.34f * s); lineTo(0.36f * s, 0.78f * s); close()
+                }, tint, style = stroke)
+                drawLine(tint, p(0.56f, 0.30f), p(0.70f, 0.44f), strokeWidth = w, cap = StrokeCap.Round)
+            }
+            Glyph.LINK -> {
+                drawRoundRect(tint, topLeft = p(0.10f, 0.36f), size = Size(s * 0.44f, s * 0.28f), cornerRadius = CornerRadius(s * 0.14f), style = stroke)
+                drawRoundRect(tint, topLeft = p(0.46f, 0.36f), size = Size(s * 0.44f, s * 0.28f), cornerRadius = CornerRadius(s * 0.14f), style = stroke)
+            }
+            Glyph.TEXT_LINES -> {
+                drawLine(tint, p(0.18f, 0.28f), p(0.82f, 0.28f), strokeWidth = w, cap = StrokeCap.Round)
+                drawLine(tint, p(0.18f, 0.46f), p(0.82f, 0.46f), strokeWidth = w, cap = StrokeCap.Round)
+                drawLine(tint, p(0.18f, 0.64f), p(0.82f, 0.64f), strokeWidth = w, cap = StrokeCap.Round)
+                drawLine(tint, p(0.18f, 0.82f), p(0.56f, 0.82f), strokeWidth = w, cap = StrokeCap.Round)
+            }
             Glyph.COPY -> {
                 drawRoundRect(tint, topLeft = p(0.16f, 0.16f), size = Size(s * 0.46f, s * 0.46f), cornerRadius = CornerRadius(s * 0.08f), style = stroke)
                 drawRoundRect(tint, topLeft = p(0.38f, 0.38f), size = Size(s * 0.46f, s * 0.46f), cornerRadius = CornerRadius(s * 0.08f), style = stroke)
+            }
+            Glyph.MAP_PIN -> {
+                drawPath(Path().apply {
+                    moveTo(0.5f * s, 0.90f * s)
+                    cubicTo(0.30f * s, 0.66f * s, 0.20f * s, 0.52f * s, 0.20f * s, 0.40f * s)
+                    cubicTo(0.20f * s, 0.22f * s, 0.34f * s, 0.10f * s, 0.5f * s, 0.10f * s)
+                    cubicTo(0.66f * s, 0.10f * s, 0.80f * s, 0.22f * s, 0.80f * s, 0.40f * s)
+                    cubicTo(0.80f * s, 0.52f * s, 0.70f * s, 0.66f * s, 0.5f * s, 0.90f * s); close()
+                }, tint, style = stroke)
+                drawCircle(tint, radius = s * 0.10f, center = p(0.5f, 0.40f), style = stroke)
+            }
+            Glyph.HEART -> {
+                drawPath(Path().apply {
+                    moveTo(0.5f * s, 0.84f * s)
+                    cubicTo(0.20f * s, 0.62f * s, 0.12f * s, 0.46f * s, 0.12f * s, 0.34f * s)
+                    cubicTo(0.12f * s, 0.20f * s, 0.24f * s, 0.14f * s, 0.33f * s, 0.14f * s)
+                    cubicTo(0.42f * s, 0.14f * s, 0.48f * s, 0.20f * s, 0.5f * s, 0.26f * s)
+                    cubicTo(0.52f * s, 0.20f * s, 0.58f * s, 0.14f * s, 0.67f * s, 0.14f * s)
+                    cubicTo(0.76f * s, 0.14f * s, 0.88f * s, 0.20f * s, 0.88f * s, 0.34f * s)
+                    cubicTo(0.88f * s, 0.46f * s, 0.80f * s, 0.62f * s, 0.5f * s, 0.84f * s); close()
+                }, tint, style = stroke)
+            }
+            Glyph.VIDEO -> {
+                drawRoundRect(tint, topLeft = p(0.10f, 0.28f), size = Size(s * 0.56f, s * 0.44f), cornerRadius = CornerRadius(s * 0.08f), style = stroke)
+                drawPath(Path().apply { moveTo(0.66f * s, 0.44f * s); lineTo(0.90f * s, 0.30f * s); lineTo(0.90f * s, 0.70f * s); lineTo(0.66f * s, 0.56f * s) }, tint, style = stroke)
+            }
+            Glyph.GLOBE -> {
+                drawCircle(tint, radius = s * 0.40f, center = p(0.5f, 0.5f), style = stroke)
+                drawOval(tint, topLeft = p(0.32f, 0.10f), size = Size(s * 0.36f, s * 0.80f), style = stroke)
+                drawLine(tint, p(0.10f, 0.5f), p(0.90f, 0.5f), strokeWidth = w, cap = StrokeCap.Round)
+                drawLine(tint, p(0.18f, 0.30f), p(0.82f, 0.30f), strokeWidth = w * 0.8f, cap = StrokeCap.Round)
+                drawLine(tint, p(0.18f, 0.70f), p(0.82f, 0.70f), strokeWidth = w * 0.8f, cap = StrokeCap.Round)
             }
         }
     }

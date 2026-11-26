@@ -1,0 +1,9 @@
+{
+  "pc.bot.commands": "Lệnh",
+  "pc.bot.add_command": "Thêm lệnh",
+  "pc.bot.command_rule": "1–32 ký tự: chữ thường, chữ số và _",
+  "pc.bot.duplicate": "Lệnh này đã có trong danh sách",
+  "pc.bot.publish": "Đăng lên máy chủ OSHI",
+  "pc.bot.published": "Các lệnh đã hoạt động trong nhóm của bot",
+  "pc.bot.publish_failed": "Không thể đăng: %@"
+}

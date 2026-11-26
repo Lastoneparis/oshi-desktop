@@ -9,10 +9,28 @@ import org.json.JSONObject
 import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
+import java.io.OutputStream
 import java.time.Duration
 
 /** `POST /v2/blobs` response — iOS `V2.ReserveResult`, Android `V2Reservation`. */
-data class V2Reservation(val blobId: String, val chunkSize: Int, val missing: List<Int>)
+data class V2Reservation(
+    val blobId: String,
+    val chunkSize: Int,
+    val missing: List<Int>,
+    /**
+     * __GROUP_BLOB_2026_11_25__ `recipients: N` echoed by a blob store that stored the
+     * reservation's recipient LIST (ServerPatches/group_blob_2026_11_25). Null = an older server,
+     * which only authorised the single `recipientKey`.
+     */
+    val recipients: Int? = null,
+)
+
+/**
+ * __GROUP_BLOB_2026_11_25__ Result of [V2BlobClient.uploadGroupBlob]. [shared] = every listed
+ * member may fetch [blobId]; false = an older server, [blobId] serves ONLY the first member.
+ */
+data class V2GroupUpload(val blobId: String, val shared: Boolean)
 
 /** `GET /v2/blobs/{id}/status` response — iOS `V2.BlobStatus`, Android `V2BlobStatus`. */
 data class V2BlobStatus(val blobId: String, val missing: List<Int>, val committed: Boolean, val expiresAt: Double)
@@ -36,8 +54,10 @@ data class V2BlobStatus(val blobId: String, val missing: List<Int>, val committe
  *
  * Every route but reserve carries `x-oshi-user` (the server authorises owner-or-recipient);
  * `blobId` is NOT percent-encoded — the blob store does not decode its path segments and a
- * blob id is always server-generated hex/UUID, never user input (PLAN.md §4.1 is about
- * *identities* in a path, which blob ids are not).
+ * blob id is NOT percent-encoded because the blob store does not decode its path segments.
+ * A reservation is server-generated, but a download id arrives in a peer-supplied file-key
+ * message, so every public operation validates the conservative server-id alphabet before it
+ * builds or signs a path. A peer must never choose an authenticated relay route.
  *
  * THE CHUNK DOWNLOAD IS THE AWKWARD ONE, and it was fixed at the root rather than worked
  * around here. Its response is AES-GCM ciphertext, so it cannot come back through a
@@ -54,13 +74,18 @@ class V2BlobClient(
 ) {
     // ---- Routes ---------------------------------------------------------------------
 
-    /** Reserve a blob for one recipient. Returns null on any non-2xx / transport error. */
-    fun reserve(recipientKey: String, totalSize: Int, chunkCount: Int): V2Reservation? {
+    /**
+     * Reserve a blob for one recipient. Returns null on any non-2xx / transport error.
+     * __GROUP_BLOB_2026_11_25__ [recipientKeys] (a group's members) rides alongside; a server
+     * that stored it echoes `recipients`.
+     */
+    fun reserve(recipientKey: String, totalSize: Int, chunkCount: Int, recipientKeys: List<String>? = null): V2Reservation? {
         if (totalSize <= 0 || chunkCount < 1) return null
         if (totalSize > MAX_BLOB_BYTES) return null   // refuse before the round-trip, not after a 413
         val body = JSONObject().apply {
             put("ownerKey", identity.userKey)
             put("recipientKey", recipientKey)
+            if (recipientKeys != null) put("recipientKeys", JSONArray(recipientKeys))
             put("totalSize", totalSize)
             put("chunkCount", chunkCount)
         }.toString().toByteArray(Charsets.UTF_8)
@@ -73,9 +98,10 @@ class V2BlobClient(
         return try {
             val o = JSONObject(resp.body)
             V2Reservation(
-                blobId = o.getString("blobId"),
+                blobId = o.getString("blobId").takeIf(::isValidBlobId) ?: return null,
                 chunkSize = o.optInt("chunkSize", OSHICryptoV2.DEFAULT_CHUNK_SIZE),
                 missing = o.optJSONArray("missing").toIntList(),
+                recipients = if (o.has("recipients")) o.optInt("recipients", -1).takeIf { it >= 0 } else null,
             )
         } catch (e: Exception) {
             null
@@ -84,6 +110,7 @@ class V2BlobClient(
 
     /** PUT one chunk. Idempotent server-side, so a retry after an ambiguous drop is safe. */
     fun uploadChunk(blobId: String, index: Int, data: ByteArray): Boolean {
+        if (!isValidBlobId(blobId) || index < 0) return false
         val path = "/v2/blobs/$blobId/chunk/$index"
         // Verified BEFORE the streamed body is read ⇒ sign over `""`, not the chunk bytes —
         // V2Http.put's default bodyToHash arg is exactly that two-byte string, so it is not
@@ -93,6 +120,7 @@ class V2BlobClient(
 
     /** Non-destructive status: which chunk indices the server is still missing. */
     fun status(blobId: String): V2BlobStatus? {
+        if (!isValidBlobId(blobId)) return null
         val path = "/v2/blobs/$blobId/status"
         val resp = http.request(
             "GET", path,
@@ -103,8 +131,10 @@ class V2BlobClient(
         if (!resp.isSuccess) return null
         return try {
             val o = JSONObject(resp.body)
+            val responseId = o.optString("blobId", blobId)
+            if (responseId != blobId || !isValidBlobId(responseId)) return null
             V2BlobStatus(
-                blobId = o.optString("blobId", blobId),
+                blobId = responseId,
                 missing = o.optJSONArray("missing").toIntList(),
                 committed = o.optBoolean("committed", false),
                 expiresAt = o.optDouble("expiresAt", 0.0),
@@ -122,6 +152,7 @@ class V2BlobClient(
      * the steered one.
      */
     fun commit(blobId: String): Boolean {
+        if (!isValidBlobId(blobId)) return false
         val path = "/v2/blobs/$blobId/commit"
         // Commit DOES go through the server's JSON body reader ⇒ hash the actual (empty)
         // body, i.e. zero bytes — V2Http.postEmpty exists for exactly this shape.
@@ -130,19 +161,66 @@ class V2BlobClient(
 
     /** Download one chunk's opaque ciphertext-plus-tag. Null on any non-2xx / transport error. */
     fun downloadChunk(blobId: String, index: Int): ByteArray? {
-        if (index < 0) return null
-        val (code, bytes) = http.getBytes(
+        if (!isValidBlobId(blobId) || index < 0) return null
+        // __BLOB_RANGE_2026_11_19__ On a network that already showed a per-connection stall
+        // (ShortConnections window), fetch the chunk in parts small enough for one connection
+        // each. A whole-chunk read that dies at the transport level is retried in parts at once
+        // (the stall is what opens the window).
+        if (DesktopCover.ShortConnections.active()) return downloadChunkRanged(blobId, index)
+        val r = http.getRaw(
             path = "/v2/blobs/$blobId/chunk/$index",
             withUserHeader = true,
             // Verify-first route: the two-byte string `""`, not zero bytes.
             bodyToHash = DesktopV2Signer.EMPTY_JSON_STRING_BODY,
             timeout = CHUNK_TIMEOUT,
         )
-        return if (code in 200..299) bytes else null
+        if (r.isSuccess) return r.body
+        val f = r.failure ?: return null
+        if (!DesktopCover.ShortConnections.isTransportFailure(f)) return null
+        DesktopCover.ShortConnections.onFailure(f)
+        return downloadChunkRanged(blobId, index)
+    }
+
+    /**
+     * __BLOB_RANGE_2026_11_19__ `GET …/chunk/{i}?offset=&length=` until the whole chunk is in
+     * (docs/CENSORSHIP_2026_THREAT_MODEL.md §7). 206 + Content-Range = a part; 200 = an old
+     * server sent the whole chunk (used as is). Anything else fails the chunk exactly like a
+     * whole-chunk failure. Each part is a fresh signed request (new timestamp). The query is
+     * not signed (the signature covers the path only), as for every V2 route.
+     */
+    internal fun downloadChunkRanged(blobId: String, index: Int): ByteArray? {
+        val path = "/v2/blobs/$blobId/chunk/$index"
+        val part = BlobRange.partLength(coverOn = http.coverOn())
+        val out = java.io.ByteArrayOutputStream()
+        var offset = 0L
+        var parts = 0
+        while (parts++ < BlobRange.MAX_PARTS) {
+            // A part is an idempotent GET: a transport failure retries THAT part (up to
+            // [PART_ATTEMPTS]) instead of failing the chunk. Measured (netem loss10, 19/11): with
+            // ~45 parts per 120 KB photo and 10 % of requests reset, "one failure = start the
+            // chunk over" delivered 0/1 photos per run (0.9^45 ≈ 1 %).
+            var r = http.getRaw(path, "offset=$offset&length=$part", withUserHeader = true,
+                bodyToHash = DesktopV2Signer.EMPTY_JSON_STRING_BODY, timeout = CHUNK_TIMEOUT)
+            var attempt = 1
+            while (r.failure != null && attempt < PART_ATTEMPTS) {
+                DesktopCover.ShortConnections.onFailure(r.failure!!)
+                attempt++
+                r = http.getRaw(path, "offset=$offset&length=$part", withUserHeader = true,
+                    bodyToHash = DesktopV2Signer.EMPTY_JSON_STRING_BODY, timeout = CHUNK_TIMEOUT)
+            }
+            if (r.failure != null) { DesktopCover.ShortConnections.onFailure(r.failure!!); return null }
+            when (val j = BlobRange.accept(r.code, r.contentRange, offset, r.body.size)) {
+                BlobRange.Result.Whole -> return r.body
+                is BlobRange.Result.Part -> { out.write(r.body); offset = j.nextOffset; if (j.complete) return out.toByteArray() }
+                BlobRange.Result.Fail -> return null
+            }
+        }
+        return null
     }
 
     /** Delete-after-delivery. 404 counts as success — the blob is already gone. */
     fun delete(blobId: String): Boolean {
+        if (!isValidBlobId(blobId)) return false
         // V2Http.delete's own defaults are already this route's rules: hash `""`, carry
         // x-oshi-user. Nothing to override.
         val resp = http.delete("/v2/blobs/$blobId")
@@ -191,7 +269,41 @@ class V2BlobClient(
             ?: return null
         // A resumed reservation with NOTHING missing must not be re-uploaded whole.
         val resumed = resumeBlobId != null && reservation.blobId == resumeBlobId
+        return fill(reservation, resumed, chunks)
+    }
 
+    /**
+     * __GROUP_BLOB_2026_11_25__ ONE reservation + ONE upload for a whole group: [members] go in
+     * `recipientKeys`, `members[0]` also in `recipientKey` (all an older server reads).
+     * [resumeBlobId] = a SHARED reservation an earlier attempt made for these exact bytes.
+     */
+    fun uploadGroupBlob(
+        members: List<String>,
+        chunks: List<ByteArray>,
+        resumeBlobId: String? = null,
+        onReserved: ((String, Boolean) -> Unit)? = null,
+    ): V2GroupUpload? {
+        if (chunks.isEmpty() || members.isEmpty()) return null
+        val totalSize = chunks.sumOf { it.size }
+        val resumed = resumeBlobId?.let { id ->
+            val st = status(id)
+            when {
+                st == null -> null
+                st.committed -> V2Reservation(id, OSHICryptoV2.DEFAULT_CHUNK_SIZE, emptyList(), members.size)
+                st.missing.any { it < 0 || it >= chunks.size } -> null
+                else -> V2Reservation(id, OSHICryptoV2.DEFAULT_CHUNK_SIZE, st.missing, members.size)
+            }
+        }
+        val reservation = resumed
+            ?: reserve(members[0], totalSize, chunks.size, recipientKeys = members)
+                ?.also { onReserved?.invoke(it.blobId, isShared(it)) }
+            ?: return null
+        val blobId = fill(reservation, resumed != null, chunks) ?: return null
+        return V2GroupUpload(blobId, resumed != null || isShared(reservation))
+    }
+
+    /** PUT the reservation's missing chunks, top up from `/status`, commit. */
+    private fun fill(reservation: V2Reservation, resumed: Boolean, chunks: List<ByteArray>): String? {
         fun put(indices: List<Int>): Boolean {
             for (n in indices) {
                 if (n < 0 || n >= chunks.size) return false
@@ -224,7 +336,7 @@ class V2BlobClient(
      * here. Returns null if any chunk is missing, so the caller can hold the relay ack.
      */
     fun downloadBlob(blobId: String, chunkCount: Int): List<ByteArray>? {
-        if (chunkCount < 1) return null
+        if (!isValidBlobId(blobId) || chunkCount < 1) return null
         val out = ArrayList<ByteArray>(chunkCount)
         for (i in 0 until chunkCount) {
             out.add(downloadChunk(blobId, i) ?: return null)
@@ -240,7 +352,9 @@ class V2BlobClient(
      *
      * The bytes written are byte-identical to what [OSHICryptoV2.decryptFile] would return —
      * this is an internal restructuring, not a protocol change. [out] is deleted on any
-     * failure so a partial file can never be mistaken for media.
+     * failure so a partial file can never be mistaken for media. The authenticated manifest
+     * and the write sink both enforce [MAX_PLAINTEXT_BYTES]: a peer cannot use a receive-only
+     * file transfer to exceed the send-side media limit.
      *
      * @return the plaintext size, or null when a chunk was unavailable or the blob failed to
      *   open (the caller then holds the relay ack, exactly as before).
@@ -252,23 +366,44 @@ class V2BlobClient(
         fileNonce: ByteArray,
         manifest: ByteArray,
         out: File,
+        maxPlaintextBytes: Long = MAX_PLAINTEXT_BYTES.toLong(),
+        /**
+         * __LOCAL_DATA_AT_REST_2026_09_22__ How [out] is opened. `OshiClient` passes
+         * `MediaVault.sealingStream`, so the plaintext is re-sealed chunk by chunk as it
+         * arrives and never reaches the disk; the default writes plaintext (tests).
+         */
+        openSink: (File) -> java.io.OutputStream = { FileOutputStream(it) },
+        /**
+         * __GROUP_BLOB_2026_11_25__ where fetched ciphertext chunks wait for a resumed attempt
+         * ([V2PartialChunks]); null = no resume (tests, old callers).
+         */
+        partialRoot: File? = null,
     ): Long? {
-        if (chunkCount < 1) return null
+        if (!isValidBlobId(blobId) || chunkCount < 1 || maxPlaintextBytes < 0) return null
+        val partial = partialRoot?.let { V2PartialChunks(it, blobId) }
         return try {
+            // Open this before creating the destination or fetching a chunk. The streaming
+            // decryptor opens it again as part of its authenticated reassembly contract.
+            val info = OSHICryptoV2Streaming.openManifest(fileKey, fileNonce, manifest)
+            if (!isPlausibleManifest(info, chunkCount, maxPlaintextBytes)) return null
             out.parentFile?.mkdirs()
             var written = 0L
-            BufferedOutputStream(FileOutputStream(out)).use { sink ->
+            BufferedOutputStream(CappedOutputStream(openSink(out), maxPlaintextBytes)).use { sink ->
                 written = OSHICryptoV2Streaming.decryptToStream(
                     fileKey = fileKey,
                     fileNonce = fileNonce,
                     manifest = manifest,
                     out = sink,
                     expectedChunkCount = chunkCount,
-                ) { i -> downloadChunk(blobId, i) }
+                ) { i -> partial?.get(i) ?: downloadChunk(blobId, i)?.also { partial?.put(i, it) } }
             }
+            partial?.clear()
             written
         } catch (e: Throwable) {
             out.delete()
+            // A chunk that could not be fetched keeps what is on disk for the next attempt;
+            // a chunk or manifest that does not open must never be fed back in.
+            if (e !is IOException) partial?.clear()
             null
         }
     }
@@ -280,17 +415,104 @@ class V2BlobClient(
         /** iOS `V2.maxBlobBytes` / Android `MAX_BLOB_BYTES` = 200 MB + 1 MiB AEAD slack (V2ClientModels.swift:255). */
         const val MAX_BLOB_BYTES = 200 * 1024 * 1024 + 1024 * 1024
 
+        /** __GROUP_BLOB_2026_11_25__ the server stored our recipient list (it echoed `recipients`). */
+        internal fun isShared(r: V2Reservation): Boolean = r.recipients != null && r.recipients > 0
+
+        /** Server-issued IDs only: one URL segment, no escape or normalisation syntax. */
+        private val BLOB_ID = Regex("[A-Za-z0-9._-]{1,128}")
+
+        internal fun isValidBlobId(blobId: String): Boolean =
+            BLOB_ID.matches(blobId) && blobId != "." && blobId != ".."
+
+        /**
+         * Every shipped sender derives the chunk count from the plaintext length, rather than
+         * trusting a separately supplied count. Require the same relation before a receive
+         * loop: without it, a sender could authenticate a zero-byte chunk thousands of times
+         * and make the receiver issue one signed GET per declared phantom chunk.
+         */
+        internal fun isPlausibleManifest(
+            info: OSHICryptoV2Streaming.Manifest,
+            expectedChunkCount: Int,
+            maxPlaintextBytes: Long,
+        ): Boolean {
+            if (info.size <= 0 || info.size > maxPlaintextBytes || info.chunkSize <= 0) return false
+            // __MEDIA_PADDING_2026_11_10__ a padded file is sealed (and chunked) at `paddedSize`,
+            // which never exceeds the plaintext ceiling and never undercuts `size`.
+            val sealed = info.paddedSize ?: info.size
+            if (sealed < info.size || sealed > maxPlaintextBytes) return false
+            val chunkSize = info.chunkSize.toLong()
+            val expected = sealed / chunkSize + if (sealed % chunkSize == 0L) 0 else 1
+            return info.chunkCount == expectedChunkCount && expected == expectedChunkCount.toLong()
+        }
+
         /**
          * Per-CHUNK read timeout. A chunk is at most 2 MiB, but a phone uploading over a
          * weak uplink can take a while to have it available — and this is one chunk of a
          * transfer that resumes, so a timeout here costs a retry of 2 MiB, never the file.
          */
         private val CHUNK_TIMEOUT: Duration = Duration.ofSeconds(60)
+
+        /** __BLOB_RANGE_2026_11_19__ tries per ranged part before the chunk counts as failed. */
+        internal const val PART_ATTEMPTS = 3
     }
+}
+
+/** Refuses a malformed authenticated stream that writes more than its declared allowed size. */
+private class CappedOutputStream(
+    private val delegate: OutputStream,
+    private val maxBytes: Long,
+) : OutputStream() {
+    private var written = 0L
+
+    override fun write(b: Int) = write(byteArrayOf(b.toByte()))
+
+    override fun write(bytes: ByteArray, offset: Int, length: Int) {
+        require(offset >= 0 && length >= 0 && offset <= bytes.size - length) { "invalid write range" }
+        if (length.toLong() > maxBytes - written) {
+            throw IOException("plaintext exceeds $maxBytes bytes")
+        }
+        delegate.write(bytes, offset, length)
+        written += length.toLong()
+    }
+
+    override fun flush() = delegate.flush()
+
+    override fun close() = delegate.close()
 }
 
 /** Null-safe: a missing/absent `missing` array reads as "nothing reported", not a crash. */
 private fun JSONArray?.toIntList(): List<Int> {
     if (this == null) return emptyList()
     return (0 until length()).map { optInt(it) }
+}
+
+/**
+ * __GROUP_BLOB_2026_11_25__ RESUMABLE DOWNLOAD. Ciphertext chunks already fetched for a blob are
+ * kept under `root/<blobId>/<index>` until the whole file opened, so a download cut by a network
+ * loss or a quit restarts at the first chunk it does not have instead of chunk 0 (the relay ack
+ * is held, so the key message comes back). Opaque AEAD ciphertext under the message's file key;
+ * a corrupt chunk fails to open and the directory is dropped.
+ */
+internal class V2PartialChunks(root: File, blobId: String) {
+    val dir = File(root, blobId.filter { it.isLetterOrDigit() || it == '-' || it == '_' || it == '.' }.take(128))
+    fun get(i: Int): ByteArray? = File(dir, i.toString()).takeIf { it.isFile && it.length() > 0 }
+        ?.let { runCatching { it.readBytes() }.getOrNull() }
+    fun put(i: Int, b: ByteArray) {
+        runCatching {
+            dir.mkdirs()
+            val tmp = File(dir, "$i.tmp")
+            tmp.writeBytes(b)
+            if (!tmp.renameTo(File(dir, i.toString()))) tmp.delete()
+        }
+    }
+    fun count(): Int = dir.listFiles { f -> !f.name.endsWith(".tmp") }?.size ?: 0
+    fun clear() { runCatching { dir.deleteRecursively() } }
+
+    companion object {
+        /** Partial downloads nobody came back for in 7 days are dropped. */
+        const val MAX_AGE_MS = 7L * 24 * 60 * 60 * 1000
+        fun prune(root: File, now: Long = System.currentTimeMillis()) {
+            root.listFiles()?.forEach { if (now - it.lastModified() > MAX_AGE_MS) it.deleteRecursively() }
+        }
+    }
 }
